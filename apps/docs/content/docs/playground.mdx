@@ -1,0 +1,43 @@
+---
+title: Playground
+description: Type a message and see exactly what leaves the device. The assistant echoes back what it received, then it's rehydrated locally.
+---
+
+import { Playground } from '@/components/playground';
+
+Everything below runs **in your browser** — no server, no API key, nothing sent.
+Type a note, and the “assistant” replies with **exactly what it received**, so the
+middle panel is literally all a real LLM would ever see. Then it's rehydrated on
+device, back to your original.
+
+<Playground />
+
+## Try this
+
+- Leave the sample as-is: the **email** and **phone** become placeholders, but
+  the child's name (**Tomás**), the doctor (**Dra. Beatriz**) and the medication
+  (**Amoxicilina**) still leak — the deterministic layer only protects structured
+  data. That gap is real; see [Limitations](/docs/limitations).
+- Now add `Tomás` and `Amoxicilina` under **Protect extra terms** and send again —
+  they're redacted too. That's the [custom dictionary](/docs/detectors) closing
+  the gap for the “what”, not just the “who”.
+- Add a made-up IBAN or card number and watch the checksum-validated detectors
+  catch them.
+
+> In a real app the on-device [Rampart model](/docs/expo) adds names and
+> addresses automatically; this playground uses the deterministic layer only so
+> it stays instant and offline.
+
+## Testing your own chat UI
+
+shadcn's [`@shadcn/helpers`](https://ui.shadcn.com/docs/changelog/2026-07-helpers)
+`createChat()` lets you drive a real `useChat` lifecycle with no model or network —
+perfect for testing a chat UI wrapped with the
+[AI SDK adapter](/docs/adapters/ai-sdk):
+
+```ts
+import { createChat } from '@shadcn/helpers/ai-sdk';
+
+const chat = createChat().user('email ana@acme.com').assistant('Done!');
+// drive useChat({ messages: chat.get(0), transport: chat.transport() })
+```

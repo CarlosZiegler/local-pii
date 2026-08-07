@@ -2,6 +2,7 @@
   "title": "Documentation",
   "pages": [
     "index",
+    "playground",
     "concepts",
     "detectors",
     "strategies",
