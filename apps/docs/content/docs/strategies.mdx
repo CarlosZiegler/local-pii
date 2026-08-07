@@ -1,0 +1,68 @@
+---
+title: Placeholder Strategies
+description: sequential (default), hashed (keyed), and token (opaque) — which to use and why.
+---
+
+A **placeholder strategy** decides the token that replaces each value.
+
+| Strategy | Example | Cross-session stable | Best for |
+| --- | --- | :---: | --- |
+| `sequential()` | `[GIVEN_NAME_1]` | no | plain chat, debuggability |
+| `hashed({ secret })` | `[GIVEN_NAME_a3f2c1d0]` | yes | stable, readable-ish IDs |
+| `token()` | `PIIQ2X9K7M3TZ8R4EJ0V` | with `secret` | **tool calls, JSON, structured output** |
+
+```ts
+import { createAnonymizer, sequential, hashed, token } from "local-pii"
+
+createAnonymizer({ placeholders: sequential() }) // default
+createAnonymizer({ placeholders: hashed({ secret }) })
+createAnonymizer({ placeholders: token() })
+```
+
+## `sequential()` — the default
+
+`[TYPE_N]`, numbered per type. Leaks nothing (the number says nothing about the
+value), reads well, and short readable tokens are what LLMs reason about best.
+Stable within a session; resets across sessions.
+
+## `hashed({ secret })` — keyed, stable
+
+A keyed **HMAC** of the value, so the same value gets the same token across
+sessions and devices sharing the secret.
+
+> **Why keyed?** A plain hash of the value (`sha256(email)`) is a privacy leak:
+> placeholders reach the provider, and PII is low-entropy, so anyone can confirm
+> a guessed value offline by recomputing the hash. `hashed()` is HMAC-keyed with
+> a device-local secret that never leaves the device. Unkeyed hashing is not
+> offered. See [Security](/docs/security).
+
+Get a persisted device secret (Expo):
+
+```ts
+import { getOrCreateDeviceSecret } from "local-pii/expo"
+import { hashed } from "local-pii"
+
+const secret = await getOrCreateDeviceSecret() // expo-secure-store
+createAnonymizer({ placeholders: hashed({ secret }) })
+```
+
+## `token()` — opaque, mangling-tolerant
+
+`PII` + Crockford base32 — **no brackets, no underscores, no type name**.
+
+Use this whenever **tools** are involved or output is machine-parsed. Bracketed
+`[TYPE_N]` tokens get mangled by LLMs: case changes, markdown link collisions
+(`[x](…)`), translated type words, or being treated as a fill-in template slot.
+An opaque ID looks like data the model must copy verbatim, so it survives — and
+lenient decoding recovers `O`/`0` and `I`/`L`/`1` confusions.
+
+```ts
+import { token } from "local-pii"
+
+token()                       // random per value — leaks not even equality
+token({ secret })             // HMAC — stable across sessions/devices
+token({ bits: 100, prefix: "PII" })
+```
+
+It leaks nothing — not even the entity type. The `entities` array on the result
+still carries types for your UI.

@@ -1,0 +1,15 @@
+{
+  "title": "Documentation",
+  "pages": [
+    "index",
+    "concepts",
+    "detectors",
+    "strategies",
+    "tool-calls",
+    "adapters",
+    "expo",
+    "browser",
+    "security",
+    "limitations"
+  ]
+}

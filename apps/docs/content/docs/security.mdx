@@ -1,0 +1,47 @@
+---
+title: Security & Hashing
+description: What each strategy leaks, why unkeyed hashing is forbidden, and how to handle the mapping.
+---
+
+## The mapping is the secret
+
+`mapping` (`placeholder → original`) is the only thing that can reverse
+anonymization. Keep it **in memory**. Do not log it, send it to analytics or
+crash reporters, or persist it unless you must — and if you must, use the
+platform keystore (`expo-secure-store`), never plain storage.
+
+Also keep the **raw text** out of logs/analytics/crash reporters that run
+*before* anonymization.
+
+## What each strategy leaks to the provider
+
+| Strategy | Leaks the value? | Leaks equality? | Leaks the type? |
+| --- | :---: | :---: | :---: |
+| `sequential()` | no | within a session | yes (`[EMAIL_1]`) |
+| `hashed({ secret })` | no | yes (stable) | yes |
+| `token()` (random) | no | no | no |
+| `token({ secret })` | no | yes (stable) | no |
+
+"Leaks equality" = the provider can tell two mentions are the same entity.
+That's a feature for stable IDs, but it's more metadata than `sequential`
+within one session — which is why `sequential` stays the default.
+
+## Why unkeyed hashing is forbidden
+
+A plain hash of a value (`sha256(email)`) as a placeholder is a **privacy leak,
+worse than sequential numbering**:
+
+- Placeholders are sent to the provider.
+- PII is low-entropy — names, phones and emails are guessable/enumerable.
+- So anyone holding the placeholder can confirm a guessed value **offline** by
+  recomputing the hash (a rainbow/dictionary attack).
+
+local-pii therefore only offers **keyed** hashing (`hashed` / `token({ secret })`)
+using a random ≥128-bit secret generated on device (`getOrCreateDeviceSecret`)
+that never leaves it. Without the key, a correct guess is not verifiable.
+
+## Tool calls are a disclosure destination
+
+Rehydrating tool-call arguments hands your tool the real values — appropriate
+for your own code, a re-disclosure if the tool forwards data to a third party.
+See [Tool Calls](/docs/tool-calls).

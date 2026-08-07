@@ -1,0 +1,124 @@
+{
+  "name": "local-pii",
+  "version": "0.0.1",
+  "description": "On-device PII anonymization for Expo / React Native. Redact names, emails, phones and more locally before sending text to any LLM, then rehydrate the response. The mapping never leaves the device.",
+  "keywords": [
+    "expo",
+    "react-native",
+    "pii",
+    "privacy",
+    "anonymization",
+    "redaction",
+    "llm",
+    "onnx",
+    "on-device",
+    "gdpr"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "sideEffects": false,
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "react-native": "./dist/index.js",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./expo": {
+      "types": "./dist/expo.d.ts",
+      "import": "./dist/expo.js",
+      "require": "./dist/expo.cjs"
+    },
+    "./metro": {
+      "types": "./dist/metro.d.ts",
+      "import": "./dist/metro.js",
+      "require": "./dist/metro.cjs"
+    },
+    "./web": {
+      "types": "./dist/web.d.ts",
+      "import": "./dist/web.js",
+      "require": "./dist/web.cjs"
+    },
+    "./openai": {
+      "types": "./dist/openai.d.ts",
+      "import": "./dist/openai.js",
+      "require": "./dist/openai.cjs"
+    },
+    "./ai-sdk": {
+      "types": "./dist/ai-sdk.d.ts",
+      "import": "./dist/ai-sdk.js",
+      "require": "./dist/ai-sdk.cjs"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "rslib build",
+    "dev": "rslib build --watch",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint src",
+    "format": "prettier --write \"src/**/*.{ts,tsx}\""
+  },
+  "peerDependencies": {
+    "@local-pii/model-rampart": "*",
+    "ai": ">=6 <8",
+    "expo-asset": "*",
+    "expo-crypto": "*",
+    "expo-file-system": "*",
+    "expo-secure-store": "*",
+    "onnxruntime-react-native": "*",
+    "onnxruntime-web": "*",
+    "react-native": "*"
+  },
+  "peerDependenciesMeta": {
+    "@local-pii/model-rampart": {
+      "optional": true
+    },
+    "ai": {
+      "optional": true
+    },
+    "expo-asset": {
+      "optional": true
+    },
+    "expo-crypto": {
+      "optional": true
+    },
+    "expo-file-system": {
+      "optional": true
+    },
+    "expo-secure-store": {
+      "optional": true
+    },
+    "onnxruntime-react-native": {
+      "optional": true
+    },
+    "onnxruntime-web": {
+      "optional": true
+    },
+    "react-native": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@local-pii/model-rampart": "workspace:*",
+    "@microsoft/api-extractor": "^7.58.12",
+    "@rslib/core": "^0.23.2",
+    "@types/node": "^20",
+    "@workspace/typescript-config": "workspace:*",
+    "ai": "^7.0.57",
+    "fast-check": "^4.9.0",
+    "onnxruntime-node": "^1.27.0",
+    "onnxruntime-web": "^1.27.0",
+    "typescript": "^5",
+    "vitest": "^3.2.4",
+    "zod": "^3.25.0"
+  }
+}

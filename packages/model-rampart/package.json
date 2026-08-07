@@ -1,0 +1,18 @@
+{
+  "name": "@local-pii/model-rampart",
+  "version": "0.0.1",
+  "description": "Rampart Q4 ONNX PII model + tokenizer assets for local-pii. Model by National Design Studio, licensed CC BY 4.0.",
+  "license": "CC-BY-4.0",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "sideEffects": false,
+  "files": [
+    "assets",
+    "index.js",
+    "index.d.ts",
+    "NOTICE.md"
+  ],
+  "scripts": {
+    "fetch": "node ../../scripts/fetch-model.mjs"
+  }
+}

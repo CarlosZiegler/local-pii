@@ -1,0 +1,48 @@
+---
+title: Browser
+description: Run the same Rampart model in the browser with onnxruntime-web (WASM + WebGPU).
+---
+
+The pure-JS core already runs in the browser. For on-device NER in the browser,
+`local-pii/web` wires `onnxruntime-web` (WASM, with WebGPU when available) into
+the same model core the Expo and Node paths use.
+
+```bash
+bun add onnxruntime-web local-pii
+```
+
+## Zero-config
+
+```ts
+import { createAnonymizer } from "local-pii"
+import { rampartWeb } from "local-pii/web"
+
+const pii = createAnonymizer({ ner: rampartWeb() }) // fetches model + tokenizer from the HF CDN
+const { redactedText } = await pii.anonymize("Hi, I'm João Silva")
+```
+
+## Self-hosted (recommended for production)
+
+Copy the model + tokenizer into your `public/` dir and point at them — better
+for CSP and availability:
+
+```ts
+import { rampartWeb, rampartAssets } from "local-pii/web"
+
+createAnonymizer({
+  ner: rampartWeb({
+    model: "/models/rampart-q4.onnx",
+    vocab: rampartAssets.vocab,
+    labels: rampartAssets.labels,
+    wasmPaths: "/ort/", // where you serve the onnxruntime-web .wasm files
+    executionProviders: ["webgpu", "wasm"], // default; falls through to wasm
+  }),
+})
+```
+
+The model download itself contains no user data. The Rampart authors report
+in-browser latency of ~3.9 ms (WebGPU) / ~12.6 ms (WASM) for short text.
+
+> The WASM execution provider also runs under Node, which is how local-pii's own
+> test suite verifies the browser path detects the same entities as the native
+> runtime.

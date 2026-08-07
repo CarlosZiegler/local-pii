@@ -1,0 +1,48 @@
+---
+title: OpenAI & Grok / xAI
+description: A zero-dependency drop-in wrapper for the OpenAI SDK and any OpenAI-compatible provider.
+---
+
+`local-pii/openai` wraps an OpenAI **client instance** structurally, so it works
+with the OpenAI SDK and any OpenAI-compatible provider — **xAI/Grok**, Groq,
+Together, OpenRouter, Ollama — with **no dependency** on the `openai` package.
+
+## Usage
+
+```ts
+import OpenAI from "openai"
+import { withPiiOpenAI } from "local-pii/openai"
+
+const client = withPiiOpenAI(new OpenAI({ apiKey }))
+
+const res = await client.chat.completions.create({
+  model: "gpt-5.2",
+  messages: [{ role: "user", content: "email ana@acme.com" }],
+})
+// the provider saw a placeholder; res.choices[0].message.content has it back
+```
+
+### Grok / xAI
+
+Same wrapper, different `baseURL`:
+
+```ts
+const client = withPiiOpenAI(
+  new OpenAI({ baseURL: "https://api.x.ai/v1", apiKey: process.env.XAI_API_KEY }),
+)
+const res = await client.chat.completions.create({ model: "grok-4", messages, tools })
+```
+
+## What it does
+
+- **Requests** — deep-anonymizes `messages`: content strings, `tool` role
+  content (tool results), and assistant `tool_calls[].function.arguments`.
+- **Responses** — rehydrates `choices[].message.content` and each
+  `tool_calls[].function.arguments` (parse → deep-map → re-serialize).
+- **Streaming** (`stream: true`) — rehydrates `delta.content` across chunk
+  boundaries.
+
+Keep one wrapped client per conversation so the session's vault stays shared
+across the tool loop. Defaults to the opaque [`token()`](/docs/strategies)
+strategy. See [Tool Calls](/docs/tool-calls) for the manual loop with
+`createPiiChat`.
