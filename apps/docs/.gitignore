@@ -26,3 +26,6 @@ yarn-error.log*
 next-env.d.ts
 # static export output
 out/
+
+# self-hosted model assets (copy from @local-pii/model-rampart before build)
+public/models/
