@@ -1,0 +1,54 @@
+---
+title: Core Concepts
+description: The pipeline, sessions, the vault, the mapping, and the two trust boundaries local-pii supports.
+---
+
+## The pipeline
+
+Every `anonymize` call runs the same stages over your text:
+
+```text
+text ─▶ deterministic detectors (email, phone, card+Luhn, IBAN, SSN, IP, URL)
+     ─▶ dictionary (your own terms)
+     ─▶ vault dictionary (values already seen this session)
+     ─▶ NER model (names, addresses, IDs) — optional, on device
+     ─▶ resolve overlaps (priority: dictionary > deterministic > NER)
+     ─▶ placeholder engine ─▶ redacted text
+```
+
+Deterministic detectors are precise (checksum/structure validated), so they win
+over model guesses. Detections that overlap are resolved into one
+non-overlapping set before placeholders are assigned.
+
+## Vault, Mapping, Session
+
+- **Vault** — the in-memory store that assigns a **stable placeholder per
+  distinct value**. The same value always gets the same placeholder.
+- **Mapping** — a plain `Record<placeholder, original>` snapshot of the vault.
+  This is the secret. Hold it in memory; never serialize it off device.
+- **Session** — keeps one vault across many turns, so `João` is `[GIVEN_NAME_1]`
+  in every message of a conversation and across a whole tool loop.
+
+```ts
+const session = pii.createSession()
+await session.anonymize("First, about João…") // João → [GIVEN_NAME_1]
+await session.anonymize("Tell João I said hi") // João → [GIVEN_NAME_1] again
+session.rehydrate(assistantReply) // bound to this session's mapping
+```
+
+Two session behaviors make multi-step loops robust:
+
+- **Vault dictionary** — any value already seen is re-matched on later turns, so
+  a model that stops detecting a name can't renumber or leak it.
+- **Idempotence** — re-anonymizing already-redacted text is a no-op.
+
+## Trust boundaries
+
+The same code serves two deployment shapes:
+
+- **On device (Expo / browser)** — your app calls the provider directly, the
+  adapter runs in the app, and the mapping never leaves the device. This is
+  local-pii's home turf.
+- **Server-side (a Next.js route / gateway)** — the adapter runs on **your**
+  server; the mapping stays there and protects against the **provider**. Create
+  one session per request — never a module-level session shared across users.

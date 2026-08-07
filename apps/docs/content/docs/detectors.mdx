@@ -1,0 +1,71 @@
+---
+title: Detectors
+description: The built-in deterministic detectors, the custom dictionary, and writing your own.
+---
+
+## Built-in deterministic detectors
+
+Always on, precise, checksum/structure validated:
+
+| Detector | Type | Validation |
+| --- | --- | --- |
+| `emailDetector` | `EMAIL` | structural |
+| `phoneDetector` | `PHONE` | 7–15 digits, international formats |
+| `creditCardDetector` | `CREDIT_CARD` | 13–19 digits + Luhn |
+| `ibanDetector` | `IBAN` | ISO 7064 mod-97 |
+| `ssnDetector` | `SSN` | structural + reserved-range rejection |
+| `ipDetector` | `IP_ADDRESS` | IPv4 octet bounds, IPv6 |
+| `urlDetector` | `URL` | scheme / `www.` |
+
+Choose a subset:
+
+```ts
+import { createAnonymizer, emailDetector, phoneDetector } from "local-pii"
+
+createAnonymizer({ detectors: [emailDetector, phoneDetector] })
+createAnonymizer({ detectors: "none" }) // dictionary + NER only
+```
+
+## Custom dictionary
+
+Always redact your own terms — your name, family, employer, project code-names.
+Dictionary matches win over both the detectors and the model.
+
+```ts
+createAnonymizer({
+  dictionary: [
+    { value: "Projeto Fênix", type: "ORGANIZATION" },
+    { value: "Carlos Ziegler", type: "PERSON" },
+  ],
+})
+```
+
+Entries match case-insensitively and whole-word by default (both overridable
+per entry with `caseSensitive` / `wholeWord`).
+
+## Writing a detector
+
+A detector maps text to entities. Deterministic detectors are pure and sync:
+
+```ts
+import type { Detector } from "local-pii"
+
+const zipDetector: Detector = {
+  name: "us-zip",
+  type: "ZIP_CODE",
+  detect(text) {
+    const out = []
+    for (const m of text.matchAll(/\b\d{5}(?:-\d{4})?\b/g)) {
+      out.push({
+        start: m.index,
+        end: m.index + m[0].length,
+        text: m[0],
+        type: "ZIP_CODE",
+        source: "deterministic",
+        confidence: 1,
+      })
+    }
+    return out
+  },
+}
+```

@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "local-pii example",
+    "slug": "local-pii-example",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "scheme": "expopii",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "io.zietec.expopii.example"
+    },
+    "android": {
+      "package": "io.zietec.expopii.example"
+    },
+    "plugins": ["expo-secure-store"]
+  }
+}

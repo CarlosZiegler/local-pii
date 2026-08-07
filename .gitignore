@@ -43,3 +43,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# expo-pii: fetched model assets (run `bun run fetch-model`)
+packages/model-rampart/assets/

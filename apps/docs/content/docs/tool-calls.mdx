@@ -1,0 +1,69 @@
+---
+title: Tool Calls
+description: Why tool/function calling breaks naive anonymization, and how local-pii solves it end to end.
+---
+
+Tool calling is not an ordinary text round-trip. A single step crosses the trust
+boundary **four** times:
+
+```text
+user text ──anonymize──▶ provider
+provider ──tool_call { args JSON with placeholders }──▶ app   ← REHYDRATE args (your tool needs real data)
+app tool result (REAL data) ──anonymize──▶ provider           ← fresh PII enters mid-conversation
+provider ──final text──▶ app                                  ← rehydrate (often streamed)
+```
+
+## What breaks
+
+1. **Placeholders in argument JSON.** The model must copy the token byte-for-byte
+   into JSON it generates. Bracketed `[TYPE_N]` tokens get mangled — case changes,
+   markdown collisions, translated type words, or being treated as a slot to
+   fill with an invented value.
+2. **JSON validity.** String-substituting into serialized JSON breaks when a
+   restored value contains `"`, `\` or newlines. **Rule: always parse → deep-map
+   string leaves → re-serialize.** `rehydrateToolArgs` does exactly this, with a
+   raw fallback (and a `clean: false` flag) when the model emits invalid JSON.
+3. **Streaming splits.** A token can arrive as `[[EMA` then `IL_1]]`. The
+   streaming rehydrator holds back a tail until no placeholder can still be
+   growing into it.
+4. **Session drift.** If step N+1 re-anonymizes history and produces *different*
+   placeholders, the provider sees two names for one entity. The **vault
+   dictionary** + **idempotence** keep placeholders byte-stable across every step.
+
+## The rule
+
+> Everything crossing toward the provider is anonymized; everything handed back
+> to your code is rehydrated; one `PiiSession` spans the whole exchange so
+> re-anonymizing a rehydrated value reproduces the identical placeholder.
+
+Use the opaque [`token()`](/docs/strategies) strategy when tools are in play.
+
+## With an adapter (recommended)
+
+The [AI SDK](/docs/adapters/ai-sdk) and [OpenAI](/docs/adapters/openai) adapters
+implement the rule for you — the SDK's agent loop runs your tools with real
+values and no tool wrapper is needed.
+
+## By hand
+
+```ts
+import { createPiiChat } from "local-pii/openai"
+
+const chat = createPiiChat() // opaque tokens by default
+let messages = await chat.anonymizeMessages(userMessages)
+
+const res = await client.chat.completions.create({ model, messages, tools })
+const assistant = chat.rehydrateMessage(res.choices[0].message) // real tool-call args
+
+// run the tool with REAL args, then feed the (real-PII) result back:
+const toolResult = { role: "tool", tool_call_id: id, content: runTool(assistant) }
+messages = await chat.anonymizeMessages([...messages, assistant, toolResult])
+```
+
+## A caveat worth understanding
+
+A tool is a **separate disclosure destination**. Rehydrating tool-call arguments
+gives your tool the real values — correct when the tool is **your own code**
+(an on-device lookup, your backend). But if a tool forwards data to a
+**third party**, restoring PII into that call re-discloses it. Decide per tool
+whether it should see real values or keep the placeholders.

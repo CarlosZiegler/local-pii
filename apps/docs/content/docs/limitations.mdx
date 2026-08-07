@@ -1,0 +1,50 @@
+---
+title: Limitations
+description: What local-pii does NOT catch. Read this before you rely on it.
+---
+
+**PII removal is not perfect anonymization.** Treat local-pii as strong defense
+in depth, not a guarantee. These limits are real and some are asserted by the
+test suite so the docs stay honest.
+
+## Indirect identifiers pass through
+
+Removing name, email and phone does not de-identify:
+
+> "I'm the only Brazilian engineer at company X in Kempten, diagnosed yesterday
+> with a rare disease."
+
+No detector catches that. Mitigate with the [dictionary](/docs/detectors),
+`strict` mode, and a "private mode" that skips the API entirely for sensitive
+notes.
+
+## The model has a recall ceiling
+
+Rampart is a small model tuned for **Latin-script** languages. From its model
+card:
+
+- Private-term recall ~97–99% on EN/ES/FR/DE/IT/PT/NL.
+- **Non-Latin scripts (Cyrillic, CJK, Arabic): ~13.7%** — largely missed.
+- Government-style IDs rely on the model (~68%).
+
+Deterministic detectors have no such limit (they're checksum/structure based),
+which is why they run first and win overlaps.
+
+## Detection is not reversibility
+
+The [round-trip](/docs/tool-calls) is guaranteed regardless of what's detected:
+rehydrating restores exactly what was redacted. But something the detectors
+**miss** is never redacted — so it reaches the provider in the clear. Coverage
+and reversibility are separate concerns.
+
+## Choose the right token for the job
+
+Readable `[TYPE_N]` placeholders can collide with placeholder-shaped text
+already in the input, and LLMs mangle brackets in JSON/markdown/tool contexts.
+Use the opaque [`token()`](/docs/strategies) strategy for tool calls and
+machine-parsed output.
+
+## Community package
+
+`local-pii` is an independent community project — not affiliated with or endorsed
+by Expo, Vercel, OpenAI or National Design Studio.
