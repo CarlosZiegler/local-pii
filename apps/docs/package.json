@@ -6,6 +6,7 @@
     "build": "next build",
     "dev": "next dev -p 3001",
     "start": "next start -p 3001",
+    "deploy": "next build && bunx wrangler pages deploy out --project-name=local-pii-docs --branch=main --commit-dirty=true",
     "postinstall": "fumadocs-mdx"
   },
   "dependencies": {
