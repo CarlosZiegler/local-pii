@@ -29,7 +29,7 @@ provider ──final text──▶ app                                  ← rehy
    `IL_1]]`. O rehydrator de streaming retém uma cauda até que nenhum
    placeholder possa mais estar crescendo dentro dela.
 4. **Desvio de sessão.** Se o passo N+1 reanonimizar o histórico e produzir
-   placeholders *diferentes*, o provedor vê dois nomes para uma entidade. O
+   placeholders _diferentes_, o provedor vê dois nomes para uma entidade. O
    **vault dictionary** + **idempotência** mantêm os placeholders
    byte-estáveis em cada etapa.
 
@@ -61,7 +61,11 @@ const res = await client.chat.completions.create({ model, messages, tools })
 const assistant = chat.rehydrateMessage(res.choices[0].message) // real tool-call args
 
 // run the tool with REAL args, then feed the (real-PII) result back:
-const toolResult = { role: "tool", tool_call_id: id, content: runTool(assistant) }
+const toolResult = {
+  role: "tool",
+  tool_call_id: id,
+  content: runTool(assistant),
+}
 messages = await chat.anonymizeMessages([...messages, assistant, toolResult])
 ```
 

@@ -19,7 +19,7 @@ function fromHex(hex: string): Uint8Array {
  * The secret never leaves the device.
  */
 export async function getOrCreateDeviceSecret(
-  key: string = DEFAULT_KEY,
+  key: string = DEFAULT_KEY
 ): Promise<Uint8Array> {
   const stored = await getItemAsync(key)
   if (stored) return fromHex(stored)

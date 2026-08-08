@@ -9,7 +9,7 @@ import type { Mapping, RehydrateOptions } from "./types"
  */
 export async function anonymizeJson(
   redact: (text: string) => Promise<string>,
-  value: unknown,
+  value: unknown
 ): Promise<unknown> {
   if (typeof value === "string") return value.length > 0 ? redact(value) : value
   if (Array.isArray(value)) {
@@ -20,7 +20,8 @@ export async function anonymizeJson(
   }
   if (value && typeof value === "object") {
     const out: Record<string, unknown> = {}
-    for (const [k, v] of Object.entries(value)) out[k] = await anonymizeJson(redact, v)
+    for (const [k, v] of Object.entries(value))
+      out[k] = await anonymizeJson(redact, v)
     return out
   }
   return value
@@ -30,13 +31,17 @@ export async function anonymizeJson(
 export function rehydrateJson(
   value: unknown,
   mapping: Mapping,
-  opts?: RehydrateOptions,
+  opts?: RehydrateOptions
 ): unknown {
   if (typeof value === "string") return rehydrate(value, mapping, opts)
-  if (Array.isArray(value)) return value.map((v) => rehydrateJson(v, mapping, opts))
+  if (Array.isArray(value))
+    return value.map((v) => rehydrateJson(v, mapping, opts))
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([k, v]) => [k, rehydrateJson(v, mapping, opts)]),
+      Object.entries(value).map(([k, v]) => [
+        k,
+        rehydrateJson(v, mapping, opts),
+      ])
     )
   }
   return value
@@ -59,11 +64,14 @@ export interface RehydratedToolArgs {
 export function rehydrateToolArgs(
   argsJson: string,
   mapping: Mapping,
-  opts?: RehydrateOptions,
+  opts?: RehydrateOptions
 ): RehydratedToolArgs {
   try {
     const parsed: unknown = JSON.parse(argsJson)
-    return { args: JSON.stringify(rehydrateJson(parsed, mapping, opts)), clean: true }
+    return {
+      args: JSON.stringify(rehydrateJson(parsed, mapping, opts)),
+      clean: true,
+    }
   } catch {
     return { args: rehydrate(argsJson, mapping, opts), clean: false }
   }

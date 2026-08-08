@@ -20,9 +20,11 @@ describe("hashed", () => {
   it("is deterministic for the same value and secret", () => {
     const s = hashed({ secret: "device-secret" })
     expect(s.placeholderFor("PERSON", "Ana Silva", 1)).toBe(
-      s.placeholderFor("PERSON", "Ana Silva", 9),
+      s.placeholderFor("PERSON", "Ana Silva", 9)
     )
-    expect(s.placeholderFor("PERSON", "Ana Silva", 1)).toMatch(/^\[PERSON_[0-9a-f]{8}\]$/)
+    expect(s.placeholderFor("PERSON", "Ana Silva", 1)).toMatch(
+      /^\[PERSON_[0-9a-f]{8}\]$/
+    )
   })
 
   it("changes with the value and the secret, and never contains the raw value", () => {
@@ -36,7 +38,9 @@ describe("hashed", () => {
 
   it("honors the requested hex length", () => {
     const s = hashed({ secret: "k", length: 4 })
-    expect(s.placeholderFor("EMAIL", "a@b.io", 1)).toMatch(/^\[EMAIL_[0-9a-f]{4}\]$/)
+    expect(s.placeholderFor("EMAIL", "a@b.io", 1)).toMatch(
+      /^\[EMAIL_[0-9a-f]{4}\]$/
+    )
   })
 })
 
@@ -52,11 +56,11 @@ describe("token", () => {
 
   it("is random by default, deterministic with a secret", () => {
     expect(token().placeholderFor("P", "Ana", 1)).not.toBe(
-      token().placeholderFor("P", "Ana", 1),
+      token().placeholderFor("P", "Ana", 1)
     )
     const keyed = token({ secret: "device-secret" })
     expect(keyed.placeholderFor("PERSON", "Ana", 1)).toBe(
-      keyed.placeholderFor("PERSON", "Ana", 9),
+      keyed.placeholderFor("PERSON", "Ana", 9)
     )
   })
 

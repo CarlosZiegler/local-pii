@@ -21,8 +21,15 @@ async function collect<T>(iterable: AsyncIterable<T>): Promise<T[]> {
   return output
 }
 
-async function* emptyStream(): AsyncIterableIterator<StreamChunk> {
-  return
+function emptyStream(): AsyncIterableIterator<StreamChunk> {
+  return {
+    [Symbol.asyncIterator]() {
+      return this
+    },
+    async next() {
+      return { done: true as const, value: undefined }
+    },
+  }
 }
 
 function barrier(parties: number): () => Promise<void> {

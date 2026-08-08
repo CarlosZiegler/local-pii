@@ -65,9 +65,11 @@ export function rampartWeb(options: RampartWebOptions = {}): NerBackend {
 
       const model = options.model ?? `${HF}/onnx/model_q4.onnx`
       const vocab =
-        options.vocab ?? parseVocab(await fetchText(options.vocabUrl ?? `${HF}/vocab.txt`))
+        options.vocab ??
+        parseVocab(await fetchText(options.vocabUrl ?? `${HF}/vocab.txt`))
       const labels =
-        options.labels ?? parseLabels(await fetchText(options.labelsUrl ?? `${HF}/config.json`))
+        options.labels ??
+        parseLabels(await fetchText(options.labelsUrl ?? `${HF}/config.json`))
 
       inner = createRampartNer({
         ort,

@@ -16,7 +16,14 @@ function mockNer(fn: (text: string) => Entity[]): NerBackend {
 
 function span(text: string, needle: string, type: Entity["type"]): Entity {
   const start = text.indexOf(needle)
-  return { start, end: start + needle.length, text: needle, type, source: "ner", confidence: 0.99 }
+  return {
+    start,
+    end: start + needle.length,
+    text: needle,
+    type,
+    source: "ner",
+    confidence: 0.99,
+  }
 }
 
 const NOTE =
@@ -43,7 +50,7 @@ describe("createAnonymizer (deterministic)", () => {
   it("dedupes repeated values to one stable placeholder", async () => {
     const pii = createAnonymizer()
     const { redactedText, mapping } = await pii.anonymize(
-      "write to a@b.io and again a@b.io",
+      "write to a@b.io and again a@b.io"
     )
     expect(redactedText).toBe("write to [EMAIL_1] and again [EMAIL_1]")
     expect(Object.keys(mapping)).toEqual(["[EMAIL_1]"])
@@ -59,9 +66,13 @@ describe("createAnonymizer (deterministic)", () => {
     const pii = createAnonymizer({
       dictionary: [{ value: "Projeto Fênix", type: "ORGANIZATION" }],
     })
-    const { redactedText, mapping } = await pii.anonymize("lancei o Projeto Fênix ontem")
+    const { redactedText, mapping } = await pii.anonymize(
+      "lancei o Projeto Fênix ontem"
+    )
     expect(redactedText).toBe("lancei o [ORGANIZATION_1] ontem")
-    expect(rehydrate(redactedText, mapping)).toBe("lancei o Projeto Fênix ontem")
+    expect(rehydrate(redactedText, mapping)).toBe(
+      "lancei o Projeto Fênix ontem"
+    )
   })
 
   it("round-trips with the keyed hashed strategy", async () => {
@@ -77,7 +88,10 @@ describe("createAnonymizer (NER integration)", () => {
   it("merges NER names with deterministic detections and round-trips", async () => {
     const text = "João Silva ligou de joao@example.com"
     const pii = createAnonymizer({
-      ner: mockNer((t) => [span(t, "João", "GIVEN_NAME"), span(t, "Silva", "SURNAME")]),
+      ner: mockNer((t) => [
+        span(t, "João", "GIVEN_NAME"),
+        span(t, "Silva", "SURNAME"),
+      ]),
     })
     const { redactedText, mapping } = await pii.anonymize(text)
     expect(redactedText).toBe("[GIVEN_NAME_1] [SURNAME_1] ligou de [EMAIL_1]")
@@ -87,20 +101,31 @@ describe("createAnonymizer (NER integration)", () => {
 
   it("keeps CITY by default but redacts it when asked", async () => {
     const text = "moro em Kempten"
-    const kept = createAnonymizer({ ner: mockNer((t) => [span(t, "Kempten", "CITY")]) })
+    const kept = createAnonymizer({
+      ner: mockNer((t) => [span(t, "Kempten", "CITY")]),
+    })
     expect((await kept.anonymize(text)).redactedText).toBe(text)
 
     const redacted = createAnonymizer({
       ner: mockNer((t) => [span(t, "Kempten", "CITY")]),
       redact: ["CITY"],
     })
-    expect((await redacted.anonymize(text)).redactedText).toBe("moro em [CITY_1]")
+    expect((await redacted.anonymize(text)).redactedText).toBe(
+      "moro em [CITY_1]"
+    )
   })
 
   it("degrades to deterministic-only when NER fails (strict: false)", async () => {
     const onDegraded = vi.fn()
     const pii = createAnonymizer({
-      ner: { name: "boom", load: async () => { throw new Error("no model") }, detect: async () => [], dispose: async () => {} },
+      ner: {
+        name: "boom",
+        load: async () => {
+          throw new Error("no model")
+        },
+        detect: async () => [],
+        dispose: async () => {},
+      },
       onDegraded,
     })
     const { redactedText } = await pii.anonymize("call +49 151 12345678")
@@ -112,7 +137,14 @@ describe("createAnonymizer (NER integration)", () => {
   it("throws on NER failure when strict: true", async () => {
     const pii = createAnonymizer({
       strict: true,
-      ner: { name: "boom", load: async () => { throw new Error("no model") }, detect: async () => [], dispose: async () => {} },
+      ner: {
+        name: "boom",
+        load: async () => {
+          throw new Error("no model")
+        },
+        detect: async () => [],
+        dispose: async () => {},
+      },
     })
     await expect(pii.anonymize("x")).rejects.toThrow("no model")
   })

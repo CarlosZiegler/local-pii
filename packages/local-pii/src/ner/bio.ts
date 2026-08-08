@@ -11,7 +11,10 @@ export interface DecodeBioParams {
   readonly text: string
 }
 
-function argmaxSoftmax(scores: readonly number[]): { index: number; prob: number } {
+function argmaxSoftmax(scores: readonly number[]): {
+  index: number
+  prob: number
+} {
   let maxIndex = 0
   let max = -Infinity
   for (let i = 0; i < scores.length; i++) {
@@ -53,7 +56,8 @@ export function decodeBio(params: DecodeBioParams): Entity[] {
       text: text.slice(current.start, current.end),
       type: current.type,
       source: "ner",
-      confidence: current.probs.reduce((a, b) => a + b, 0) / current.probs.length,
+      confidence:
+        current.probs.reduce((a, b) => a + b, 0) / current.probs.length,
     })
     current = null
   }

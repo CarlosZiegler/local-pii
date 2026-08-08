@@ -11,10 +11,10 @@ describe("creditCardDetector", () => {
 
   it("detects a hyphenated number and a 15-digit Amex", () => {
     expect(creditCardDetector.detect("4111-1111-1111-1111")[0]?.text).toBe(
-      "4111-1111-1111-1111",
+      "4111-1111-1111-1111"
     )
     expect(creditCardDetector.detect("amex 3782 822463 10005")[0]?.text).toBe(
-      "3782 822463 10005",
+      "3782 822463 10005"
     )
   })
 

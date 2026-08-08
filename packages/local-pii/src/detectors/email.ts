@@ -7,7 +7,10 @@ import { makeRegexDetector } from "./_util"
  * match (e.g. "email a@b.com," stops at "com").
  */
 const DOMAIN_LABEL = `[^\\s@.,;:!?"'<>()\\[\\]]+`
-const EMAIL = new RegExp(`[^\\s@]+@${DOMAIN_LABEL}(?:\\.${DOMAIN_LABEL})+`, "gu")
+const EMAIL = new RegExp(
+  `[^\\s@]+@${DOMAIN_LABEL}(?:\\.${DOMAIN_LABEL})+`,
+  "gu"
+)
 
 export const emailDetector = makeRegexDetector({
   name: "email",

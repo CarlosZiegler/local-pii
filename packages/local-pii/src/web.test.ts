@@ -8,10 +8,16 @@ import type { NerBackend } from "./types"
 
 describe("asset parsing", () => {
   it("parses vocab.txt into an id-indexed array", () => {
-    expect(parseVocab("[PAD]\n[UNK]\nhello\n")).toEqual(["[PAD]", "[UNK]", "hello"])
+    expect(parseVocab("[PAD]\n[UNK]\nhello\n")).toEqual([
+      "[PAD]",
+      "[UNK]",
+      "hello",
+    ])
   })
   it("parses config.json id2label in id order", () => {
-    const json = JSON.stringify({ id2label: { "0": "O", "2": "I-X", "1": "B-X" } })
+    const json = JSON.stringify({
+      id2label: { "0": "O", "2": "I-X", "1": "B-X" },
+    })
     expect(parseLabels(json)).toEqual(["O", "B-X", "I-X"])
   })
 })
@@ -19,7 +25,7 @@ describe("asset parsing", () => {
 // Golden parity: the browser wiring (onnxruntime-web WASM EP) must detect the
 // same entities as the onnxruntime-node run — proven in Node with model bytes.
 const MODEL = fileURLToPath(
-  new URL("../../model-rampart/assets/rampart-q4.onnx", import.meta.url),
+  new URL("../../model-rampart/assets/rampart-q4.onnx", import.meta.url)
 )
 const suite = existsSync(MODEL) ? describe : describe.skip
 

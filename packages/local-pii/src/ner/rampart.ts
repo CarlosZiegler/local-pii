@@ -25,7 +25,7 @@ export interface OrtModule {
   Tensor: new (
     type: string,
     data: BigInt64Array,
-    dims: readonly number[],
+    dims: readonly number[]
   ) => OrtTensor
 }
 
@@ -46,7 +46,7 @@ export interface RampartNerConfig {
 function idTensor(ort: OrtModule, ids: readonly number[]): OrtTensor {
   if (typeof BigInt64Array === "undefined") {
     throw new Error(
-      "local-pii: BigInt64Array unavailable — enable it on this JS engine to run the Rampart model.",
+      "local-pii: BigInt64Array unavailable — enable it on this JS engine to run the Rampart model."
     )
   }
   const data = BigInt64Array.from(ids, (v) => BigInt(v))
@@ -71,7 +71,10 @@ export function createRampartNer(config: RampartNerConfig): NerBackend {
 
     async load() {
       if (session) return
-      session = await ort.InferenceSession.create(config.model, config.sessionOptions)
+      session = await ort.InferenceSession.create(
+        config.model,
+        config.sessionOptions
+      )
     },
 
     async detect(text: string): Promise<Entity[]> {
@@ -84,12 +87,18 @@ export function createRampartNer(config: RampartNerConfig): NerBackend {
         const feeds: Record<string, OrtTensor> = {}
         for (const name of s.inputNames) {
           if (name === "attention_mask") {
-            feeds[name] = idTensor(ort, window.map(() => 1))
+            feeds[name] = idTensor(
+              ort,
+              window.map(() => 1)
+            )
           } else if (name === "input_ids") {
             feeds[name] = idTensor(ort, ids)
           } else {
             // token_type_ids (or any other expected int64 input): zeros.
-            feeds[name] = idTensor(ort, window.map(() => 0))
+            feeds[name] = idTensor(
+              ort,
+              window.map(() => 0)
+            )
           }
         }
 
@@ -102,7 +111,8 @@ export function createRampartNer(config: RampartNerConfig): NerBackend {
         const logits: number[][] = []
         for (let i = 0; i < window.length; i++) {
           const row: number[] = new Array(numLabels)
-          for (let j = 0; j < numLabels; j++) row[j] = Number(flat[i * numLabels + j])
+          for (let j = 0; j < numLabels; j++)
+            row[j] = Number(flat[i * numLabels + j])
           logits.push(row)
         }
         entities.push(...decodeBio({ tokens: window, logits, labels, text }))

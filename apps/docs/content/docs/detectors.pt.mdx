@@ -7,15 +7,15 @@ description: Os detectores determinísticos embutidos, o dicionário customizado
 
 Sempre ativos, precisos, validados por checksum/estrutura:
 
-| Detector | Tipo | Validação |
-| --- | --- | --- |
-| `emailDetector` | `EMAIL` | estrutural |
-| `phoneDetector` | `PHONE` | 7–15 dígitos, formatos internacionais |
-| `creditCardDetector` | `CREDIT_CARD` | 13–19 dígitos + Luhn |
-| `ibanDetector` | `IBAN` | ISO 7064 mod-97 |
-| `ssnDetector` | `SSN` | estrutural + rejeição de faixa reservada |
-| `ipDetector` | `IP_ADDRESS` | limites de octeto IPv4, IPv6 |
-| `urlDetector` | `URL` | esquema / `www.` |
+| Detector             | Tipo          | Validação                                |
+| -------------------- | ------------- | ---------------------------------------- |
+| `emailDetector`      | `EMAIL`       | estrutural                               |
+| `phoneDetector`      | `PHONE`       | 7–15 dígitos, formatos internacionais    |
+| `creditCardDetector` | `CREDIT_CARD` | 13–19 dígitos + Luhn                     |
+| `ibanDetector`       | `IBAN`        | ISO 7064 mod-97                          |
+| `ssnDetector`        | `SSN`         | estrutural + rejeição de faixa reservada |
+| `ipDetector`         | `IP_ADDRESS`  | limites de octeto IPv4, IPv6             |
+| `urlDetector`        | `URL`         | esquema / `www.`                         |
 
 Escolha um subconjunto:
 

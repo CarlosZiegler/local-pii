@@ -9,7 +9,7 @@ import type { EncodedToken } from "../tokenizer/wordpiece"
  */
 export function chunkTokens(
   tokens: readonly EncodedToken[],
-  maxTokens = 512,
+  maxTokens = 512
 ): EncodedToken[][] {
   if (tokens.length === 0) return []
   const cls = tokens[0]!

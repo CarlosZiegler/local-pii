@@ -80,7 +80,8 @@ export function sha256(bytes: Uint8Array): Uint8Array {
 
   const out = new Uint8Array(32)
   new DataView(out.buffer).setUint32(0, h[0]!, false)
-  for (let i = 0; i < 8; i++) new DataView(out.buffer).setUint32(i * 4, h[i]!, false)
+  for (let i = 0; i < 8; i++)
+    new DataView(out.buffer).setUint32(i * 4, h[i]!, false)
   return out
 }
 
@@ -101,13 +102,13 @@ export function utf8(input: string): Uint8Array {
         0xf0 | (code >> 18),
         0x80 | ((code >> 12) & 0x3f),
         0x80 | ((code >> 6) & 0x3f),
-        0x80 | (code & 0x3f),
+        0x80 | (code & 0x3f)
       )
     } else {
       bytes.push(
         0xe0 | (code >> 12),
         0x80 | ((code >> 6) & 0x3f),
-        0x80 | (code & 0x3f),
+        0x80 | (code & 0x3f)
       )
     }
   }

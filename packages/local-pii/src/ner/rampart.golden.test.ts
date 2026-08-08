@@ -8,7 +8,7 @@ import type { NerBackend } from "../types"
 
 // Real-model tests: only run when the assets were fetched (`bun run fetch-model`).
 const MODEL = fileURLToPath(
-  new URL("../../../model-rampart/assets/rampart-q4.onnx", import.meta.url),
+  new URL("../../../model-rampart/assets/rampart-q4.onnx", import.meta.url)
 )
 const suite = existsSync(MODEL) ? describe : describe.skip
 
@@ -51,12 +51,12 @@ suite("Rampart ONNX NER (real model, onnxruntime-node)", () => {
     const entities = await ner.detect(text)
     // Offset integrity: every entity slices back to its own surface text.
     for (const e of entities) expect(text.slice(e.start, e.end)).toBe(e.text)
-    expect(entities.some((e) => e.type === "GIVEN_NAME" || e.type === "SURNAME")).toBe(
-      true,
-    )
     expect(
-      entities.some((e) => /João|Silva|Anna|Meyer/.test(e.text)),
+      entities.some((e) => e.type === "GIVEN_NAME" || e.type === "SURNAME")
     ).toBe(true)
+    expect(entities.some((e) => /João|Silva|Anna|Meyer/.test(e.text))).toBe(
+      true
+    )
   })
 
   it("anonymizes + round-trips a mixed note end-to-end", async () => {

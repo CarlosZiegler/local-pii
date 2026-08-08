@@ -6,8 +6,20 @@ import { rehydrate } from "./rehydrate"
 
 // Filler words that no detector should ever match (no @, digits, dots, brackets).
 const FILLERS = [
-  "ola", "meet", "call", "about", "tomorrow", "the", "project",
-  "please", "regarding", "send", "details", "to", "hey", "note",
+  "ola",
+  "meet",
+  "call",
+  "about",
+  "tomorrow",
+  "the",
+  "project",
+  "please",
+  "regarding",
+  "send",
+  "details",
+  "to",
+  "hey",
+  "note",
 ]
 const PII = [
   "a@b.io",
@@ -33,9 +45,9 @@ describe("round-trip invariant (property-based)", () => {
           const pii = createAnonymizer({ placeholders: token() })
           const { redactedText, mapping } = await pii.anonymize(text)
           return rehydrate(redactedText, mapping) === text
-        },
+        }
       ),
-      { numRuns: 300 },
+      { numRuns: 300 }
     )
   })
 

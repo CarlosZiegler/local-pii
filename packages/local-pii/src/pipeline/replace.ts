@@ -9,7 +9,7 @@ import type { Vault } from "./vault"
 export function redactText(
   text: string,
   entities: readonly Entity[],
-  vault: Vault,
+  vault: Vault
 ): string {
   let out = ""
   let cursor = 0

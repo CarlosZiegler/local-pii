@@ -21,7 +21,12 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
           const ph = wire.match(TOKEN)![0]
           return {
             content: [
-              { type: "tool-call" as const, toolCallId: "c1", toolName: "lookup", input: JSON.stringify({ email: ph }) },
+              {
+                type: "tool-call" as const,
+                toolCallId: "c1",
+                toolName: "lookup",
+                input: JSON.stringify({ email: ph }),
+              },
             ],
             finishReason: "tool-calls" as const,
             usage: { inputTokens: 1, outputTokens: 1, totalTokens: 2 },

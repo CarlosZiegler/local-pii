@@ -14,7 +14,8 @@ function mockNer(fn: (text: string) => Entity[]): NerBackend {
 describe("idempotence", () => {
   it("re-anonymizing already-redacted text changes nothing", async () => {
     const pii = createAnonymizer()
-    const once = (await pii.anonymize("mail a@b.io and call +49 151 12345678")).redactedText
+    const once = (await pii.anonymize("mail a@b.io and call +49 151 12345678"))
+      .redactedText
     const twice = (await pii.anonymize(once)).redactedText
     expect(twice).toBe(once)
   })
@@ -30,7 +31,16 @@ describe("vault-dictionary stability across a session", () => {
       const i = t.indexOf("João")
       return i < 0
         ? []
-        : [{ start: i, end: i + 4, text: "João", type: "GIVEN_NAME", source: "ner", confidence: 0.9 }]
+        : [
+            {
+              start: i,
+              end: i + 4,
+              text: "João",
+              type: "GIVEN_NAME",
+              source: "ner",
+              confidence: 0.9,
+            },
+          ]
     })
 
     const session = createAnonymizer({ ner }).createSession()
@@ -40,6 +50,8 @@ describe("vault-dictionary stability across a session", () => {
     // Second turn: NER returns nothing, but the vault-dictionary catches João.
     const t2 = await session.anonymize("later João emailed the team")
     expect(t2.redactedText).toBe("later [GIVEN_NAME_1] emailed the team")
-    expect(session.rehydrate(t2.redactedText)).toBe("later João emailed the team")
+    expect(session.rehydrate(t2.redactedText)).toBe(
+      "later João emailed the team"
+    )
   })
 })

@@ -140,7 +140,11 @@ export function runInlineTextStream(
         try {
           if (!upstreamDone) await upstream?.return?.()
         } catch (cleanupError) {
-          if (!failed) throw cleanupError
+          if (!failed) {
+            // Cleanup is the primary failure only when stream processing succeeded.
+            // eslint-disable-next-line no-unsafe-finally -- preserve the cleanup error contract
+            throw cleanupError
+          }
         } finally {
           if (resolved.owned) resolved.session.clear()
         }

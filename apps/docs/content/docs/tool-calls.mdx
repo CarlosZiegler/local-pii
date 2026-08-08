@@ -26,7 +26,7 @@ provider ──final text──▶ app                                  ← rehy
 3. **Streaming splits.** A token can arrive as `[[EMA` then `IL_1]]`. The
    streaming rehydrator holds back a tail until no placeholder can still be
    growing into it.
-4. **Session drift.** If step N+1 re-anonymizes history and produces *different*
+4. **Session drift.** If step N+1 re-anonymizes history and produces _different_
    placeholders, the provider sees two names for one entity. The **vault
    dictionary** + **idempotence** keep placeholders byte-stable across every step.
 
@@ -56,7 +56,11 @@ const res = await client.chat.completions.create({ model, messages, tools })
 const assistant = chat.rehydrateMessage(res.choices[0].message) // real tool-call args
 
 // run the tool with REAL args, then feed the (real-PII) result back:
-const toolResult = { role: "tool", tool_call_id: id, content: runTool(assistant) }
+const toolResult = {
+  role: "tool",
+  tool_call_id: id,
+  content: runTool(assistant),
+}
 messages = await chat.anonymizeMessages([...messages, assistant, toolResult])
 ```
 

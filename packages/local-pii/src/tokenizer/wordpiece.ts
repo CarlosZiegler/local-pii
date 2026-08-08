@@ -36,7 +36,7 @@ export interface BertTokenizer {
  */
 export function createBertTokenizer(
   vocab: readonly string[],
-  config: BertTokenizerConfig = {},
+  config: BertTokenizerConfig = {}
 ): BertTokenizer {
   const unk = config.unkToken ?? "[UNK]"
   const cls = config.clsToken ?? "[CLS]"
@@ -79,7 +79,13 @@ export function createBertTokenizer(
   function unkToken(piece: readonly NormChar[]): EncodedToken {
     const first = piece[0]!
     const last = piece[piece.length - 1]!
-    return { id: unkId, token: unk, start: first.start, end: last.end, special: false }
+    return {
+      id: unkId,
+      token: unk,
+      start: first.start,
+      end: last.end,
+      special: false,
+    }
   }
 
   function wordpiece(piece: readonly NormChar[], out: EncodedToken[]): void {

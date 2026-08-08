@@ -14,21 +14,41 @@ function ent(part: Partial<Entity> & Pick<Entity, "start" | "end">): Entity {
 
 describe("mergeEntities", () => {
   it("keeps disjoint entities and sorts them by start", () => {
-    const out = mergeEntities([ent({ start: 10, end: 12 }), ent({ start: 0, end: 3 })])
+    const out = mergeEntities([
+      ent({ start: 10, end: 12 }),
+      ent({ start: 0, end: 3 }),
+    ])
     expect(out.map((e) => e.start)).toEqual([0, 10])
   })
 
   it("drops the lower-priority entity on overlap (dictionary > deterministic > ner)", () => {
     const dict = ent({ start: 0, end: 5, source: "dictionary", type: "PERSON" })
-    const ner = ent({ start: 2, end: 9, source: "ner", type: "CITY", confidence: 0.9 })
+    const ner = ent({
+      start: 2,
+      end: 9,
+      source: "ner",
+      type: "CITY",
+      confidence: 0.9,
+    })
     const out = mergeEntities([ner, dict])
     expect(out).toHaveLength(1)
     expect(out[0]?.source).toBe("dictionary")
   })
 
   it("prefers deterministic over ner on overlap", () => {
-    const email = ent({ start: 3, end: 20, source: "deterministic", type: "EMAIL" })
-    const person = ent({ start: 0, end: 8, source: "ner", type: "GIVEN_NAME", confidence: 0.8 })
+    const email = ent({
+      start: 3,
+      end: 20,
+      source: "deterministic",
+      type: "EMAIL",
+    })
+    const person = ent({
+      start: 0,
+      end: 8,
+      source: "ner",
+      type: "GIVEN_NAME",
+      confidence: 0.8,
+    })
     const out = mergeEntities([email, person])
     expect(out).toHaveLength(1)
     expect(out[0]?.type).toBe("EMAIL")

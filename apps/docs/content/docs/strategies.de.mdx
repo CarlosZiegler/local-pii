@@ -5,11 +5,11 @@ description: sequential (Standard), hashed (keyed) und token (opak) — was wann
 
 Eine **Placeholder-Strategie** entscheidet, welches Token jeden Wert ersetzt.
 
-| Strategie | Beispiel | Sessionübergreifend stabil | Am besten für |
-| --- | --- | :---: | --- |
-| `sequential()` | `[GIVEN_NAME_1]` | nein | einfachen Chat, Debuggability |
-| `hashed({ secret })` | `[GIVEN_NAME_a3f2c1d0]` | ja | stabile, halbwegs lesbare IDs |
-| `token()` | `PIIQ2X9K7M3TZ8R4EJ0V` | mit `secret` | **Tool Calls, JSON, strukturierte Ausgabe** |
+| Strategie            | Beispiel                | Sessionübergreifend stabil | Am besten für                               |
+| -------------------- | ----------------------- | :------------------------: | ------------------------------------------- |
+| `sequential()`       | `[GIVEN_NAME_1]`        |            nein            | einfachen Chat, Debuggability               |
+| `hashed({ secret })` | `[GIVEN_NAME_a3f2c1d0]` |             ja             | stabile, halbwegs lesbare IDs               |
+| `token()`            | `PIIQ2X9K7M3TZ8R4EJ0V`  |        mit `secret`        | **Tool Calls, JSON, strukturierte Ausgabe** |
 
 ```ts
 import { createAnonymizer, sequential, hashed, token } from "local-pii"
@@ -64,8 +64,8 @@ deshalb — und ein nachsichtiges Decoding behebt `O`/`0`- und
 ```ts
 import { token } from "local-pii"
 
-token()                       // zufällig pro Wert — gibt nicht einmal Gleichheit preis
-token({ secret })             // HMAC — stabil über Sessions/Geräte hinweg
+token() // zufällig pro Wert — gibt nicht einmal Gleichheit preis
+token({ secret }) // HMAC — stabil über Sessions/Geräte hinweg
 token({ bits: 100, prefix: "PII" })
 ```
 

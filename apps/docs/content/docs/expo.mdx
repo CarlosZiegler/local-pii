@@ -34,11 +34,13 @@ import { createAnonymizer } from "local-pii"
 import { rampart } from "local-pii/expo"
 
 const pii = createAnonymizer({
-  ner: rampart({ model: require("@local-pii/model-rampart/assets/rampart-q4.onnx") }),
+  ner: rampart({
+    model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
+  }),
 })
 
 const { redactedText } = await pii.anonymize(
-  "Ontem encontrei João Silva na Müllerstraße 42.",
+  "Ontem encontrei João Silva na Müllerstraße 42."
 )
 // → "Ontem encontrei [GIVEN_NAME_1] [SURNAME_1] na [STREET_NAME_1] [BUILDING_NUMBER_1]."
 ```
@@ -50,8 +52,11 @@ calls `onDegraded` (set `strict: true` to throw instead):
 
 ```ts
 createAnonymizer({
-  ner: rampart({ model: require("@local-pii/model-rampart/assets/rampart-q4.onnx") }),
-  onDegraded: (e) => console.warn("PII model unavailable, rules only:", e.message),
+  ner: rampart({
+    model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
+  }),
+  onDegraded: (e) =>
+    console.warn("PII model unavailable, rules only:", e.message),
 })
 ```
 

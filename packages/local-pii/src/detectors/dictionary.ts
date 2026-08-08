@@ -16,7 +16,7 @@ interface CompiledEntry {
  * case-insensitive and whole-word by default; both are per-entry overridable.
  */
 export function createDictionaryDetector(
-  entries: readonly DictionaryEntry[],
+  entries: readonly DictionaryEntry[]
 ): Detector {
   const compiled: CompiledEntry[] = entries.map((entry) => {
     const body = escapeRegex(entry.value)

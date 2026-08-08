@@ -20,14 +20,28 @@ const VOCAB = [
 const tok = createBertTokenizer(VOCAB)
 
 function view(text: string) {
-  return tok.encode(text).map((t) => ({ token: t.token, start: t.start, end: t.end }))
+  return tok
+    .encode(text)
+    .map((t) => ({ token: t.token, start: t.start, end: t.end }))
 }
 
 describe("createBertTokenizer", () => {
   it("wraps output in [CLS]/[SEP] with zero-width special spans", () => {
     const out = tok.encode("hi")
-    expect(out[0]).toMatchObject({ token: "[CLS]", id: 2, start: 0, end: 0, special: true })
-    expect(out.at(-1)).toMatchObject({ token: "[SEP]", id: 3, start: 2, end: 2, special: true })
+    expect(out[0]).toMatchObject({
+      token: "[CLS]",
+      id: 2,
+      start: 0,
+      end: 0,
+      special: true,
+    })
+    expect(out.at(-1)).toMatchObject({
+      token: "[SEP]",
+      id: 3,
+      start: 2,
+      end: 2,
+      special: true,
+    })
   })
 
   it("greedy longest-match splits into ## continuations with correct offsets", () => {

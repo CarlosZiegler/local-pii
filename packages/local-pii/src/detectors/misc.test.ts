@@ -20,7 +20,9 @@ describe("ssnDetector", () => {
 
 describe("ipDetector", () => {
   it("detects a valid IPv4 address", () => {
-    expect(ipDetector.detect("host 192.168.0.1 up")[0]?.text).toBe("192.168.0.1")
+    expect(ipDetector.detect("host 192.168.0.1 up")[0]?.text).toBe(
+      "192.168.0.1"
+    )
   })
 
   it("rejects an out-of-range IPv4 address", () => {
@@ -42,7 +44,9 @@ describe("urlDetector", () => {
   })
 
   it("detects a bare www host", () => {
-    expect(urlDetector.detect("go to www.acme.io now")[0]?.text).toBe("www.acme.io")
+    expect(urlDetector.detect("go to www.acme.io now")[0]?.text).toBe(
+      "www.acme.io"
+    )
   })
 })
 
@@ -54,7 +58,9 @@ describe("phoneDetector", () => {
   })
 
   it("detects a US number with parentheses and hyphens", () => {
-    expect(phoneDetector.detect("(030) 555-1234 ext")[0]?.text).toBe("(030) 555-1234")
+    expect(phoneDetector.detect("(030) 555-1234 ext")[0]?.text).toBe(
+      "(030) 555-1234"
+    )
   })
 
   it("ignores short numbers like years", () => {

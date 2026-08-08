@@ -20,7 +20,10 @@ describe("withLocalPiiMetro", () => {
   })
 
   it("preserves other config keys", () => {
-    const out = withLocalPiiMetro({ projectRoot: "/x", resolver: { sourceExts: ["ts"] } })
+    const out = withLocalPiiMetro({
+      projectRoot: "/x",
+      resolver: { sourceExts: ["ts"] },
+    })
     expect(out.projectRoot).toBe("/x")
     expect(out.resolver?.sourceExts).toEqual(["ts"])
   })

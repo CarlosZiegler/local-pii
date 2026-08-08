@@ -14,12 +14,16 @@ describe("createPiiChat (tool-call cycle)", () => {
     expect(user!.content).not.toContain("ana@acme.com")
     const placeholder = Object.keys(chat.mapping)[0]!
     expect(user!.content).toContain(placeholder)
-    expect(chat.rehydrateText(user!.content!)).toBe("look up ana@acme.com please")
+    expect(chat.rehydrateText(user!.content!)).toBe(
+      "look up ana@acme.com please"
+    )
   })
 
   it("rehydrates placeholders inside tool-call argument JSON (keeping it valid)", async () => {
     const chat = createPiiChat()
-    await chat.anonymizeMessages([{ role: "user", content: "email ana@acme.com" }])
+    await chat.anonymizeMessages([
+      { role: "user", content: "email ana@acme.com" },
+    ])
     const placeholder = Object.keys(chat.mapping)[0]!
 
     // The model replies with a tool call whose JSON args reference the placeholder.
@@ -29,7 +33,10 @@ describe("createPiiChat (tool-call cycle)", () => {
         {
           id: "call_1",
           type: "function",
-          function: { name: "lookup", arguments: JSON.stringify({ email: placeholder }) },
+          function: {
+            name: "lookup",
+            arguments: JSON.stringify({ email: placeholder }),
+          },
         },
       ],
     }
@@ -40,12 +47,18 @@ describe("createPiiChat (tool-call cycle)", () => {
 
   it("keeps the placeholder stable when a tool RESULT re-introduces the same PII", async () => {
     const chat = createPiiChat()
-    await chat.anonymizeMessages([{ role: "user", content: "look up ana@acme.com" }])
+    await chat.anonymizeMessages([
+      { role: "user", content: "look up ana@acme.com" },
+    ])
     const placeholder = Object.keys(chat.mapping)[0]!
 
     // Our backend tool returns real PII; it must be redacted with the SAME vault.
     const [toolMsg] = await chat.anonymizeMessages([
-      { role: "tool", tool_call_id: "call_1", content: "found ana@acme.com in the CRM" },
+      {
+        role: "tool",
+        tool_call_id: "call_1",
+        content: "found ana@acme.com in the CRM",
+      },
     ])
     expect(toolMsg!.content).toContain(placeholder)
     expect(toolMsg!.content).not.toContain("ana@acme.com")
@@ -79,7 +92,10 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
                         {
                           id: "c1",
                           type: "function",
-                          function: { name: "lookup", arguments: JSON.stringify({ email: ph }) },
+                          function: {
+                            name: "lookup",
+                            arguments: JSON.stringify({ email: ph }),
+                          },
                         },
                       ],
                     },
@@ -90,7 +106,14 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
             const tool = messages.find((m) => m.role === "tool")!
             const phones = tool.content!.match(new RegExp(TOKEN, "g"))!
             return {
-              choices: [{ message: { role: "assistant", content: `Reachable at ${phones[1]}.` } }],
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    content: `Reachable at ${phones[1]}.`,
+                  },
+                },
+              ],
             }
           },
         },
@@ -98,10 +121,15 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     }
 
     const wrapped = withPiiOpenAI(client)
-    const messages: ChatMessage[] = [{ role: "user", content: "look up ana@acme.com" }]
+    const messages: ChatMessage[] = [
+      { role: "user", content: "look up ana@acme.com" },
+    ]
 
     // Step 1 → the model asks to call a tool; args come back with REAL values.
-    const r1 = (await wrapped.chat.completions.create({ model: "grok-4", messages })) as {
+    const r1 = (await wrapped.chat.completions.create({
+      model: "grok-4",
+      messages,
+    })) as {
       choices: Array<{ message: ChatMessage }>
     }
     const assistant = r1.choices[0]!.message
@@ -120,7 +148,9 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       model: "grok-4",
       messages: [...messages, assistant, toolResult],
     })) as { choices: Array<{ message: ChatMessage }> }
-    expect(r2.choices[0]!.message.content).toBe("Reachable at +49 151 12345678.")
+    expect(r2.choices[0]!.message.content).toBe(
+      "Reachable at +49 151 12345678."
+    )
 
     // LEAK SWEEP: no raw PII in anything the provider ever saw.
     const raw = ["ana@acme.com", "+49 151 12345678"]

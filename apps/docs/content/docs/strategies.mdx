@@ -5,11 +5,11 @@ description: sequential (default), hashed (keyed), and token (opaque) — which 
 
 A **placeholder strategy** decides the token that replaces each value.
 
-| Strategy | Example | Cross-session stable | Best for |
-| --- | --- | :---: | --- |
-| `sequential()` | `[GIVEN_NAME_1]` | no | plain chat, debuggability |
-| `hashed({ secret })` | `[GIVEN_NAME_a3f2c1d0]` | yes | stable, readable-ish IDs |
-| `token()` | `PIIQ2X9K7M3TZ8R4EJ0V` | with `secret` | **tool calls, JSON, structured output** |
+| Strategy             | Example                 | Cross-session stable | Best for                                |
+| -------------------- | ----------------------- | :------------------: | --------------------------------------- |
+| `sequential()`       | `[GIVEN_NAME_1]`        |          no          | plain chat, debuggability               |
+| `hashed({ secret })` | `[GIVEN_NAME_a3f2c1d0]` |         yes          | stable, readable-ish IDs                |
+| `token()`            | `PIIQ2X9K7M3TZ8R4EJ0V`  |    with `secret`     | **tool calls, JSON, structured output** |
 
 ```ts
 import { createAnonymizer, sequential, hashed, token } from "local-pii"
@@ -59,8 +59,8 @@ lenient decoding recovers `O`/`0` and `I`/`L`/`1` confusions.
 ```ts
 import { token } from "local-pii"
 
-token()                       // random per value — leaks not even equality
-token({ secret })             // HMAC — stable across sessions/devices
+token() // random per value — leaks not even equality
+token({ secret }) // HMAC — stable across sessions/devices
 token({ bits: 100, prefix: "PII" })
 ```
 

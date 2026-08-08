@@ -23,7 +23,10 @@ declare module "expo-asset" {
 
 declare module "expo-file-system" {
   export const cacheDirectory: string | null
-  export function copyAsync(options: { from: string; to: string }): Promise<void>
+  export function copyAsync(options: {
+    from: string
+    to: string
+  }): Promise<void>
 }
 
 declare module "expo-crypto" {

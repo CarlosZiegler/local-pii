@@ -24,7 +24,9 @@ describe("known limitations (characterization)", () => {
     const seq = await createAnonymizer().anonymize(text) // sequential (default)
     expect(rehydrate(seq.redactedText, seq.mapping)).not.toBe(text) // ⚠️ collision
 
-    const tok = await createAnonymizer({ placeholders: token() }).anonymize(text)
+    const tok = await createAnonymizer({ placeholders: token() }).anonymize(
+      text
+    )
     expect(rehydrate(tok.redactedText, tok.mapping)).toBe(text) // ✓ opaque tokens are safe
   })
 })

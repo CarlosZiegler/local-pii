@@ -27,7 +27,7 @@ describe("emailDetector", () => {
 
   it("excludes trailing sentence punctuation from the match", () => {
     expect(emailDetector.detect("mail anna@acme.com, please")[0]?.text).toBe(
-      "anna@acme.com",
+      "anna@acme.com"
     )
     expect(emailDetector.detect("(see bob@x.io).")[0]?.text).toBe("bob@x.io")
   })

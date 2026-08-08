@@ -346,7 +346,11 @@ export function restoreTanStackStream(
         try {
           if (!upstreamDone) await iterator.return?.()
         } catch (cleanupError) {
-          if (!failed) throw cleanupError
+          if (!failed) {
+            // Cleanup is the primary failure only when stream processing succeeded.
+            // eslint-disable-next-line no-unsafe-finally -- preserve the cleanup error contract
+            throw cleanupError
+          }
         }
       }
     },

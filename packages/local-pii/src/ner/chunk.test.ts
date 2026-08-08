@@ -34,7 +34,8 @@ describe("chunkTokens", () => {
   it("covers every content token across the windows", () => {
     const windows = chunkTokens(seq(10), 6) // capacity 4, stride 3
     const covered = new Set<string>()
-    for (const w of windows) for (const t of w) if (!t.special) covered.add(t.token)
+    for (const w of windows)
+      for (const t of w) if (!t.special) covered.add(t.token)
     expect(covered.size).toBe(10)
   })
 })

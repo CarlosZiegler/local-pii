@@ -7,7 +7,7 @@ describe("rehydrateJson", () => {
   it("deep-rehydrates string leaves, leaving keys and non-strings alone", () => {
     const out = rehydrateJson(
       { name: "PIIAAA", count: 3, arr: ["PIIBBB", true, null] },
-      mapping,
+      mapping
     )
     expect(out).toEqual({
       name: 'Ana "the boss"',
@@ -40,7 +40,11 @@ describe("rehydrateToolArgs", () => {
 describe("anonymizeJson", () => {
   it("redacts only string leaves via the provided redactor", async () => {
     const redact = async (s: string) => s.replace("a@b.io", "TOKEN")
-    const out = await anonymizeJson(redact, { to: "a@b.io", n: 1, tags: ["a@b.io"] })
+    const out = await anonymizeJson(redact, {
+      to: "a@b.io",
+      n: 1,
+      tags: ["a@b.io"],
+    })
     expect(out).toEqual({ to: "TOKEN", n: 1, tags: ["TOKEN"] })
   })
 })

@@ -34,7 +34,7 @@ import { createAnonymizer, rehydrate } from "local-pii"
 const pii = createAnonymizer()
 
 const { redactedText, mapping } = await pii.anonymize(
-  "Email me at ana@acme.com or call +49 151 12345678",
+  "Email me at ana@acme.com or call +49 151 12345678"
 )
 // redactedText → "Email me at [EMAIL_1] or call [PHONE_1]"
 
@@ -59,7 +59,9 @@ import { createAnonymizer } from "local-pii"
 import { rampart } from "local-pii/expo" // or: rampartWeb from "local-pii/web"
 
 const pii = createAnonymizer({
-  ner: rampart({ model: require("@local-pii/model-rampart/assets/rampart-q4.onnx") }),
+  ner: rampart({
+    model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
+  }),
 })
 // "Ontem encontrei João Silva" → "Ontem encontrei [GIVEN_NAME_1] [SURNAME_1]"
 ```

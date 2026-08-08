@@ -116,7 +116,7 @@ export function createAnonymizer(options: AnonymizerOptions = {}): Anonymizer {
           }
           status = "degraded"
           options.onDegraded?.(toError(e))
-        },
+        }
       )
     }
     await loadPromise
@@ -127,7 +127,9 @@ export function createAnonymizer(options: AnonymizerOptions = {}): Anonymizer {
     if (!(await ensureNerLoaded()) || !ner) return []
     try {
       const entities = await ner.detect(text)
-      return entities.filter((e) => e.confidence >= threshold && !keep.has(e.type))
+      return entities.filter(
+        (e) => e.confidence >= threshold && !keep.has(e.type)
+      )
     } catch (e) {
       if (strict) throw e
       status = "degraded"
@@ -136,7 +138,11 @@ export function createAnonymizer(options: AnonymizerOptions = {}): Anonymizer {
     }
   }
 
-  function finalize(text: string, entities: Entity[], vault: Vault): AnonymizeResult {
+  function finalize(
+    text: string,
+    entities: Entity[],
+    vault: Vault
+  ): AnonymizeResult {
     const merged = mergeEntities(entities)
     return {
       redactedText: redactText(text, merged, vault),
@@ -154,16 +160,23 @@ export function createAnonymizer(options: AnonymizerOptions = {}): Anonymizer {
     const known = vault.knownEntries()
     if (known.length === 0) return []
     const detector = createDictionaryDetector(
-      known.map((e) => ({ value: e.value, type: e.type })),
+      known.map((e) => ({ value: e.value, type: e.type }))
     )
     return detector.detect(text)
   }
 
-  async function anonymizeWith(text: string, vault: Vault): Promise<AnonymizeResult> {
+  async function anonymizeWith(
+    text: string,
+    vault: Vault
+  ): Promise<AnonymizeResult> {
     const deterministic = runDeterministic(text)
     const fromVault = vaultDictionaryDetect(text, vault)
     const nerEntities = ner ? await runNer(text) : []
-    return finalize(text, [...deterministic, ...fromVault, ...nerEntities], vault)
+    return finalize(
+      text,
+      [...deterministic, ...fromVault, ...nerEntities],
+      vault
+    )
   }
 
   return {

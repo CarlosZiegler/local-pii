@@ -7,15 +7,15 @@ description: The built-in deterministic detectors, the custom dictionary, and wr
 
 Always on, precise, checksum/structure validated:
 
-| Detector | Type | Validation |
-| --- | --- | --- |
-| `emailDetector` | `EMAIL` | structural |
-| `phoneDetector` | `PHONE` | 7–15 digits, international formats |
-| `creditCardDetector` | `CREDIT_CARD` | 13–19 digits + Luhn |
-| `ibanDetector` | `IBAN` | ISO 7064 mod-97 |
-| `ssnDetector` | `SSN` | structural + reserved-range rejection |
-| `ipDetector` | `IP_ADDRESS` | IPv4 octet bounds, IPv6 |
-| `urlDetector` | `URL` | scheme / `www.` |
+| Detector             | Type          | Validation                            |
+| -------------------- | ------------- | ------------------------------------- |
+| `emailDetector`      | `EMAIL`       | structural                            |
+| `phoneDetector`      | `PHONE`       | 7–15 digits, international formats    |
+| `creditCardDetector` | `CREDIT_CARD` | 13–19 digits + Luhn                   |
+| `ibanDetector`       | `IBAN`        | ISO 7064 mod-97                       |
+| `ssnDetector`        | `SSN`         | structural + reserved-range rejection |
+| `ipDetector`         | `IP_ADDRESS`  | IPv4 octet bounds, IPv6               |
+| `urlDetector`        | `URL`         | scheme / `www.`                       |
 
 Choose a subset:
 

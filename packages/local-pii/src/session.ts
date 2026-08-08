@@ -28,7 +28,7 @@ export interface PiiSession {
 
 export function createSession(
   strategy: PlaceholderStrategy,
-  anonymizeWith: (text: string, vault: Vault) => Promise<AnonymizeResult>,
+  anonymizeWith: (text: string, vault: Vault) => Promise<AnonymizeResult>
 ): PiiSession {
   const vault = new Vault(strategy)
   const session: PiiSession = {
@@ -38,7 +38,7 @@ export function createSession(
     anonymizeJson(value) {
       return anonymizeJson(
         async (text) => (await session.anonymize(text)).redactedText,
-        value,
+        value
       )
     },
     rehydrate(text, opts) {

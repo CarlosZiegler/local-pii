@@ -12,16 +12,16 @@ außer du musst — und wenn du musst, verwende den Plattform-Keystore
 (`expo-secure-store`), niemals einfachen Speicher.
 
 Halte außerdem den **Rohtext** aus Logs/Analytics/Crash-Reportern heraus, die
-*vor* der Anonymisierung laufen.
+_vor_ der Anonymisierung laufen.
 
 ## Was jede Strategie gegenüber dem Provider preisgibt
 
-| Strategie | Gibt den Wert preis? | Gibt Gleichheit preis? | Gibt den Typ preis? |
-| --- | :---: | :---: | :---: |
-| `sequential()` | nein | innerhalb einer Session | ja (`[EMAIL_1]`) |
-| `hashed({ secret })` | nein | ja (stabil) | ja |
-| `token()` (zufällig) | nein | nein | nein |
-| `token({ secret })` | nein | ja (stabil) | nein |
+| Strategie            | Gibt den Wert preis? | Gibt Gleichheit preis?  | Gibt den Typ preis? |
+| -------------------- | :------------------: | :---------------------: | :-----------------: |
+| `sequential()`       |         nein         | innerhalb einer Session |  ja (`[EMAIL_1]`)   |
+| `hashed({ secret })` |         nein         |       ja (stabil)       |         ja          |
+| `token()` (zufällig) |         nein         |          nein           |        nein         |
+| `token({ secret })`  |         nein         |       ja (stabil)       |        nein         |
 
 „Gibt Gleichheit preis" bedeutet: Der Provider kann erkennen, dass zwei
 Erwähnungen dieselbe Entität sind. Das ist ein Feature für stabile IDs, aber

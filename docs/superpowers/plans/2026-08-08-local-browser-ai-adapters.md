@@ -66,6 +66,7 @@
 ### Task 1: Complete and JSON inline execution
 
 **Files:**
+
 - Create: `packages/local-pii/src/inline.ts`
 - Create: `packages/local-pii/src/inline.test.ts`
 - Modify: `packages/local-pii/package.json`
@@ -116,7 +117,10 @@ export interface RunInlineOptions<Input, Protected, Output, Restored> {
   signal?: AbortSignal
   protect: (input: Input, context: InlineTransformContext) => Promise<Protected>
   call: (input: Protected, context: InlineContext) => Promise<Output>
-  restore: (output: Output, context: InlineTransformContext) => Promise<Restored> | Restored
+  restore: (
+    output: Output,
+    context: InlineTransformContext
+  ) => Promise<Restored> | Restored
 }
 ```
 
@@ -156,6 +160,7 @@ git commit -m "feat(local-pii): add inline execution adapter"
 ### Task 2: Streaming and cancellation for inline execution
 
 **Files:**
+
 - Modify: `packages/local-pii/src/inline.ts`
 - Modify: `packages/local-pii/src/inline.test.ts`
 
@@ -188,7 +193,7 @@ export interface RunInlineTextStreamOptions {
 }
 
 export function runInlineTextStream(
-  options: RunInlineTextStreamOptions,
+  options: RunInlineTextStreamOptions
 ): AsyncIterable<string>
 ```
 
@@ -218,6 +223,7 @@ git commit -m "feat(local-pii): stream inline responses safely"
 ### Task 3: TanStack AI text connection adapter
 
 **Files:**
+
 - Create: `packages/local-pii/src/tanstack-content.ts`
 - Create: `packages/local-pii/src/tanstack-stream.ts`
 - Create: `packages/local-pii/src/tanstack.ts`
@@ -275,7 +281,7 @@ export interface PiiConnectionOptions {
 
 export function piiConnection<T extends ConnectConnectionAdapter>(
   inner: T,
-  options: PiiConnectionOptions,
+  options: PiiConnectionOptions
 ): ConnectConnectionAdapter
 ```
 
@@ -311,6 +317,7 @@ git commit -m "feat(local-pii): add TanStack AI connection adapter"
 ### Task 4: TanStack tools, lifecycle, and concurrency hardening
 
 **Files:**
+
 - Modify: `packages/local-pii/src/tanstack-content.ts`
 - Modify: `packages/local-pii/src/tanstack-stream.ts`
 - Modify: `packages/local-pii/src/tanstack.test.ts`
@@ -363,6 +370,7 @@ git commit -m "feat(local-pii): protect TanStack tool streams"
 ### Task 5: Browser Prompt runtime and Gemma fallback
 
 **Files:**
+
 - Create: `apps/docs/components/playground/model/types.ts`
 - Create: `apps/docs/components/playground/model/prompt-runtime.ts`
 - Create: `apps/docs/components/playground/model/prompt-runtime.test.ts`
@@ -456,6 +464,7 @@ git commit -m "feat(docs): add local browser model runtime"
 ### Task 6: Direct TanStack Prompt API connection
 
 **Files:**
+
 - Create: `apps/docs/components/playground/model/tanstack-connection.ts`
 - Create: `apps/docs/components/playground/model/tanstack-connection.test.ts`
 
@@ -503,6 +512,7 @@ git commit -m "feat(docs): connect TanStack AI to Prompt API"
 ### Task 7: shadcn/AI Elements shell and Vercel AI SDK chat
 
 **Files:**
+
 - Create: `apps/docs/components/ai-elements/conversation.tsx`
 - Create: `apps/docs/components/ai-elements/message.tsx`
 - Create: `apps/docs/components/ai-elements/prompt-input.tsx`
@@ -567,6 +577,7 @@ git commit -m "feat(docs): add browser-only Vercel AI chat"
 ### Task 8: TanStack chat tab and playground orchestration
 
 **Files:**
+
 - Create: `apps/docs/components/playground/tanstack-chat.tsx`
 - Create: `apps/docs/components/playground/tanstack-chat.test.tsx`
 - Modify: `apps/docs/components/playground.tsx`
@@ -611,6 +622,7 @@ git commit -m "feat(docs): add TanStack AI browser chat"
 ### Task 9: Localized documentation, build, and smoke audit
 
 **Files:**
+
 - Modify: `apps/docs/content/docs/playground.mdx`
 - Modify: `apps/docs/content/docs/playground.pt.mdx`
 - Modify: `apps/docs/content/docs/playground.de.mdx`
@@ -655,7 +667,7 @@ Expected: the library artifacts and Fumadocs static `out` export are produced su
 
 Run the repository's `react-doctor` skill against `apps/docs`, fix actionable errors introduced by this feature, and rerun until no feature-owned error remains.
 
-- [ ] **Step 6: Run browser smoke tests**
+- [x] **Step 6: Run browser smoke tests**
 
 Serve the static docs export, open the localized playground in desktop Chrome, and verify:
 
@@ -672,9 +684,18 @@ Serve the static docs export, open the localized playground in desktop Chrome, a
 Fallback smoke evidence (2026-08-08): explicit Gemma activation downloaded the
 q4f16 artifacts, both framework tabs protected and restored email addresses,
 Stop and new chat worked, cached activation reused the artifacts without new
-Hugging Face requests, and no inference fetch/XHR was observed. The native
-Gemini Nano portion remains open because `LanguageModel.availability()` did not
-resolve in the available Chrome 151 environment.
+Hugging Face requests, and no inference fetch/XHR was observed.
+
+Native smoke evidence (2026-08-08): an isolated profile in the installed Google
+Chrome 151 returned `downloadable` immediately without experimental flags. The
+browser-managed Gemini Nano download reported progress, activation completed,
+and both the Vercel AI SDK and TanStack AI chats sent opaque email placeholders
+and restored the model output locally. Stop and new chat worked in both tabs,
+the English, Portuguese, and German routes rendered without page errors, and
+no request was captured during inference. A second launch of the downloaded
+profile returned `available` and generated successfully without flags. The
+earlier timeout was isolated to the automation-bundled Chromium binary rather
+than the application runtime or the installed Google Chrome.
 
 - [x] **Step 7: Perform final code review**
 

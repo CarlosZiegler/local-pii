@@ -33,12 +33,14 @@ export interface PiiChatOptions {
 function resolveSession(opts: PiiChatOptions): PiiSession {
   if (opts.session) return opts.session
   // Default to opaque tokens — they survive JSON/tool-call round-trips.
-  return (opts.anonymizer ?? createAnonymizer({ placeholders: token() })).createSession()
+  return (
+    opts.anonymizer ?? createAnonymizer({ placeholders: token() })
+  ).createSession()
 }
 
 async function anonymizeMessages(
   session: PiiSession,
-  messages: readonly ChatMessage[],
+  messages: readonly ChatMessage[]
 ): Promise<ChatMessage[]> {
   const out: ChatMessage[] = []
   for (const message of messages) {
@@ -49,8 +51,12 @@ async function anonymizeMessages(
     if (message.tool_calls) {
       next.tool_calls = []
       for (const call of message.tool_calls) {
-        const args = (await session.anonymize(call.function.arguments)).redactedText
-        next.tool_calls.push({ ...call, function: { ...call.function, arguments: args } })
+        const args = (await session.anonymize(call.function.arguments))
+          .redactedText
+        next.tool_calls.push({
+          ...call,
+          function: { ...call.function, arguments: args },
+        })
       }
     }
     out.push(next)
@@ -60,13 +66,18 @@ async function anonymizeMessages(
 
 function rehydrateArgs(session: PiiSession, argsJson: string): string {
   try {
-    return JSON.stringify(session.rehydrateJson(JSON.parse(argsJson), { lenient: true }))
+    return JSON.stringify(
+      session.rehydrateJson(JSON.parse(argsJson), { lenient: true })
+    )
   } catch {
     return session.rehydrate(argsJson, { lenient: true })
   }
 }
 
-function rehydrateMessage(session: PiiSession, message: ChatMessage): ChatMessage {
+function rehydrateMessage(
+  session: PiiSession,
+  message: ChatMessage
+): ChatMessage {
   const next: ChatMessage = { ...message }
   if (typeof message.content === "string") {
     next.content = session.rehydrate(message.content, { lenient: true })
@@ -74,7 +85,10 @@ function rehydrateMessage(session: PiiSession, message: ChatMessage): ChatMessag
   if (message.tool_calls) {
     next.tool_calls = message.tool_calls.map((call) => ({
       ...call,
-      function: { ...call.function, arguments: rehydrateArgs(session, call.function.arguments) },
+      function: {
+        ...call.function,
+        arguments: rehydrateArgs(session, call.function.arguments),
+      },
     }))
   }
   return next
@@ -118,9 +132,12 @@ interface OpenAILike {
 
 async function* wrapStream(
   stream: AsyncIterable<unknown>,
-  session: PiiSession,
+  session: PiiSession
 ): AsyncIterable<unknown> {
-  const rehydrators = new Map<number, ReturnType<typeof createStreamingRehydrator>>()
+  const rehydrators = new Map<
+    number,
+    ReturnType<typeof createStreamingRehydrator>
+  >()
   const rehydratorFor = (i: number) => {
     let r = rehydrators.get(i)
     if (!r) {
@@ -131,14 +148,19 @@ async function* wrapStream(
   }
 
   for await (const raw of stream) {
-    const chunk = raw as { choices?: Array<{ index?: number; delta?: { content?: string | null } }> }
+    const chunk = raw as {
+      choices?: Array<{ index?: number; delta?: { content?: string | null } }>
+    }
     if (chunk.choices) {
       chunk.choices = chunk.choices.map((choice) => {
         const delta = choice.delta
         if (delta && typeof delta.content === "string") {
           return {
             ...choice,
-            delta: { ...delta, content: rehydratorFor(choice.index ?? 0).push(delta.content) },
+            delta: {
+              ...delta,
+              content: rehydratorFor(choice.index ?? 0).push(delta.content),
+            },
           }
         }
         return choice
@@ -165,18 +187,25 @@ async function* wrapStream(
  * const res = await client.chat.completions.create({ model: "grok-4", messages, tools })
  * ```
  */
-export function withPiiOpenAI<T extends OpenAILike>(client: T, opts: PiiChatOptions = {}): T {
+export function withPiiOpenAI<T extends OpenAILike>(
+  client: T,
+  opts: PiiChatOptions = {}
+): T {
   const session = resolveSession(opts)
   const create = client.chat.completions.create.bind(client.chat.completions)
 
   const wrappedCreate = async (params: Record<string, unknown>) => {
-    const messages = await anonymizeMessages(session, (params.messages as ChatMessage[]) ?? [])
+    const messages = await anonymizeMessages(
+      session,
+      (params.messages as ChatMessage[]) ?? []
+    )
     const result = await create({ ...params, messages })
-    if (params.stream) return wrapStream(result as AsyncIterable<unknown>, session)
+    if (params.stream)
+      return wrapStream(result as AsyncIterable<unknown>, session)
     const res = result as { choices?: Array<{ message?: ChatMessage }> }
     if (res.choices) {
       res.choices = res.choices.map((c) =>
-        c.message ? { ...c, message: rehydrateMessage(session, c.message) } : c,
+        c.message ? { ...c, message: rehydrateMessage(session, c.message) } : c
       )
     }
     return res
@@ -189,7 +218,11 @@ export function withPiiOpenAI<T extends OpenAILike>(client: T, opts: PiiChatOpti
       },
     })
 
-  const completions = proxyPath(client.chat.completions, "create", wrappedCreate)
+  const completions = proxyPath(
+    client.chat.completions,
+    "create",
+    wrappedCreate
+  )
   const chat = proxyPath(client.chat, "completions", completions)
   return proxyPath(client, "chat", chat) as T
 }

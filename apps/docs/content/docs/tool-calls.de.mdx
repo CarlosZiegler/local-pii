@@ -29,7 +29,7 @@ provider ──final text──▶ app                                  ← rehy
    ankommen. Der Streaming-Rehydrator hält ein Tail-Ende zurück, solange ein
    Platzhalter noch weiterwachsen könnte.
 4. **Session-Drift.** Wenn Schritt N+1 die Historie erneut anonymisiert und
-   dabei *andere* Platzhalter erzeugt, sieht der Provider zwei Namen für eine
+   dabei _andere_ Platzhalter erzeugt, sieht der Provider zwei Namen für eine
    Entität. Das **Vault Dictionary** + **Idempotenz** halten Platzhalter über
    jeden Schritt hinweg byte-stabil.
 
@@ -61,7 +61,11 @@ const res = await client.chat.completions.create({ model, messages, tools })
 const assistant = chat.rehydrateMessage(res.choices[0].message) // echte Tool-Call-Argumente
 
 // das Tool mit ECHTEN Argumenten ausführen, dann das (echte-PII-)Ergebnis zurückspeisen:
-const toolResult = { role: "tool", tool_call_id: id, content: runTool(assistant) }
+const toolResult = {
+  role: "tool",
+  tool_call_id: id,
+  content: runTool(assistant),
+}
 messages = await chat.anonymizeMessages([...messages, assistant, toolResult])
 ```
 

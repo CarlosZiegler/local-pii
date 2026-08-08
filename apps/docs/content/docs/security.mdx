@@ -11,16 +11,16 @@ crash reporters, or persist it unless you must — and if you must, use the
 platform keystore (`expo-secure-store`), never plain storage.
 
 Also keep the **raw text** out of logs/analytics/crash reporters that run
-*before* anonymization.
+_before_ anonymization.
 
 ## What each strategy leaks to the provider
 
-| Strategy | Leaks the value? | Leaks equality? | Leaks the type? |
-| --- | :---: | :---: | :---: |
-| `sequential()` | no | within a session | yes (`[EMAIL_1]`) |
-| `hashed({ secret })` | no | yes (stable) | yes |
-| `token()` (random) | no | no | no |
-| `token({ secret })` | no | yes (stable) | no |
+| Strategy             | Leaks the value? | Leaks equality?  |  Leaks the type?  |
+| -------------------- | :--------------: | :--------------: | :---------------: |
+| `sequential()`       |        no        | within a session | yes (`[EMAIL_1]`) |
+| `hashed({ secret })` |        no        |   yes (stable)   |        yes        |
+| `token()` (random)   |        no        |        no        |        no         |
+| `token({ secret })`  |        no        |   yes (stable)   |        no         |
 
 "Leaks equality" = the provider can tell two mentions are the same entity.
 That's a feature for stable IDs, but it's more metadata than `sequential`
