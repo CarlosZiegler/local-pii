@@ -15,7 +15,11 @@ Use o adapter inline com qualquer API de modelo no mesmo processo. Ele garante
 a ordem proteger → chamar → restaurar e encaminha o mesmo `AbortSignal`:
 
 ```ts
-import { runInlineText, runInlineTextStream } from "local-pii/inline"
+import {
+  runInlineJson,
+  runInlineText,
+  runInlineTextStream,
+} from "local-pii/inline"
 
 const answer = await runInlineText({
   input: "Email ana@acme.com",
@@ -30,6 +34,12 @@ for await (const delta of runInlineTextStream({
     localModel.stream(protectedText, { signal }),
 }))
   render(delta)
+
+const extracted = await runInlineJson({
+  input: { contact: "ana@acme.com", request: "Resuma este contato" },
+  call: (protectedValue, { signal }) =>
+    localModel.extract(protectedValue, { signal }),
+})
 ```
 
 `runInlineJson` protege valores estruturados profundamente sem mutação. Uma
@@ -71,6 +81,9 @@ const { textStream } = streamText({ model, prompt })
 
 Crie uma sessão por conversa (uma por requisição em um servidor):
 `withPii(model, { session })`.
+
+O playground no navegador fixa `ai@7.0.57`, `@ai-sdk/react@4.0.61` e
+`@browser-ai/core@3.0.0` para esse pipeline direto no cliente.
 
 ## OpenAI & Grok / xAI — `local-pii/openai`
 

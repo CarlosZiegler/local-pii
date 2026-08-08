@@ -15,7 +15,11 @@ Use the inline adapter for any in-process model API. It owns the strict
 protect → call → restore order and forwards the same `AbortSignal`:
 
 ```ts
-import { runInlineText, runInlineTextStream } from "local-pii/inline"
+import {
+  runInlineJson,
+  runInlineText,
+  runInlineTextStream,
+} from "local-pii/inline"
 
 const answer = await runInlineText({
   input: "Email ana@acme.com",
@@ -30,6 +34,12 @@ for await (const delta of runInlineTextStream({
     localModel.stream(protectedText, { signal }),
 }))
   render(delta)
+
+const extracted = await runInlineJson({
+  input: { contact: "ana@acme.com", request: "Summarize this contact" },
+  call: (protectedValue, { signal }) =>
+    localModel.extract(protectedValue, { signal }),
+})
 ```
 
 `runInlineJson` deep-protects structured values without mutating them. An
@@ -70,6 +80,9 @@ const { textStream } = streamText({ model, prompt })
 
 Create one session per conversation (per request on a server):
 `withPii(model, { session })`.
+
+The browser playground pins `ai@7.0.57`, `@ai-sdk/react@4.0.61`, and
+`@browser-ai/core@3.0.0` for this direct client-side pipeline.
 
 ## OpenAI & Grok / xAI — `local-pii/openai`
 
