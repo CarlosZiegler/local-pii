@@ -19,6 +19,7 @@ export interface LanguageModelFactory {
 }
 
 export interface PromptRuntimeDependencies {
+  availabilityTimeoutMs?: number
   configureFallback?: () => void
   getNative?: () => LanguageModelFactory | undefined
   loadFallback: () => Promise<LanguageModelFactory>
@@ -78,6 +79,7 @@ const METADATA: Record<LocalRuntimeKind, LocalRuntimeMetadata> = {
 export function createPromptRuntimeController(
   dependencies: PromptRuntimeDependencies
 ): PromptRuntimeController {
+  const availabilityTimeoutMs = dependencies.availabilityTimeoutMs ?? 5_000
   const listeners = new Set<() => void>()
   let snapshot: LocalRuntimeSnapshot = { status: "checking" }
 
@@ -136,7 +138,22 @@ export function createPromptRuntimeController(
           publish({ status: "fallback-available" })
           return
         }
-        const nativeAvailability = await native.availability(TEXT_EXPECTATIONS)
+        let timeout: ReturnType<typeof setTimeout> | undefined
+        const nativeAvailability = await Promise.race([
+          native.availability(TEXT_EXPECTATIONS),
+          new Promise<"timeout">((resolve) => {
+            timeout = setTimeout(
+              () => resolve("timeout"),
+              availabilityTimeoutMs
+            )
+          }),
+        ]).finally(() => {
+          if (timeout) clearTimeout(timeout)
+        })
+        if (nativeAvailability === "timeout") {
+          publish({ status: "fallback-available" })
+          return
+        }
         publish({
           nativeAvailability,
           status:

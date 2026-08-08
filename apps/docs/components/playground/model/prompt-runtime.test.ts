@@ -70,6 +70,23 @@ describe("Prompt runtime controller", () => {
     })
   })
 
+  it("offers the fallback when native capability detection stalls", async () => {
+    const native = {
+      availability: vi.fn(() => new Promise<Availability>(() => {})),
+      create: vi.fn(),
+    }
+    const controller = createPromptRuntimeController({
+      availabilityTimeoutMs: 1,
+      getNative: () => native,
+      loadFallback: vi.fn(),
+    })
+
+    await controller.check()
+
+    expect(controller.getSnapshot()).toEqual({ status: "fallback-available" })
+    expect(native.create).not.toHaveBeenCalled()
+  })
+
   it("activates native only on request and exposes a reusable runtime", async () => {
     const native = factory("downloadable")
     const controller = createPromptRuntimeController({
