@@ -351,6 +351,60 @@ describe("piiConnection text streaming", () => {
     }
   })
 
+  it("normalizes cumulative-only provider content before restoration", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const inner: ConnectConnectionAdapter = {
+      connect(messages) {
+        const content = (messages[0] as ModelMessage).content as string
+        const placeholder = content.match(TOKEN)?.[0]
+        expect(placeholder).toBeDefined()
+
+        return (async function* () {
+          yield {
+            type: EventType.TEXT_MESSAGE_CONTENT,
+            messageId: "message-1",
+            delta: "",
+            content: `Answer ${placeholder!.slice(0, 5)}`,
+          } satisfies StreamChunk
+          yield {
+            type: EventType.TEXT_MESSAGE_CONTENT,
+            messageId: "message-1",
+            delta: "",
+            content: `Answer ${placeholder!}`,
+          } satisfies StreamChunk
+          yield {
+            type: EventType.TEXT_MESSAGE_END,
+            messageId: "message-1",
+          } satisfies StreamChunk
+        })()
+      },
+    }
+
+    const chunks = await collect(
+      piiConnection(inner, { session }).connect([
+        { role: "user", content: "Email ana@acme.com" },
+      ])
+    )
+    const output = chunks
+      .filter(
+        (
+          chunk
+        ): chunk is Extract<
+          StreamChunk,
+          { type: EventType.TEXT_MESSAGE_CONTENT }
+        > => chunk.type === EventType.TEXT_MESSAGE_CONTENT
+      )
+      .map((chunk) => chunk.delta)
+      .join("")
+
+    expect(output).toBe("Answer ana@acme.com")
+    expect(
+      chunks
+        .filter((chunk) => chunk.type === EventType.TEXT_MESSAGE_CONTENT)
+        .every((chunk) => !("content" in chunk))
+    ).toBe(true)
+  })
+
   it("forwards hydration, join, abort, and early iterator return", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const controller = new AbortController()

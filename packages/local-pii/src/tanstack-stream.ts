@@ -4,6 +4,12 @@ import type { PiiSession } from "./session"
 
 type TextContentChunk = Extract<StreamChunk, { type: "TEXT_MESSAGE_CONTENT" }>
 type TextEndChunk = Extract<StreamChunk, { type: "TEXT_MESSAGE_END" }>
+type StreamingRehydrator = ReturnType<typeof createStreamingRehydrator>
+
+interface TextStreamState {
+  protectedContent: string
+  rehydrator: StreamingRehydrator
+}
 
 function finalTextChunk(
   messageId: string,
@@ -40,6 +46,29 @@ function incrementalTextChunk(
   return output
 }
 
+function normalizeProtectedDelta(
+  state: TextStreamState,
+  chunk: TextContentChunk
+): string {
+  if (chunk.delta !== "") {
+    state.protectedContent += chunk.delta
+    return chunk.delta
+  }
+
+  const cumulative = chunk.content
+  if (cumulative === undefined || cumulative === "") return ""
+
+  const previous = state.protectedContent
+  if (cumulative.startsWith(previous)) {
+    state.protectedContent = cumulative
+    return cumulative.slice(previous.length)
+  }
+  if (previous.startsWith(cumulative)) return ""
+
+  state.protectedContent += cumulative
+  return cumulative
+}
+
 /** Restore one connection run with buffers isolated from every other run. */
 export function restoreTanStackStream(
   session: PiiSession,
@@ -49,34 +78,34 @@ export function restoreTanStackStream(
   return {
     async *[Symbol.asyncIterator]() {
       const iterator = source[Symbol.asyncIterator]()
-      const text = new Map<
-        string,
-        ReturnType<typeof createStreamingRehydrator>
-      >()
+      const text = new Map<string, TextStreamState>()
       let upstreamDone = false
       let failed = false
       let runError = false
 
-      const rehydratorFor = (messageId: string) => {
-        let rehydrator = text.get(messageId)
-        if (!rehydrator) {
-          rehydrator = createStreamingRehydrator(() => session.mapping)
-          text.set(messageId, rehydrator)
+      const stateFor = (messageId: string) => {
+        let state = text.get(messageId)
+        if (!state) {
+          state = {
+            protectedContent: "",
+            rehydrator: createStreamingRehydrator(() => session.mapping),
+          }
+          text.set(messageId, state)
         }
-        return rehydrator
+        return state
       }
 
       const flushOne = (chunk: TextEndChunk): StreamChunk | undefined => {
-        const rehydrator = text.get(chunk.messageId)
+        const state = text.get(chunk.messageId)
         text.delete(chunk.messageId)
-        const tail = rehydrator?.flush()
+        const tail = state?.rehydrator.flush()
         return tail ? finalTextChunk(chunk.messageId, tail, chunk) : undefined
       }
 
       const flushAll = (reference: StreamChunk): StreamChunk[] => {
         const output: StreamChunk[] = []
-        for (const [messageId, rehydrator] of text) {
-          const tail = rehydrator.flush()
+        for (const [messageId, state] of text) {
+          const tail = state.rehydrator.flush()
           if (tail) output.push(finalTextChunk(messageId, tail, reference))
         }
         text.clear()
@@ -107,7 +136,9 @@ export function restoreTanStackStream(
 
           if (chunk.type === "TEXT_MESSAGE_CONTENT") {
             const content = chunk as TextContentChunk
-            const delta = rehydratorFor(content.messageId).push(content.delta)
+            const state = stateFor(content.messageId)
+            const protectedDelta = normalizeProtectedDelta(state, content)
+            const delta = state.rehydrator.push(protectedDelta)
             yield incrementalTextChunk(content, delta)
             continue
           }
