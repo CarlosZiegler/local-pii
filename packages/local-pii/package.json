@@ -57,6 +57,11 @@
       "import": "./dist/inline.js",
       "require": "./dist/inline.cjs"
     },
+    "./tanstack": {
+      "types": "./dist/tanstack.d.ts",
+      "import": "./dist/tanstack.js",
+      "require": "./dist/tanstack.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -74,6 +79,8 @@
   },
   "peerDependencies": {
     "@local-pii/model-rampart": "*",
+    "@tanstack/ai": ">=0.43.1 <0.44",
+    "@tanstack/ai-client": ">=0.23.1 <0.24",
     "ai": ">=6 <8",
     "expo-asset": "*",
     "expo-crypto": "*",
@@ -85,6 +92,12 @@
   },
   "peerDependenciesMeta": {
     "@local-pii/model-rampart": {
+      "optional": true
+    },
+    "@tanstack/ai": {
+      "optional": true
+    },
+    "@tanstack/ai-client": {
       "optional": true
     },
     "ai": {
@@ -116,6 +129,8 @@
     "@local-pii/model-rampart": "workspace:*",
     "@microsoft/api-extractor": "^7.58.12",
     "@rslib/core": "^0.23.2",
+    "@tanstack/ai": "0.43.1",
+    "@tanstack/ai-client": "0.23.1",
     "@types/node": "^20",
     "@workspace/typescript-config": "workspace:*",
     "ai": "^7.0.57",

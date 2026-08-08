@@ -13,6 +13,7 @@ export default defineConfig({
       openai: "./src/openai.ts",
       "ai-sdk": "./src/ai-sdk.ts",
       inline: "./src/inline.ts",
+      tanstack: "./src/tanstack.ts",
     },
   },
   lib: [
