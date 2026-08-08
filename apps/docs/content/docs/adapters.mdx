@@ -1,0 +1,96 @@
+---
+title: Adapters
+description: Wrap any LLM call — Vercel AI SDK, OpenAI, Grok — with anonymize → call → rehydrate. Tool calls included.
+---
+
+Adapters wrap the whole cycle so you barely change your code. Both handle
+streaming and rehydrate tool-call argument JSON, so your tools run with **real**
+values while the provider only ever sees placeholders. Use the opaque
+[`token()`](/docs/strategies) strategy when tools are involved — see
+[Tool Calls](/docs/tool-calls).
+
+## Inline calls — `local-pii/inline`
+
+Use the inline adapter for any in-process model API. It owns the strict
+protect → call → restore order and forwards the same `AbortSignal`:
+
+```ts
+import { runInlineText, runInlineTextStream } from "local-pii/inline"
+
+const answer = await runInlineText({
+  input: "Email ana@acme.com",
+  signal,
+  call: (protectedText, { signal }) =>
+    localModel.prompt(protectedText, { signal }),
+})
+
+for await (const delta of runInlineTextStream({
+  input: "Repeat ana@acme.com",
+  call: (protectedText, { signal }) =>
+    localModel.stream(protectedText, { signal }),
+}))
+  render(delta)
+```
+
+`runInlineJson` deep-protects structured values without mutating them. An
+adapter-created session is cleared automatically; a supplied `session` remains
+owned by the caller and can span a conversation.
+
+## TanStack AI — `local-pii/tanstack`
+
+Wrap a client `ConnectConnectionAdapter`, including an entirely local one:
+
+```ts
+import { createAnonymizer, token } from "local-pii"
+import { piiConnection } from "local-pii/tanstack"
+
+const session = createAnonymizer({ placeholders: token() }).createSession()
+const connection = piiConnection(browserConnection, { session })
+// useChat({ connection })
+```
+
+Use one session/wrapper per conversation. Text, structured content, tool inputs,
+results, streaming boundaries, abort, and overlapping runs are protected. The
+current contract is pinned to `@tanstack/ai@0.43.1` and
+`@tanstack/ai-client@0.23.1`.
+
+## Vercel AI SDK — `local-pii/ai-sdk`
+
+A middleware. No tool wrapper needed: it rehydrates tool-call arguments before
+the SDK executes your tool, then re-anonymizes the tool result next step.
+
+```ts
+import { openai } from "@ai-sdk/openai"
+import { streamText } from "ai"
+import { withPii } from "local-pii/ai-sdk"
+
+const model = withPii(openai("gpt-5.2")) // wrapLanguageModel under the hood
+const { textStream } = streamText({ model, prompt })
+```
+
+Create one session per conversation (per request on a server):
+`withPii(model, { session })`.
+
+## OpenAI & Grok / xAI — `local-pii/openai`
+
+Wraps an OpenAI **client instance** structurally — zero dependency on the
+`openai` package — so it also covers Grok, Groq, Together, OpenRouter, Ollama.
+
+```ts
+import OpenAI from "openai"
+import { withPiiOpenAI } from "local-pii/openai"
+
+// Grok: same wrapper, different baseURL
+const client = withPiiOpenAI(
+  new OpenAI({ baseURL: "https://api.x.ai/v1", apiKey })
+)
+const res = await client.chat.completions.create({
+  model: "grok-4",
+  messages,
+  tools,
+})
+// res.choices[0].message.content is already rehydrated
+```
+
+For a manual loop, `createPiiChat`, `rehydrateToolArgs` and
+`createStreamingRehydrator` are exported.

@@ -1,0 +1,39 @@
+---
+title: Playground
+description: Vergleiche echte Vercel-AI-SDK- und TanStack-AI-Chats mit einem Modell, das direkt im Browser läuft.
+---
+
+import { Playground } from "@/components/playground"
+
+Alles unten läuft **in deinem Browser**: kein Gateway, keine API-Route, Server
+Action, API-Key oder Inference-Endpoint. Nutze Chromes eingebautes Gemini Nano,
+wenn die Prompt API verfügbar ist, oder lade den lokalen Gemma-3-270M-Fallback
+ausdrücklich herunter. Danach kannst du denselben Privacy-Flow mit Vercel AI SDK
+und TanStack AI vergleichen.
+
+<Playground />
+
+## Probier das aus
+
+- Sende `E-Mail ana@acme.com und wiederhole sie.` in einem der Tabs.
+- Der Privacy Inspector zeigt den opaken Prompt, den das Modell erhält.
+- Die Antwort wird lokal rehydriert; in der UI erscheint wieder die originale
+  E-Mail-Adresse.
+- **New chat** löscht Verlauf und In-Memory-Vault dieses Tabs.
+
+Beide Tabs haben getrennte Verläufe und `PiiSession`-Instanzen. Stop bricht die
+Browser-Generierung ab, ohne einen Remote-Service aufzurufen.
+
+## Hinweise zu den Runtimes
+
+- Gemini Nano wird vom Browser verwaltet und benötigt einen kompatiblen
+  Desktop-Chrome, passende Hardware und eine verfügbare Prompt API.
+- Der Fallback ist `onnx-community/gemma-3-270m-it-ONNX`, q4f16, ungefähr
+  426 MB. Er wird nur nach ausdrücklicher Zustimmung geladen und bevorzugt WebGPU.
+- Artefakt-Downloads können in DevTools Network erscheinen. Prompts,
+  rehydrierte Werte und der Vault werden nie an einen Inference-Server gesendet.
+- Kleine lokale Modelle eignen sich für diese Demo, aber Sprach- und
+  Reasoning-Qualität variieren zwischen Englisch, Portugiesisch und Deutsch.
+
+Die Oberfläche besteht aus shadcn- und AI-Elements-Primitives. Beide Beispiele
+nutzen echte Client-Lifecycles; keines versteckt das andere Framework als Transport.

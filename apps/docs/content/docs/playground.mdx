@@ -1,43 +1,39 @@
 ---
 title: Playground
-description: Type a message and see exactly what leaves the device. The assistant echoes back what it received, then it's rehydrated locally.
+description: Compare real Vercel AI SDK and TanStack AI chats backed by a model running directly in your browser.
 ---
 
-import { Playground } from '@/components/playground';
+import { Playground } from "@/components/playground"
 
-Everything below runs **in your browser** — no server, no API key, nothing sent.
-Type a note, and the “assistant” replies with **exactly what it received**, so the
-middle panel is literally all a real LLM would ever see. Then it's rehydrated on
-device, back to your original.
+Everything below runs **in your browser**: no gateway, API route, server action,
+API key, or inference endpoint. Choose Chrome's built-in Gemini Nano when the
+Prompt API is available, or explicitly download the local Gemma 3 270M fallback.
+Then compare the same privacy flow through Vercel AI SDK and TanStack AI.
 
 <Playground />
 
-## Try this
+## Try it
 
-- Leave the sample as-is: the **email** and **phone** become placeholders, but
-  the child's name (**Tomás**), the doctor (**Dra. Beatriz**) and the medication
-  (**Amoxicilina**) still leak — the deterministic layer only protects structured
-  data. That gap is real; see [Limitations](/docs/limitations).
-- Now add `Tomás` and `Amoxicilina` under **Protect extra terms** and send again —
-  they're redacted too. That's the [custom dictionary](/docs/detectors) closing
-  the gap for the “what”, not just the “who”.
-- Add a made-up IBAN or card number and watch the checksum-validated detectors
-  catch them.
+- Send `Email ana@acme.com and repeat it.` in either tab.
+- The privacy inspector shows the opaque prompt delivered to the model.
+- The assistant response is rehydrated locally, so the UI shows the original
+  email again.
+- **New chat** clears both the visible history and that tab's in-memory vault.
 
-> In a real app the on-device [Rampart model](/docs/expo) adds names and
-> addresses automatically; this playground uses the deterministic layer only so
-> it stays instant and offline.
+The tabs have separate histories and separate `PiiSession` instances. Stop
+cancels the current browser generation rather than calling a remote service.
 
-## Testing your own chat UI
+## Runtime notes
 
-shadcn's [`@shadcn/helpers`](https://ui.shadcn.com/docs/changelog/2026-07-helpers)
-`createChat()` lets you drive a real `useChat` lifecycle with no model or network —
-perfect for testing a chat UI wrapped with the
-[AI SDK adapter](/docs/adapters/ai-sdk):
+- Gemini Nano is browser-managed and currently depends on compatible desktop
+  Chrome hardware and Prompt API availability.
+- The fallback is `onnx-community/gemma-3-270m-it-ONNX`, q4f16, approximately
+  426 MB. It is loaded only after explicit consent and prefers WebGPU.
+- Artifact downloads may appear in DevTools Network. Prompts, restored values,
+  and the privacy vault are never sent to an application inference server.
+- Small local models are useful for this demonstration, but language quality and
+  reasoning ability vary. The interface being translated does not guarantee
+  equal model quality in English, Portuguese, and German.
 
-```ts
-import { createChat } from '@shadcn/helpers/ai-sdk';
-
-const chat = createChat().user('email ana@acme.com').assistant('Done!');
-// drive useChat({ messages: chat.get(0), transport: chat.transport() })
-```
+The UI uses shadcn and AI Elements primitives. Both examples are real client-side
+framework lifecycles; neither hides the other framework as its transport.

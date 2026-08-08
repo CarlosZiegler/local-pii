@@ -1,0 +1,99 @@
+---
+title: Adapter
+description: Jeden LLM-Call umschließen — Vercel AI SDK, OpenAI, Grok — mit anonymize → call → rehydrate. Inklusive Tool Calls.
+---
+
+Adapter kapseln den gesamten Zyklus, sodass du kaum etwas an deinem Code ändern
+musst. Beide unterstützen Streaming und rehydrieren Tool-Call-Argument-JSON, so
+dass deine Tools mit **echten** Werten laufen, während der Provider nur
+Platzhalter zu sehen bekommt. Verwende die opake
+[`token()`](/docs/strategies)-Strategie, wenn Tools im Spiel sind — siehe
+[Tool Calls](/docs/tool-calls).
+
+## Inline-Aufrufe — `local-pii/inline`
+
+Nutze den Inline-Adapter für jede In-Process-Modell-API. Er erzwingt die
+Reihenfolge protect → call → restore und reicht dasselbe `AbortSignal` weiter:
+
+```ts
+import { runInlineText, runInlineTextStream } from "local-pii/inline"
+
+const answer = await runInlineText({
+  input: "E-Mail ana@acme.com",
+  signal,
+  call: (protectedText, { signal }) =>
+    localModel.prompt(protectedText, { signal }),
+})
+
+for await (const delta of runInlineTextStream({
+  input: "Wiederhole ana@acme.com",
+  call: (protectedText, { signal }) =>
+    localModel.stream(protectedText, { signal }),
+}))
+  render(delta)
+```
+
+`runInlineJson` schützt strukturierte Werte tief und ohne Mutation. Eine vom
+Adapter erzeugte Session wird automatisch geleert; eine übergebene `session`
+gehört weiterhin dem Aufrufer und kann die ganze Konversation begleiten.
+
+## TanStack AI — `local-pii/tanstack`
+
+Umschließe jeden Client-`ConnectConnectionAdapter`, auch einen lokalen:
+
+```ts
+import { createAnonymizer, token } from "local-pii"
+import { piiConnection } from "local-pii/tanstack"
+
+const session = createAnonymizer({ placeholders: token() }).createSession()
+const connection = piiConnection(browserConnection, { session })
+// useChat({ connection })
+```
+
+Verwende eine Session und einen Wrapper pro Konversation. Text, strukturierte
+Inhalte, Tool-Ein- und Ausgaben, Streaming-Grenzen, Abort und parallele Runs
+werden geschützt. Der aktuelle Vertrag ist auf `@tanstack/ai@0.43.1` und
+`@tanstack/ai-client@0.23.1` festgelegt.
+
+## Vercel AI SDK — `local-pii/ai-sdk`
+
+Eine Middleware. Kein Tool-Wrapper nötig: Sie rehydriert Tool-Call-Argumente,
+bevor das SDK dein Tool ausführt, und anonymisiert das Tool-Ergebnis im
+nächsten Schritt erneut.
+
+```ts
+import { openai } from "@ai-sdk/openai"
+import { streamText } from "ai"
+import { withPii } from "local-pii/ai-sdk"
+
+const model = withPii(openai("gpt-5.2")) // wrapLanguageModel unter der Haube
+const { textStream } = streamText({ model, prompt })
+```
+
+Erzeuge eine Session pro Konversation (pro Request auf einem Server):
+`withPii(model, { session })`.
+
+## OpenAI & Grok / xAI — `local-pii/openai`
+
+Umschließt eine OpenAI-**Client-Instanz** strukturell — ohne Abhängigkeit vom
+`openai`-Paket — und deckt damit auch Grok, Groq, Together, OpenRouter, Ollama
+ab.
+
+```ts
+import OpenAI from "openai"
+import { withPiiOpenAI } from "local-pii/openai"
+
+// Grok: derselbe Wrapper, andere baseURL
+const client = withPiiOpenAI(
+  new OpenAI({ baseURL: "https://api.x.ai/v1", apiKey })
+)
+const res = await client.chat.completions.create({
+  model: "grok-4",
+  messages,
+  tools,
+})
+// res.choices[0].message.content ist bereits rehydriert
+```
+
+Für eine manuelle Loop werden `createPiiChat`, `rehydrateToolArgs` und
+`createStreamingRehydrator` exportiert.

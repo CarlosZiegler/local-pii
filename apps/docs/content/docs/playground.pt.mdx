@@ -1,0 +1,38 @@
+---
+title: Playground
+description: Compare chats reais com Vercel AI SDK e TanStack AI usando um modelo que roda diretamente no navegador.
+---
+
+import { Playground } from "@/components/playground"
+
+Tudo abaixo roda **no seu navegador**: sem gateway, API route, server action,
+chave de API ou endpoint de inferência. Use o Gemini Nano embutido no Chrome
+quando a Prompt API estiver disponível ou baixe explicitamente o fallback local
+Gemma 3 270M. Depois compare o mesmo fluxo no Vercel AI SDK e no TanStack AI.
+
+<Playground />
+
+## Experimente
+
+- Envie `Email ana@acme.com e repita.` em qualquer aba.
+- O privacy inspector mostra o prompt opaco entregue ao modelo.
+- A resposta é reidratada localmente e a UI volta a mostrar o email original.
+- **New chat** limpa o histórico visível e o vault em memória daquela aba.
+
+As abas mantêm históricos e `PiiSession` independentes. Stop cancela a geração
+no navegador; não chama um serviço remoto.
+
+## Sobre os runtimes
+
+- O Gemini Nano é gerenciado pelo navegador e depende de Chrome desktop,
+  hardware compatível e disponibilidade da Prompt API.
+- O fallback é `onnx-community/gemma-3-270m-it-ONNX`, q4f16, com cerca de
+  426 MB. Ele só é carregado após consentimento explícito e prefere WebGPU.
+- Downloads dos artefatos podem aparecer no Network do DevTools. Prompts,
+  valores reidratados e o vault nunca vão para um servidor de inferência do app.
+- Modelos locais pequenos são adequados para a demonstração, mas qualidade de
+  idioma e raciocínio variam. Traduzir a interface não garante qualidade igual
+  em inglês, português e alemão.
+
+A interface usa primitives do shadcn e AI Elements. Os dois exemplos usam
+ciclos de vida reais no cliente; nenhum esconde o outro framework como transport.
