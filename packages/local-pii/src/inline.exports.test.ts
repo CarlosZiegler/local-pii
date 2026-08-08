@@ -34,6 +34,9 @@ describe("local-pii/inline public subpath", () => {
     const esm = (await import(esmUrl)) as InlineModule
     const cjs = require(cjsPath) as InlineModule
 
+    expect(esm.runInlineTextStream).toBeTypeOf("function")
+    expect(cjs.runInlineTextStream).toBeTypeOf("function")
+
     await expect(
       esm.runInlineText({ input: "hello", call: async (input) => input })
     ).resolves.toBe("hello")
@@ -47,6 +50,7 @@ describe("local-pii/inline public subpath", () => {
     const declarations = await readFile(path, "utf8")
 
     expect(declarations).toContain("runInlineText")
+    expect(declarations).toContain("runInlineTextStream")
     expect(declarations).toContain("runInlineJson")
     expect(declarations).toContain("runInline")
   })

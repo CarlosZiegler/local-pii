@@ -1,5 +1,6 @@
 import { createAnonymizer } from "./anonymizer"
 import { token } from "./placeholder/strategies"
+import { createStreamingRehydrator } from "./rehydrate"
 import type { PiiSession } from "./session"
 
 export interface InlineContext {
@@ -87,6 +88,65 @@ export function runInlineText(options: RunInlineTextOptions): Promise<string> {
     restore: (output, { session }) =>
       session.rehydrate(output, { lenient: true }),
   })
+}
+
+export interface RunInlineTextStreamOptions extends InlineSessionOptions {
+  input: string
+  call: (input: string, context: InlineContext) => AsyncIterable<string>
+}
+
+/** Protect a text request and safely restore an incremental text response. */
+export function runInlineTextStream(
+  options: RunInlineTextStreamOptions
+): AsyncIterable<string> {
+  return {
+    async *[Symbol.asyncIterator]() {
+      const resolved = resolveSession(options)
+      const context: InlineContext = { signal: options.signal }
+      let upstream: AsyncIterator<string> | undefined
+      let upstreamDone = false
+      let failed = false
+
+      try {
+        options.signal?.throwIfAborted()
+        const protectedInput = (await resolved.session.anonymize(options.input))
+          .redactedText
+        options.signal?.throwIfAborted()
+
+        upstream = options.call(protectedInput, context)[Symbol.asyncIterator]()
+        const rehydrator = createStreamingRehydrator(
+          () => resolved.session.mapping
+        )
+
+        while (true) {
+          options.signal?.throwIfAborted()
+          const next = await upstream.next()
+          options.signal?.throwIfAborted()
+
+          if (next.done) {
+            upstreamDone = true
+            const tail = rehydrator.flush()
+            if (tail) yield tail
+            return
+          }
+
+          const output = rehydrator.push(next.value)
+          if (output) yield output
+        }
+      } catch (error) {
+        failed = true
+        throw error
+      } finally {
+        try {
+          if (!upstreamDone) await upstream?.return?.()
+        } catch (cleanupError) {
+          if (!failed) throw cleanupError
+        } finally {
+          if (resolved.owned) resolved.session.clear()
+        }
+      }
+    },
+  }
 }
 
 export interface RunInlineJsonOptions<

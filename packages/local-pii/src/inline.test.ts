@@ -1,15 +1,62 @@
-import { describe, expect, it, vi } from "vitest"
+import fc from "fast-check"
+import { beforeEach, describe, expect, it, vi } from "vitest"
 import { createAnonymizer } from "./anonymizer"
 import {
   runInline,
   runInlineJson,
   runInlineText,
+  runInlineTextStream,
   type InlineContext,
 } from "./inline"
 import { token } from "./placeholder/strategies"
 import type { PiiSession } from "./session"
 
 const TOKEN = /PII[0-9A-HJKMNP-TV-Z]+/
+
+const sessionTracker = vi.hoisted(() => ({ sessions: [] as PiiSession[] }))
+
+vi.mock("./anonymizer", async () => {
+  const actual =
+    await vi.importActual<typeof import("./anonymizer")>("./anonymizer")
+
+  return {
+    ...actual,
+    createAnonymizer: (...args: Parameters<typeof actual.createAnonymizer>) => {
+      const anonymizer = actual.createAnonymizer(...args)
+      return {
+        ...anonymizer,
+        createSession: () => {
+          const session = anonymizer.createSession()
+          sessionTracker.sessions.push(session)
+          return session
+        },
+      }
+    },
+  }
+})
+
+async function collect(iterable: AsyncIterable<string>): Promise<string> {
+  let output = ""
+  for await (const chunk of iterable) output += chunk
+  return output
+}
+
+function partition(text: string, lengths: readonly number[]): string[] {
+  const chunks: string[] = []
+  let offset = 0
+  let index = 0
+  while (offset < text.length) {
+    const length = lengths[index % lengths.length] ?? text.length
+    chunks.push(text.slice(offset, offset + length))
+    offset += length
+    index += 1
+  }
+  return chunks
+}
+
+beforeEach(() => {
+  sessionTracker.sessions.length = 0
+})
 
 describe("runInlineText", () => {
   it("protects the model-facing input and restores the complete response", async () => {
@@ -181,5 +228,192 @@ describe("runInline", () => {
 
     expect(output).toBe(3)
     expect(steps).toEqual(["protect", "call", "restore"])
+  })
+})
+
+describe("runInlineTextStream", () => {
+  it("restores an opaque placeholder at every possible split boundary", async () => {
+    const input = "Email ana@acme.com"
+    const probe = createAnonymizer({ placeholders: token() }).createSession()
+    const probeInput = (await probe.anonymize(input)).redactedText
+    const probePlaceholder = probeInput.match(TOKEN)?.[0]
+    expect(probePlaceholder).toBeDefined()
+
+    for (let split = 0; split <= probePlaceholder!.length; split += 1) {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedInput = (await session.anonymize(input)).redactedText
+      const placeholder = protectedInput.match(TOKEN)?.[0]
+      expect(placeholder).toBeDefined()
+      const boundary = protectedInput.indexOf(placeholder!) + split
+
+      const output = await collect(
+        runInlineTextStream({
+          input,
+          session,
+          call: async function* (wireInput) {
+            expect(wireInput).toBe(protectedInput)
+            const response = `Confirmed ${wireInput}`
+            const responseBoundary = "Confirmed ".length + boundary
+            yield response.slice(0, responseBoundary)
+            yield response.slice(responseBoundary)
+          },
+        })
+      )
+
+      expect(output).toBe(`Confirmed ${input}`)
+    }
+  })
+
+  it("is lazy, keeps its owned session alive, and clears it on early return", async () => {
+    let upstreamClosed = false
+    const stream = runInlineTextStream({
+      input: "Email ana@acme.com",
+      call: async function* (wireInput) {
+        try {
+          yield `${wireInput} ${"safe ".repeat(12)}`
+          yield "unread"
+        } finally {
+          upstreamClosed = true
+        }
+      },
+    })
+
+    expect(sessionTracker.sessions).toHaveLength(0)
+    const iterator = stream[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    const owned = sessionTracker.sessions[0]
+
+    expect(first.done).toBe(false)
+    expect(first.value).toContain("ana@acme.com")
+    expect(Object.values(owned?.mapping ?? {})).toContain("ana@acme.com")
+
+    await iterator.return?.()
+
+    expect(upstreamClosed).toBe(true)
+    expect(owned?.mapping).toEqual({})
+  })
+
+  it("clears an owned session after normal completion", async () => {
+    const output = await collect(
+      runInlineTextStream({
+        input: "Email ana@acme.com",
+        call: async function* (wireInput) {
+          yield wireInput
+        },
+      })
+    )
+
+    expect(output).toBe("Email ana@acme.com")
+    expect(sessionTracker.sessions).toHaveLength(1)
+    expect(sessionTracker.sessions[0]?.mapping).toEqual({})
+  })
+
+  it("preserves an upstream error and discards an incomplete token tail", async () => {
+    const failure = new Error("stream failed")
+    let emitted = ""
+    const stream = runInlineTextStream({
+      input: "Email ana@acme.com",
+      call: async function* (wireInput) {
+        const placeholder = wireInput.match(TOKEN)?.[0]
+        expect(placeholder).toBeDefined()
+        yield `Before ${placeholder!.slice(0, -2)}`
+        throw failure
+      },
+    })
+
+    try {
+      for await (const chunk of stream) emitted += chunk
+      throw new Error("expected stream to fail")
+    } catch (error) {
+      expect(error).toBe(failure)
+    }
+
+    expect(emitted).not.toContain("PII")
+    expect(sessionTracker.sessions[0]?.mapping).toEqual({})
+  })
+
+  it("preserves abort identity, closes upstream, and discards buffered tails", async () => {
+    const controller = new AbortController()
+    const reason = new Error("user stopped")
+    let upstreamClosed = false
+    let emitted = ""
+    const stream = runInlineTextStream({
+      input: "Email ana@acme.com",
+      signal: controller.signal,
+      call: async function* (wireInput, context) {
+        expect(context.signal).toBe(controller.signal)
+        expect("session" in context).toBe(false)
+        const placeholder = wireInput.match(TOKEN)?.[0]
+        try {
+          yield `Before ${placeholder!.slice(0, -2)}`
+          controller.abort(reason)
+          yield "ignored"
+        } finally {
+          upstreamClosed = true
+        }
+      },
+    })
+
+    try {
+      for await (const chunk of stream) emitted += chunk
+      throw new Error("expected stream to abort")
+    } catch (error) {
+      expect(error).toBe(reason)
+    }
+
+    expect(emitted).not.toContain("PII")
+    expect(upstreamClosed).toBe(true)
+    expect(sessionTracker.sessions[0]?.mapping).toEqual({})
+  })
+
+  it("keeps a borrowed session mapping after completion", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const clear = vi.spyOn(session, "clear")
+
+    await collect(
+      runInlineTextStream({
+        input: "Email ana@acme.com",
+        session,
+        call: async function* (wireInput) {
+          yield wireInput
+        },
+      })
+    )
+
+    expect(clear).not.toHaveBeenCalled()
+    expect(Object.values(session.mapping)).toContain("ana@acme.com")
+  })
+
+  it("rehydrates arbitrary chunk partitions", async () => {
+    await fc.assert(
+      fc.asyncProperty(
+        fc.array(fc.integer({ min: 1, max: 24 }), {
+          minLength: 1,
+          maxLength: 16,
+        }),
+        async (lengths) => {
+          const input = "ana@acme.com and +49 151 12345678"
+          const session = createAnonymizer({
+            placeholders: token(),
+          }).createSession()
+
+          const output = await collect(
+            runInlineTextStream({
+              input,
+              session,
+              call: async function* (wireInput) {
+                const response = `First ${wireInput}; again ${wireInput}.`
+                for (const chunk of partition(response, lengths)) yield chunk
+              },
+            })
+          )
+
+          expect(output).toBe(`First ${input}; again ${input}.`)
+        }
+      ),
+      { numRuns: 50 }
+    )
   })
 })
