@@ -25,7 +25,11 @@ describe("TanStackChat", () => {
       }
       return model as unknown as LanguageModel
     })
-    const runtime: BrowserModelRuntime = { kind: "gemini-nano", create }
+    const runtime: BrowserModelRuntime = {
+      availability: vi.fn(async () => "available" as const),
+      kind: "gemini-nano",
+      create,
+    }
     const user = userEvent.setup()
     render(<TanStackChat runtime={runtime} runtimeName="Fake local model" />)
 

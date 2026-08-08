@@ -16,7 +16,7 @@ Das Entfernen von Name, E-Mail und Telefonnummer de-identifiziert nicht:
 > with a rare disease."
 
 Kein Detektor erfasst das. Abmildern lässt sich das mit dem
-[Dictionary](/docs/detectors), dem `strict`-Modus und einem "Private Mode",
+[Dictionary](/de/docs/detectors), dem `strict`-Modus und einem "Private Mode",
 der die API bei sensiblen Notizen komplett überspringt.
 
 ## Das Modell hat eine Recall-Obergrenze
@@ -34,7 +34,7 @@ Checksummen/Struktur), weshalb sie zuerst laufen und Überlappungen gewinnen.
 
 ## Erkennung ist nicht dasselbe wie Reversibilität
 
-Der [Round-Trip](/docs/tool-calls) ist unabhängig davon garantiert, was
+Der [Round-Trip](/de/docs/tool-calls) ist unabhängig davon garantiert, was
 erkannt wurde: Rehydrierung stellt exakt das wieder her, was geschwärzt
 wurde. Aber etwas, das die Detektoren **übersehen**, wird nie geschwärzt — es
 erreicht den Provider also im Klartext. Abdeckung und Reversibilität sind
@@ -44,7 +44,7 @@ getrennte Belange.
 
 Lesbare `[TYPE_N]`-Platzhalter können mit bereits placeholder-förmigem Text
 im Input kollidieren, und LLMs verstümmeln Klammern in JSON-/Markdown-/
-Tool-Kontexten. Verwende die opake [`token()`](/docs/strategies)-Strategie
+Tool-Kontexten. Verwende die opake [`token()`](/de/docs/strategies)-Strategie
 für Tool Calls und maschinell geparste Ausgaben.
 
 ## Community-Paket

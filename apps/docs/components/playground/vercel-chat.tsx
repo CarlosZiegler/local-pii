@@ -12,10 +12,12 @@ import {
 import { useMemo, useState } from "react"
 import { ChatShell, type ChatShellMessage } from "./chat-shell"
 import { createEphemeralBrowserAIModel } from "./model/ephemeral-browser-ai"
+import type { BrowserModelRuntime } from "./model/types"
 import type { PrivacyInspection } from "./privacy-inspector"
 
 export interface VercelChatProps {
   model?: LanguageModel
+  runtime?: BrowserModelRuntime
   runtimeName: string
 }
 
@@ -33,12 +35,13 @@ function inspectionFrom(
   return { counts, protectedPrompt }
 }
 
-export function VercelChat({ model, runtimeName }: VercelChatProps) {
+export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
   const [session] = useState(createSession)
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const protectedModel = useMemo(
-    () => withPii(model ?? createEphemeralBrowserAIModel(), { session }),
-    [model, session]
+    () =>
+      withPii(model ?? createEphemeralBrowserAIModel({ runtime }), { session }),
+    [model, runtime, session]
   )
   const transport = useMemo(
     () =>

@@ -32,11 +32,12 @@ function fakeRuntime(chunks = ["Hello ", "there"]): {
   const create = vi.fn(
     async () => ({ destroy, promptStreaming }) as unknown as LanguageModel
   )
+  const availability = vi.fn(async () => "available" as const)
   return {
     create,
     destroy,
     promptStreaming,
-    runtime: { kind: "gemini-nano", create },
+    runtime: { availability, kind: "gemini-nano", create },
   }
 }
 
@@ -108,7 +109,11 @@ describe("createPromptConnection", () => {
     const create = vi.fn(
       async () => ({ destroy, promptStreaming }) as unknown as LanguageModel
     )
-    const runtime: BrowserModelRuntime = { kind: "gemini-nano", create }
+    const runtime: BrowserModelRuntime = {
+      availability: vi.fn(async () => "available" as const),
+      kind: "gemini-nano",
+      create,
+    }
     const iterator = createPromptConnection(runtime)
       .connect(
         [{ role: "user", content: "Wait" }],

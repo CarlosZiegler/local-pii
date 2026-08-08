@@ -14,7 +14,7 @@ Removing name, email and phone does not de-identify:
 > "I'm the only Brazilian engineer at company X in Kempten, diagnosed yesterday
 > with a rare disease."
 
-No detector catches that. Mitigate with the [dictionary](/docs/detectors),
+No detector catches that. Mitigate with the [dictionary](/en/docs/detectors),
 `strict` mode, and a "private mode" that skips the API entirely for sensitive
 notes.
 
@@ -32,7 +32,7 @@ which is why they run first and win overlaps.
 
 ## Detection is not reversibility
 
-The [round-trip](/docs/tool-calls) is guaranteed regardless of what's detected:
+The [round-trip](/en/docs/tool-calls) is guaranteed regardless of what's detected:
 rehydrating restores exactly what was redacted. But something the detectors
 **miss** is never redacted — so it reaches the provider in the clear. Coverage
 and reversibility are separate concerns.
@@ -41,7 +41,7 @@ and reversibility are separate concerns.
 
 Readable `[TYPE_N]` placeholders can collide with placeholder-shaped text
 already in the input, and LLMs mangle brackets in JSON/markdown/tool contexts.
-Use the opaque [`token()`](/docs/strategies) strategy for tool calls and
+Use the opaque [`token()`](/en/docs/strategies) strategy for tool calls and
 machine-parsed output.
 
 ## Community package

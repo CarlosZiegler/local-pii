@@ -11,6 +11,9 @@ export type LocalRuntimeStatus =
 
 export interface BrowserModelRuntime {
   kind: LocalRuntimeKind
+  availability(
+    options?: LanguageModelCreateCoreOptions
+  ): Promise<Availability>
   create(options?: LanguageModelCreateOptions): Promise<LanguageModel>
 }
 

@@ -51,8 +51,8 @@ The deterministic detectors don't catch names or addresses — that's the
 [Rampart](https://huggingface.co/nationaldesignstudio/rampart) NER model's job.
 Pick the backend for your platform:
 
-- **Expo / React Native** → [`rampart()`](/docs/expo) via `onnxruntime-react-native`.
-- **Browser / web** → [`rampartWeb()`](/docs/browser) via `onnxruntime-web` (WASM/WebGPU).
+- **Expo / React Native** → [`rampart()`](/en/docs/expo) via `onnxruntime-react-native`.
+- **Browser / web** → [`rampartWeb()`](/en/docs/browser) via `onnxruntime-web` (WASM/WebGPU).
 
 ```ts
 import { createAnonymizer } from "local-pii"
@@ -69,12 +69,12 @@ const pii = createAnonymizer({
 Adapters wrap the whole anonymize → call → rehydrate cycle, **including tool
 calls**, so you barely change your code:
 
-- [Vercel AI SDK](/docs/adapters) — `withPii(model)`
-- [OpenAI & Grok/xAI](/docs/adapters) — `withPiiOpenAI(client)`
+- [Vercel AI SDK](/en/docs/adapters) — `withPii(model)`
+- [OpenAI & Grok/xAI](/en/docs/adapters) — `withPiiOpenAI(client)`
 
 ## Where next
 
-- [Core Concepts](/docs/concepts) — the pipeline, sessions, the vault, trust boundaries
-- [Placeholder Strategies](/docs/strategies) — `sequential`, `hashed`, `token`
-- [Tool Calls](/docs/tool-calls) — the hard part, solved
-- [Limitations](/docs/limitations) — what it does **not** catch (read this)
+- [Core Concepts](/en/docs/concepts) — the pipeline, sessions, the vault, trust boundaries
+- [Placeholder Strategies](/en/docs/strategies) — `sequential`, `hashed`, `token`
+- [Tool Calls](/en/docs/tool-calls) — the hard part, solved
+- [Limitations](/en/docs/limitations) — what it does **not** catch (read this)

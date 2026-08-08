@@ -1,5 +1,6 @@
 import { browserAI } from "@browser-ai/core"
 import type { LanguageModel } from "ai"
+import type { BrowserModelRuntime } from "./types"
 
 type V4Model = Extract<LanguageModel, { specificationVersion: "v4" }>
 
@@ -9,6 +10,56 @@ interface BrowserAIInternals {
 
 export interface EphemeralBrowserAIOptions {
   createModel?: () => V4Model
+  runtime?: BrowserModelRuntime
+}
+
+type PromptGlobal = typeof globalThis & {
+  LanguageModel?: BrowserModelRuntime
+}
+
+let promptRuntimeTail = Promise.resolve()
+
+async function acquirePromptRuntimeLock(): Promise<() => void> {
+  const previous = promptRuntimeTail
+  let release = () => {}
+  promptRuntimeTail = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await previous
+  return release
+}
+
+async function withPromptRuntime<Result>(
+  runtime: BrowserModelRuntime | undefined,
+  call: () => PromiseLike<Result>
+): Promise<Result> {
+  if (!runtime || runtime.kind === "gemini-nano") return call()
+
+  const release = await acquirePromptRuntimeLock()
+  const promptGlobal = globalThis as PromptGlobal
+  const previous = Object.getOwnPropertyDescriptor(
+    promptGlobal,
+    "LanguageModel"
+  )
+  let installed = false
+  try {
+    Object.defineProperty(promptGlobal, "LanguageModel", {
+      configurable: true,
+      value: runtime,
+      writable: true,
+    })
+    installed = true
+    return await call()
+  } finally {
+    if (installed) {
+      if (previous) {
+        Object.defineProperty(promptGlobal, "LanguageModel", previous)
+      } else {
+        Reflect.deleteProperty(promptGlobal, "LanguageModel")
+      }
+    }
+    release()
+  }
 }
 
 function releaseProviderSession(model: V4Model) {
@@ -71,7 +122,9 @@ export function createEphemeralBrowserAIModel(
     async doGenerate(callOptions) {
       const model = createModel()
       try {
-        return await model.doGenerate(callOptions)
+        return await withPromptRuntime(options.runtime, () =>
+          model.doGenerate(callOptions)
+        )
       } finally {
         releaseProviderSession(model)
       }
@@ -79,7 +132,9 @@ export function createEphemeralBrowserAIModel(
     async doStream(callOptions) {
       const model = createModel()
       try {
-        const result = await model.doStream(callOptions)
+        const result = await withPromptRuntime(options.runtime, () =>
+          model.doStream(callOptions)
+        )
         return {
           ...result,
           stream: releaseWhenClosed(result.stream, () =>

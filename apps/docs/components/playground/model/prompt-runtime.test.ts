@@ -48,11 +48,9 @@ describe("Prompt runtime controller", () => {
 
   it("does not touch fallback code until explicit activation", async () => {
     const loadFallback = vi.fn(async () => factory("available"))
-    const configureFallback = vi.fn()
     const controller = createPromptRuntimeController({
       getNative: () => undefined,
       loadFallback,
-      configureFallback,
     })
 
     expect(loadFallback).not.toHaveBeenCalled()
@@ -61,7 +59,6 @@ describe("Prompt runtime controller", () => {
 
     await controller.activateFallback()
 
-    expect(configureFallback).toHaveBeenCalledOnce()
     expect(loadFallback).toHaveBeenCalledOnce()
     expect(controller.getSnapshot()).toMatchObject({
       kind: "gemma-3-270m",

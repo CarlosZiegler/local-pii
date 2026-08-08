@@ -54,8 +54,8 @@ die Aufgabe des
 [Rampart](https://huggingface.co/nationaldesignstudio/rampart)-NER-Modells.
 Wähle das Backend für deine Plattform:
 
-- **Expo / React Native** → [`rampart()`](/docs/expo) über `onnxruntime-react-native`.
-- **Browser / Web** → [`rampartWeb()`](/docs/browser) über `onnxruntime-web` (WASM/WebGPU).
+- **Expo / React Native** → [`rampart()`](/de/docs/expo) über `onnxruntime-react-native`.
+- **Browser / Web** → [`rampartWeb()`](/de/docs/browser) über `onnxruntime-web` (WASM/WebGPU).
 
 ```ts
 import { createAnonymizer } from "local-pii"
@@ -73,12 +73,12 @@ Adapter umschließen den gesamten anonymize → call → rehydrate-Zyklus,
 **einschließlich Tool Calls**, sodass du kaum etwas an deinem Code ändern
 musst:
 
-- [Vercel AI SDK](/docs/adapters) — `withPii(model)`
-- [OpenAI & Grok/xAI](/docs/adapters) — `withPiiOpenAI(client)`
+- [Vercel AI SDK](/de/docs/adapters) — `withPii(model)`
+- [OpenAI & Grok/xAI](/de/docs/adapters) — `withPiiOpenAI(client)`
 
 ## Wie geht's weiter
 
-- [Kernkonzepte](/docs/concepts) — die Pipeline, Sessions, der Vault, Vertrauensgrenzen
-- [Placeholder-Strategien](/docs/strategies) — `sequential`, `hashed`, `token`
-- [Tool Calls](/docs/tool-calls) — der schwierige Teil, gelöst
-- [Einschränkungen](/docs/limitations) — was **nicht** erfasst wird (unbedingt lesen)
+- [Kernkonzepte](/de/docs/concepts) — die Pipeline, Sessions, der Vault, Vertrauensgrenzen
+- [Placeholder-Strategien](/de/docs/strategies) — `sequential`, `hashed`, `token`
+- [Tool Calls](/de/docs/tool-calls) — der schwierige Teil, gelöst
+- [Einschränkungen](/de/docs/limitations) — was **nicht** erfasst wird (unbedingt lesen)

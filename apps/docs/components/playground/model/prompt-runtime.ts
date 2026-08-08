@@ -20,7 +20,6 @@ export interface LanguageModelFactory {
 
 export interface PromptRuntimeDependencies {
   availabilityTimeoutMs?: number
-  configureFallback?: () => void
   getNative?: () => LanguageModelFactory | undefined
   loadFallback: () => Promise<LanguageModelFactory>
 }
@@ -45,6 +44,7 @@ function runtimeFor(
 ): BrowserModelRuntime {
   return {
     kind,
+    availability: (options) => factory.availability(options),
     create: (options) => factory.create(withTextExpectations(options)),
   }
 }
@@ -167,10 +167,7 @@ export function createPromptRuntimeController(
       })
     },
     activateFallback() {
-      return activate("gemma-3-270m", async () => {
-        dependencies.configureFallback?.()
-        return dependencies.loadFallback()
-      })
+      return activate("gemma-3-270m", dependencies.loadFallback)
     },
     getSnapshot: () => snapshot,
     subscribe(listener) {
@@ -197,13 +194,7 @@ export function createBrowserPromptRuntime(): PromptRuntimeController {
       }
       const { createGemmaLanguageModelFactory } =
         await import("./gemma-runtime")
-      const factory = await createGemmaLanguageModelFactory()
-      Object.defineProperty(window, "LanguageModel", {
-        configurable: true,
-        value: factory,
-        writable: true,
-      })
-      return factory
+      return createGemmaLanguageModelFactory()
     },
   })
 }

@@ -669,7 +669,7 @@ Serve the static docs export, open the localized playground in desktop Chrome, a
 8. Network shows model artifacts only and no inference endpoint;
 9. English, Portuguese, and German routes render without hydration errors.
 
-- [ ] **Step 7: Perform final code review**
+- [x] **Step 7: Perform final code review**
 
 Use the `code-review` skill against all changes since the first feature commit. Resolve high and medium findings, rerun focused tests for every fix, then rerun the complete automated suite.
 

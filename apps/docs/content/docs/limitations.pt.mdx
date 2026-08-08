@@ -15,7 +15,7 @@ Remover nome, email e telefone não desidentifica:
 > "Sou o único engenheiro brasileiro na empresa X em Kempten, diagnosticado
 > ontem com uma doença rara."
 
-Nenhum detector captura isso. Mitigue com o [dicionário](/docs/detectors), o
+Nenhum detector captura isso. Mitigue com o [dicionário](/pt/docs/detectors), o
 modo `strict`, e um "modo privado" que pula a API completamente para notas
 sensíveis.
 
@@ -34,7 +34,7 @@ checksum/estrutura), por isso eles rodam primeiro e vencem as sobreposições.
 
 ## Detecção não é reversibilidade
 
-O [round-trip](/docs/tool-calls) é garantido independentemente do que for
+O [round-trip](/pt/docs/tool-calls) é garantido independentemente do que for
 detectado: reidratar restaura exatamente o que foi redigido. Mas algo que os
 detectores **não captam** nunca é redigido — então chega ao provedor em texto
 claro. Cobertura e reversibilidade são preocupações separadas.
@@ -43,7 +43,7 @@ claro. Cobertura e reversibilidade são preocupações separadas.
 
 Placeholders legíveis `[TYPE_N]` podem colidir com texto no formato de
 placeholder que já existe no input, e LLMs bagunçam colchetes em contextos de
-JSON/markdown/tools. Use a estratégia opaca [`token()`](/docs/strategies)
+JSON/markdown/tools. Use a estratégia opaca [`token()`](/pt/docs/strategies)
 para tool calls e saída processada por máquina.
 
 ## Pacote da comunidade

@@ -121,7 +121,7 @@ function RuntimePlayground() {
             forceMount
             value="vercel"
           >
-            <VercelChat runtimeName={runtimeName} />
+            <VercelChat runtime={ready} runtimeName={runtimeName} />
           </TabsContent>
           <TabsContent
             className="mt-3 data-[state=inactive]:hidden"
