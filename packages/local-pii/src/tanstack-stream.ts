@@ -140,7 +140,7 @@ function restoreContentPart(session: PiiSession, part: unknown): unknown {
   if (part.type === "text" && typeof part.content === "string") {
     return {
       ...part,
-      content: session.rehydrate(part.content, { lenient: true }),
+      content: restoreJsonText(session, part.content),
     }
   }
   return part

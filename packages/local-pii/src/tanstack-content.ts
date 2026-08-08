@@ -26,21 +26,30 @@ async function protectJsonText(
 
 async function protectParts(
   session: PiiSession,
-  parts: Array<unknown>
+  parts: Array<unknown>,
+  jsonText = false
 ): Promise<Array<unknown>> {
   const output: Array<unknown> = []
-  for (const part of parts) output.push(await protectContentPart(session, part))
+  for (const part of parts) {
+    output.push(await protectContentPart(session, part, jsonText))
+  }
   return output
 }
 
 async function protectContentPart(
   session: PiiSession,
-  part: unknown
+  part: unknown,
+  jsonText = false
 ): Promise<unknown> {
   if (!isRecord(part)) return part
 
   if (part.type === "text" && typeof part.content === "string") {
-    return { ...part, content: await protectText(session, part.content) }
+    return {
+      ...part,
+      content: jsonText
+        ? await protectJsonText(session, part.content)
+        : await protectText(session, part.content),
+    }
   }
 
   if (
@@ -48,7 +57,7 @@ async function protectContentPart(
     part.status === "complete" &&
     typeof part.raw === "string"
   ) {
-    return { ...part, raw: await protectText(session, part.raw) }
+    return { ...part, raw: await protectJsonText(session, part.raw) }
   }
 
   if (part.type === "tool-call") {
@@ -70,7 +79,7 @@ async function protectContentPart(
     if (typeof part.content === "string") {
       next.content = await protectJsonText(session, part.content)
     } else if (Array.isArray(part.content)) {
-      next.content = await protectParts(session, part.content)
+      next.content = await protectParts(session, part.content, true)
     }
     if (typeof part.error === "string") {
       next.error = await protectText(session, part.error)
@@ -114,7 +123,11 @@ async function protectMessage(
         ? await protectJsonText(session, source.content)
         : await protectText(session, source.content)
   } else if (Array.isArray(source.content)) {
-    next.content = await protectParts(session, source.content)
+    next.content = await protectParts(
+      session,
+      source.content,
+      source.role === "tool"
+    )
   }
 
   if (Array.isArray(source.toolCalls)) {

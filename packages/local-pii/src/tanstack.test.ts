@@ -293,12 +293,27 @@ describe("piiConnection message protection", () => {
           toolCallId: "tool-1",
           content: JSON.stringify({ owner: original }),
         },
+        {
+          role: "tool",
+          toolCallId: "tool-2",
+          content: [
+            {
+              type: "text",
+              content: JSON.stringify({ owner: original }),
+            },
+          ],
+        },
       ])
     )
 
     const content = received[0]!.content as string
     expect(content).not.toContain("Ana")
     expect(JSON.parse(content)).toEqual({ owner: expect.stringMatching(TOKEN) })
+    const part = (received[1]!.content as Array<{ content: string }>)[0]!
+    expect(part.content).not.toContain("Ana")
+    expect(JSON.parse(part.content)).toEqual({
+      owner: expect.stringMatching(TOKEN),
+    })
   })
 })
 
@@ -689,6 +704,12 @@ describe("piiConnection text streaming", () => {
           yield {
             type: EventType.TOOL_CALL_END,
             toolCallId: "tool-1",
+            result: [
+              {
+                type: "text",
+                content: JSON.stringify({ name: placeholder!.toLowerCase() }),
+              },
+            ],
           } satisfies StreamChunk
         })(),
     }
@@ -704,6 +725,11 @@ describe("piiConnection text streaming", () => {
       .join("")
 
     expect(JSON.parse(restoredArgs)).toEqual({ name: original })
+    const end = chunks.find(
+      (chunk) => chunk.type === EventType.TOOL_CALL_END
+    ) as Extract<StreamChunk, { type: "TOOL_CALL_END" }>
+    const resultPart = (end.result as Array<{ content: string }>)[0]!
+    expect(JSON.parse(resultPart.content)).toEqual({ name: original })
   })
 
   it("isolates overlapping message and tool buffers while retaining stable tokens", async () => {
