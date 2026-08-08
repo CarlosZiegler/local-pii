@@ -48,7 +48,9 @@ function RuntimePlayground() {
               {runtime.status === "native-ready" ||
               runtime.status === "native-downloadable" ? (
                 <Button
-                  onClick={() => void runtime.activateNative()}
+                  onClick={() => {
+                    void runtime.activateNative().catch(() => undefined)
+                  }}
                   type="button"
                 >
                   {runtime.nativeAvailability === "available" ? (
@@ -62,7 +64,9 @@ function RuntimePlayground() {
               {runtime.status === "fallback-available" ||
               runtime.status === "error" ? (
                 <Button
-                  onClick={() => void runtime.activateFallback()}
+                  onClick={() => {
+                    void runtime.activateFallback().catch(() => undefined)
+                  }}
                   type="button"
                 >
                   <DownloadIcon /> Download local Gemma fallback

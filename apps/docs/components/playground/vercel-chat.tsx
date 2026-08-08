@@ -1,7 +1,6 @@
 "use client"
 
 import { useChat } from "@ai-sdk/react"
-import { browserAI } from "@browser-ai/core"
 import { createAnonymizer, token, type PiiSession } from "local-pii"
 import { withPii } from "local-pii/ai-sdk"
 import {
@@ -12,6 +11,7 @@ import {
 } from "ai"
 import { useMemo, useState } from "react"
 import { ChatShell, type ChatShellMessage } from "./chat-shell"
+import { createEphemeralBrowserAIModel } from "./model/ephemeral-browser-ai"
 import type { PrivacyInspection } from "./privacy-inspector"
 
 export interface VercelChatProps {
@@ -37,7 +37,7 @@ export function VercelChat({ model, runtimeName }: VercelChatProps) {
   const [session] = useState(createSession)
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const protectedModel = useMemo(
-    () => withPii(model ?? browserAI("text"), { session }),
+    () => withPii(model ?? createEphemeralBrowserAIModel(), { session }),
     [model, session]
   )
   const transport = useMemo(

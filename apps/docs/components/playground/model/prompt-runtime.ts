@@ -33,17 +33,6 @@ export interface PromptRuntimeController {
   subscribe(listener: () => void): () => void
 }
 
-declare global {
-  interface Window {
-    TRANSFORMERS_CONFIG?: {
-      apiKey: string
-      device: "webgpu"
-      dtype: "q4f16"
-      modelName: string
-    }
-  }
-}
-
 function withTextExpectations(
   options: LanguageModelCreateOptions = {}
 ): LanguageModelCreateOptions {
@@ -202,23 +191,18 @@ function getWindowLanguageModel(): LanguageModelFactory | undefined {
 export function createBrowserPromptRuntime(): PromptRuntimeController {
   return createPromptRuntimeController({
     getNative: getWindowLanguageModel,
-    configureFallback() {
-      if (typeof window === "undefined") return
-      window.TRANSFORMERS_CONFIG = {
-        apiKey: "dummy",
-        device: "webgpu",
-        dtype: "q4f16",
-        modelName: "onnx-community/gemma-3-270m-it-ONNX",
-      }
-    },
     async loadFallback() {
       if (typeof window === "undefined") {
         throw new Error("The local fallback requires a browser")
       }
-      await import("prompt-api-polyfill")
-      const factory = getWindowLanguageModel()
-      if (!factory)
-        throw new Error("The local Prompt API fallback did not load")
+      const { createGemmaLanguageModelFactory } =
+        await import("./gemma-runtime")
+      const factory = await createGemmaLanguageModelFactory()
+      Object.defineProperty(window, "LanguageModel", {
+        configurable: true,
+        value: factory,
+        writable: true,
+      })
       return factory
     },
   })
