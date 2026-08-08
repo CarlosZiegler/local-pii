@@ -268,6 +268,38 @@ describe("piiConnection message protection", () => {
     expect(clear).not.toHaveBeenCalled()
     expect(Object.values(session.mapping)).toContain("ana@acme.com")
   })
+
+  it("protects escaped PII inside model tool-message JSON", async () => {
+    const original = 'Ana "Boss"'
+    const session = createAnonymizer({
+      dictionary: [{ value: original, type: "CUSTOM" }],
+      placeholders: token(),
+    }).createSession()
+    let received: Array<ModelMessage> = []
+    const wrapped = piiConnection(
+      {
+        connect(messages) {
+          received = messages as Array<ModelMessage>
+          return emptyStream()
+        },
+      },
+      { session }
+    )
+
+    await collect(
+      wrapped.connect([
+        {
+          role: "tool",
+          toolCallId: "tool-1",
+          content: JSON.stringify({ owner: original }),
+        },
+      ])
+    )
+
+    const content = received[0]!.content as string
+    expect(content).not.toContain("Ana")
+    expect(JSON.parse(content)).toEqual({ owner: expect.stringMatching(TOKEN) })
+  })
 })
 
 describe("piiConnection text streaming", () => {
@@ -638,7 +670,9 @@ describe("piiConnection text streaming", () => {
     const protectedName = (await session.anonymize(original)).redactedText
     const placeholder = protectedName.match(TOKEN)?.[0]
     expect(placeholder).toBeDefined()
-    const args = JSON.stringify({ name: placeholder })
+    // Models sometimes case-fold or confuse Crockford characters. Tool JSON
+    // must take the same strategy-aware lenient restoration path as text.
+    const args = JSON.stringify({ name: placeholder!.toLowerCase() })
     const inner: ConnectConnectionAdapter = {
       connect: () =>
         (async function* () {
@@ -835,7 +869,7 @@ describe("piiConnection text streaming", () => {
     expect(terminal).toBeGreaterThan(finalTextDelta)
   })
 
-  it("drops an incomplete placeholder suffix on normal bare completion", async () => {
+  it("preserves an ambiguous token-like suffix on normal bare completion", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const protectedEmail = (await session.anonymize("ana@acme.com"))
       .redactedText
@@ -862,8 +896,7 @@ describe("piiConnection text streaming", () => {
       .map((chunk) => chunk.delta)
       .join("")
 
-    expect(output).toBe("Safe text ")
-    expect(output).not.toContain(placeholder!.slice(0, 8))
+    expect(output).toBe(`Safe text ${placeholder!.slice(0, 8)}`)
   })
 
   it("discards buffered tails on RUN_ERROR, throw, and abort", async () => {

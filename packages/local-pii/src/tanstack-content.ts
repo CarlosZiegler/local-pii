@@ -109,7 +109,10 @@ async function protectMessage(
   }
 
   if (typeof source.content === "string") {
-    next.content = await protectText(session, source.content)
+    next.content =
+      source.role === "tool"
+        ? await protectJsonText(session, source.content)
+        : await protectText(session, source.content)
   } else if (Array.isArray(source.content)) {
     next.content = await protectParts(session, source.content)
   }

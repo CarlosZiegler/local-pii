@@ -75,21 +75,14 @@ describe("createStreamingRehydrator", () => {
     expect(emitted).toContain("a@b.io")
   })
 
-  it("flushes ordinary text but discards an incomplete known-token suffix", () => {
+  it("preserves an ambiguous known-token prefix when a successful stream ends", () => {
     const r = createStreamingRehydrator(mapping)
     expect(r.push(`safe ${key.slice(0, 10)}`)).toBe("")
-    expect(r.flushSafe()).toBe("safe ")
-    expect(r.flush()).toBe("")
+    expect(r.flush()).toBe(`safe ${key.slice(0, 10)}`)
   })
 
-  it("does not truncate ordinary short suffixes", () => {
-    const r = createStreamingRehydrator(mapping)
-    expect(r.push("STOP") + r.flushSafe()).toBe("STOP")
-  })
-
-  it("restores a complete token that ends with its own prefix", () => {
-    const endingInP = "PIIABCP"
-    const r = createStreamingRehydrator({ [endingInP]: "Ana" })
-    expect(r.push(endingInP) + r.flushSafe()).toBe("Ana")
+  it("does not truncate ordinary text matching a custom token prefix", () => {
+    const r = createStreamingRehydrator({ STOPABCDEFG: "Ana" })
+    expect(r.push("please STOP") + r.flush()).toBe("please STOP")
   })
 })

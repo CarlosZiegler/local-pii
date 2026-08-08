@@ -14,21 +14,14 @@ interface StreamState {
   rehydrator: StreamingRehydrator
 }
 
+interface ToolStreamState {
+  protectedContent: string
+}
+
 type UnknownRecord = Record<string, unknown>
 
 function isRecord(value: unknown): value is UnknownRecord {
   return value !== null && typeof value === "object"
-}
-
-function jsonStringMapping(
-  mapping: Readonly<Record<string, string>>
-): Record<string, string> {
-  return Object.fromEntries(
-    Object.entries(mapping).map(([placeholder, value]) => [
-      placeholder,
-      JSON.stringify(value).slice(1, -1),
-    ])
-  )
 }
 
 function finalTextChunk(
@@ -96,7 +89,7 @@ function incrementalToolArgsChunk(
 }
 
 function normalizeProtectedIncrement(
-  state: StreamState,
+  state: { protectedContent: string },
   delta: string,
   cumulative?: string
 ): string {
@@ -125,6 +118,20 @@ function restoreJsonText(session: PiiSession, value: string): string {
     )
   } catch {
     return session.rehydrate(value, { lenient: true })
+  }
+}
+
+function restoreCompleteToolArgs(
+  session: PiiSession,
+  value: string
+): string | undefined {
+  try {
+    return JSON.stringify(
+      session.rehydrateJson(JSON.parse(value), { lenient: true })
+    )
+  } catch {
+    // Never release a protected or syntactically incomplete tool fragment.
+    return undefined
   }
 }
 
@@ -184,7 +191,7 @@ export function restoreTanStackStream(
     async *[Symbol.asyncIterator]() {
       const iterator = source[Symbol.asyncIterator]()
       const text = new Map<string, StreamState>()
-      const tools = new Map<string, StreamState>()
+      const tools = new Map<string, ToolStreamState>()
       const pending = new Map<string, { id: string; kind: "text" | "tool" }>()
       let upstreamDone = false
       let failed = false
@@ -206,12 +213,7 @@ export function restoreTanStackStream(
       const toolStateFor = (toolCallId: string) => {
         let state = tools.get(toolCallId)
         if (!state) {
-          state = {
-            protectedContent: "",
-            rehydrator: createStreamingRehydrator(() =>
-              jsonStringMapping(session.mapping)
-            ),
-          }
+          state = { protectedContent: "" }
           tools.set(toolCallId, state)
           pending.set(`tool:${toolCallId}`, { kind: "tool", id: toolCallId })
         }
@@ -222,7 +224,7 @@ export function restoreTanStackStream(
         const state = text.get(chunk.messageId)
         text.delete(chunk.messageId)
         pending.delete(`text:${chunk.messageId}`)
-        const tail = state?.rehydrator.flushSafe()
+        const tail = state?.rehydrator.flush()
         return tail ? finalTextChunk(chunk.messageId, tail, chunk) : undefined
       }
 
@@ -230,7 +232,9 @@ export function restoreTanStackStream(
         const state = tools.get(chunk.toolCallId)
         tools.delete(chunk.toolCallId)
         pending.delete(`tool:${chunk.toolCallId}`)
-        const tail = state?.rehydrator.flushSafe()
+        const tail = state
+          ? restoreCompleteToolArgs(session, state.protectedContent)
+          : undefined
         return tail
           ? finalToolArgsChunk(chunk.toolCallId, tail, chunk)
           : undefined
@@ -240,10 +244,13 @@ export function restoreTanStackStream(
         const output: StreamChunk[] = []
         for (const item of pending.values()) {
           if (item.kind === "text") {
-            const tail = text.get(item.id)?.rehydrator.flushSafe()
+            const tail = text.get(item.id)?.rehydrator.flush()
             if (tail) output.push(finalTextChunk(item.id, tail, reference))
           } else {
-            const tail = tools.get(item.id)?.rehydrator.flushSafe()
+            const state = tools.get(item.id)
+            const tail = state
+              ? restoreCompleteToolArgs(session, state.protectedContent)
+              : undefined
             if (tail) output.push(finalToolArgsChunk(item.id, tail, reference))
           }
         }
@@ -293,13 +300,11 @@ export function restoreTanStackStream(
           if (chunk.type === "TOOL_CALL_ARGS") {
             const args = chunk as ToolArgsChunk
             const state = toolStateFor(args.toolCallId)
-            const protectedDelta = normalizeProtectedIncrement(
-              state,
-              args.delta,
-              args.args
-            )
-            const delta = state.rehydrator.push(protectedDelta)
-            yield incrementalToolArgsChunk(args, delta)
+            normalizeProtectedIncrement(state, args.delta, args.args)
+            // Tool arguments are JSON. Buffer them until a successful boundary
+            // so JSON escaping and strategy-aware lenient restoration happen
+            // on parsed values, never on unsafe string fragments.
+            yield incrementalToolArgsChunk(args, "")
             continue
           }
 

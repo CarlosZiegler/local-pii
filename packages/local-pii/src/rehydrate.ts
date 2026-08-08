@@ -62,8 +62,6 @@ export interface StreamingRehydrator {
   push(chunk: string): string
   /** Emit whatever is still buffered. Call once when the stream ends. */
   flush(): string
-  /** Emit only a safe final prefix, discarding a partial known placeholder. */
-  flushSafe(): string
 }
 
 /**
@@ -105,43 +103,6 @@ export function createStreamingRehydrator(
     flush() {
       const mapping = getMapping()
       const out = buffer ? rehydrate(buffer, mapping) : ""
-      buffer = ""
-      return out
-    },
-    flushSafe() {
-      const mapping = getMapping()
-      const keys = Object.keys(mapping)
-      const completeTokenRanges: Array<[start: number, end: number]> = []
-      for (const key of keys) {
-        let from = 0
-        while (key.length > 0) {
-          const start = buffer.indexOf(key, from)
-          if (start === -1) break
-          completeTokenRanges.push([start, start + key.length])
-          from = start + 1
-        }
-      }
-
-      let safeEnd = buffer.length
-      for (const key of keys) {
-        const maxPrefix = Math.min(key.length - 1, buffer.length)
-        // A very short suffix is indistinguishable from ordinary prose (for
-        // example, opaque tokens start with P but "STOP" is not truncated).
-        for (let length = maxPrefix; length >= 4; length -= 1) {
-          if (buffer.endsWith(key.slice(0, length))) {
-            const suffixStart = buffer.length - length
-            const overlapsCompleteToken = completeTokenRanges.some(
-              ([start, end]) => suffixStart < end && buffer.length > start
-            )
-            if (!overlapsCompleteToken) {
-              safeEnd = Math.min(safeEnd, suffixStart)
-            }
-            break
-          }
-        }
-      }
-      const out =
-        safeEnd > 0 ? rehydrate(buffer.slice(0, safeEnd), mapping) : ""
       buffer = ""
       return out
     },
