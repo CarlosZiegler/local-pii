@@ -25,6 +25,21 @@ function finalTextChunk(
   } as unknown as StreamChunk
 }
 
+function incrementalTextChunk(
+  content: TextContentChunk,
+  delta: string
+): StreamChunk {
+  const output: TextContentChunk & { content?: string } = {
+    ...content,
+    delta,
+  }
+  // TanStack falls back to this cumulative provider field when `delta` is
+  // empty. Keeping it could bypass the streaming rehydrator and expose a
+  // placeholder, so the adapter emits only the canonical incremental value.
+  delete output.content
+  return output
+}
+
 /** Restore one connection run with buffers isolated from every other run. */
 export function restoreTanStackStream(
   session: PiiSession,
@@ -93,7 +108,7 @@ export function restoreTanStackStream(
           if (chunk.type === "TEXT_MESSAGE_CONTENT") {
             const content = chunk as TextContentChunk
             const delta = rehydratorFor(content.messageId).push(content.delta)
-            yield { ...content, delta }
+            yield incrementalTextChunk(content, delta)
             continue
           }
 

@@ -23,51 +23,15 @@ async function protectContentPart(
     return { ...part, content: await protectText(session, part.content) }
   }
 
-  if (part.type === "tool-call") {
-    const next: UnknownRecord = { ...part }
-    if (typeof part.arguments === "string") {
-      next.arguments = await protectText(session, part.arguments)
-    }
-    if (part.input !== undefined) {
-      next.input = await session.anonymizeJson(part.input)
-    }
-    if (part.output !== undefined) {
-      next.output = await session.anonymizeJson(part.output)
-    }
-    return next
-  }
-
-  if (part.type === "tool-result") {
-    if (typeof part.content === "string") {
-      return { ...part, content: await protectText(session, part.content) }
-    }
-    if (Array.isArray(part.content)) {
-      return {
-        ...part,
-        content: await Promise.all(
-          part.content.map((child) => protectContentPart(session, child))
-        ),
-      }
-    }
+  if (
+    part.type === "structured-output" &&
+    part.status === "complete" &&
+    typeof part.raw === "string"
+  ) {
+    return { ...part, raw: await protectText(session, part.raw) }
   }
 
   return part
-}
-
-async function protectToolCall(
-  session: PiiSession,
-  toolCall: unknown
-): Promise<unknown> {
-  if (!isRecord(toolCall) || !isRecord(toolCall.function)) return toolCall
-  if (typeof toolCall.function.arguments !== "string") return toolCall
-
-  return {
-    ...toolCall,
-    function: {
-      ...toolCall.function,
-      arguments: await protectText(session, toolCall.function.arguments),
-    },
-  }
 }
 
 async function protectMessage(
@@ -88,12 +52,6 @@ async function protectMessage(
   } else if (Array.isArray(source.content)) {
     next.content = await Promise.all(
       source.content.map((part) => protectContentPart(session, part))
-    )
-  }
-
-  if (Array.isArray(source.toolCalls)) {
-    next.toolCalls = await Promise.all(
-      source.toolCalls.map((toolCall) => protectToolCall(session, toolCall))
     )
   }
 

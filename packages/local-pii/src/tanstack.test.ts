@@ -46,6 +46,7 @@ describe("piiConnection message protection", () => {
     const wrapped = piiConnection(inner, { session })
     const createdAt = new Date("2026-08-08T08:00:00.000Z")
     const textMetadata = { trace: "ana@acme.com-must-stay" }
+    const structuredData = { email: "ana@acme.com-ui-data-must-stay" }
     const imagePart = {
       type: "image" as const,
       source: {
@@ -70,6 +71,12 @@ describe("piiConnection message protection", () => {
             type: "thinking",
             content: "Reasoning signature ana@acme.com stays untouched",
             signature: "ana@acme.com-signature",
+          },
+          {
+            type: "structured-output",
+            status: "complete",
+            raw: '{"email":"ana@acme.com"}',
+            data: structuredData,
           },
         ],
       },
@@ -101,6 +108,15 @@ describe("piiConnection message protection", () => {
     expect(ui.createdAt).toBe(createdAt)
     expect(ui.parts[1]).toBe(imagePart)
     expect(ui.parts[2]).toBe(uiMessages[0]!.parts[2])
+    const structured = ui.parts[3]!
+    expect(structured.type).toBe("structured-output")
+    expect("raw" in structured ? structured.raw : "").not.toContain(
+      "ana@acme.com"
+    )
+    expect("raw" in structured ? structured.raw : "").toMatch(TOKEN)
+    expect("data" in structured ? structured.data : undefined).toBe(
+      structuredData
+    )
     expect(receivedData).toBe(data)
     expect(receivedSignal).toBe(controller.signal)
     expect(receivedContext).toBe(runContext)
@@ -160,7 +176,8 @@ describe("piiConnection message protection", () => {
     expect(modelParts[0]!.content).toMatch(TOKEN)
     expect(modelParts[0]!.metadata).toBe(modelTextMetadata)
     expect(modelParts[1]).toBe(documentPart)
-    expect(protectedModel[1]!.toolCalls?.[0]?.function.arguments).not.toContain(
+    expect(protectedModel[1]!.toolCalls).toBe(modelMessages[1]!.toolCalls)
+    expect(protectedModel[1]!.toolCalls?.[0]?.function.arguments).toContain(
       "ana@acme.com"
     )
     expect(protectedModel[1]!.toolCalls?.[0]?.id).toBe("ana@acme.com-tool-id")
@@ -278,10 +295,8 @@ describe("piiConnection text streaming", () => {
       threadId: "thread-1",
       runId: "run-1",
     })
-    expect(textChunks[0]).toMatchObject({
-      model: "local-model",
-      content: "debug-content-must-stay",
-    })
+    expect(textChunks[0]).toMatchObject({ model: "local-model" })
+    expect(textChunks[0]).not.toHaveProperty("content")
   })
 
   it("restores text at every placeholder chunk boundary", async () => {

@@ -79,8 +79,8 @@
   },
   "peerDependencies": {
     "@local-pii/model-rampart": "*",
-    "@tanstack/ai": ">=0.43.1 <0.44",
-    "@tanstack/ai-client": ">=0.23.1 <0.24",
+    "@tanstack/ai": "0.43.1",
+    "@tanstack/ai-client": "0.23.1",
     "ai": ">=6 <8",
     "expo-asset": "*",
     "expo-crypto": "*",
