@@ -20,6 +20,17 @@ function isRecord(value: unknown): value is UnknownRecord {
   return value !== null && typeof value === "object"
 }
 
+function jsonStringMapping(
+  mapping: Readonly<Record<string, string>>
+): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(mapping).map(([placeholder, value]) => [
+      placeholder,
+      JSON.stringify(value).slice(1, -1),
+    ])
+  )
+}
+
 function finalTextChunk(
   messageId: string,
   delta: string,
@@ -197,7 +208,9 @@ export function restoreTanStackStream(
         if (!state) {
           state = {
             protectedContent: "",
-            rehydrator: createStreamingRehydrator(() => session.mapping),
+            rehydrator: createStreamingRehydrator(() =>
+              jsonStringMapping(session.mapping)
+            ),
           }
           tools.set(toolCallId, state)
           pending.set(`tool:${toolCallId}`, { kind: "tool", id: toolCallId })

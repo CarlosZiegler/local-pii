@@ -110,12 +110,32 @@ export function createStreamingRehydrator(
     },
     flushSafe() {
       const mapping = getMapping()
+      const keys = Object.keys(mapping)
+      const completeTokenRanges: Array<[start: number, end: number]> = []
+      for (const key of keys) {
+        let from = 0
+        while (key.length > 0) {
+          const start = buffer.indexOf(key, from)
+          if (start === -1) break
+          completeTokenRanges.push([start, start + key.length])
+          from = start + 1
+        }
+      }
+
       let safeEnd = buffer.length
-      for (const key of Object.keys(mapping)) {
+      for (const key of keys) {
         const maxPrefix = Math.min(key.length - 1, buffer.length)
-        for (let length = maxPrefix; length > 0; length -= 1) {
+        // A very short suffix is indistinguishable from ordinary prose (for
+        // example, opaque tokens start with P but "STOP" is not truncated).
+        for (let length = maxPrefix; length >= 4; length -= 1) {
           if (buffer.endsWith(key.slice(0, length))) {
-            safeEnd = Math.min(safeEnd, buffer.length - length)
+            const suffixStart = buffer.length - length
+            const overlapsCompleteToken = completeTokenRanges.some(
+              ([start, end]) => suffixStart < end && buffer.length > start
+            )
+            if (!overlapsCompleteToken) {
+              safeEnd = Math.min(safeEnd, suffixStart)
+            }
             break
           }
         }

@@ -629,6 +629,49 @@ describe("piiConnection text streaming", () => {
     })
   })
 
+  it("keeps streamed tool argument JSON valid for escaped PII", async () => {
+    const original = 'Ana "Boss"\\Support\nLine'
+    const session = createAnonymizer({
+      dictionary: [{ value: original, type: "CUSTOM" }],
+      placeholders: token(),
+    }).createSession()
+    const protectedName = (await session.anonymize(original)).redactedText
+    const placeholder = protectedName.match(TOKEN)?.[0]
+    expect(placeholder).toBeDefined()
+    const args = JSON.stringify({ name: placeholder })
+    const inner: ConnectConnectionAdapter = {
+      connect: () =>
+        (async function* () {
+          yield {
+            type: EventType.TOOL_CALL_ARGS,
+            toolCallId: "tool-1",
+            delta: args.slice(0, 13),
+          } satisfies StreamChunk
+          yield {
+            type: EventType.TOOL_CALL_ARGS,
+            toolCallId: "tool-1",
+            delta: args.slice(13),
+          } satisfies StreamChunk
+          yield {
+            type: EventType.TOOL_CALL_END,
+            toolCallId: "tool-1",
+          } satisfies StreamChunk
+        })(),
+    }
+
+    const chunks = await collect(
+      piiConnection(inner, { session }).connect([
+        { role: "user", content: "Run tool" },
+      ])
+    )
+    const restoredArgs = chunks
+      .filter((chunk) => chunk.type === EventType.TOOL_CALL_ARGS)
+      .map((chunk) => chunk.delta)
+      .join("")
+
+    expect(JSON.parse(restoredArgs)).toEqual({ name: original })
+  })
+
   it("isolates overlapping message and tool buffers while retaining stable tokens", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const waitForText = barrier(2)

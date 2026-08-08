@@ -81,4 +81,15 @@ describe("createStreamingRehydrator", () => {
     expect(r.flushSafe()).toBe("safe ")
     expect(r.flush()).toBe("")
   })
+
+  it("does not truncate ordinary short suffixes", () => {
+    const r = createStreamingRehydrator(mapping)
+    expect(r.push("STOP") + r.flushSafe()).toBe("STOP")
+  })
+
+  it("restores a complete token that ends with its own prefix", () => {
+    const endingInP = "PIIABCP"
+    const r = createStreamingRehydrator({ [endingInP]: "Ana" })
+    expect(r.push(endingInP) + r.flushSafe()).toBe("Ana")
+  })
 })
