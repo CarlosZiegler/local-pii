@@ -1,0 +1,73 @@
+---
+title: Placeholder-Strategien
+description: sequential (Standard), hashed (keyed) und token (opak) — was wann verwendet werden sollte und warum.
+---
+
+Eine **Placeholder-Strategie** entscheidet, welches Token jeden Wert ersetzt.
+
+| Strategie | Beispiel | Sessionübergreifend stabil | Am besten für |
+| --- | --- | :---: | --- |
+| `sequential()` | `[GIVEN_NAME_1]` | nein | einfachen Chat, Debuggability |
+| `hashed({ secret })` | `[GIVEN_NAME_a3f2c1d0]` | ja | stabile, halbwegs lesbare IDs |
+| `token()` | `PIIQ2X9K7M3TZ8R4EJ0V` | mit `secret` | **Tool Calls, JSON, strukturierte Ausgabe** |
+
+```ts
+import { createAnonymizer, sequential, hashed, token } from "local-pii"
+
+createAnonymizer({ placeholders: sequential() }) // Standard
+createAnonymizer({ placeholders: hashed({ secret }) })
+createAnonymizer({ placeholders: token() })
+```
+
+## `sequential()` — der Standard
+
+`[TYPE_N]`, pro Typ durchnummeriert. Gibt nichts preis (die Zahl sagt nichts
+über den Wert aus), liest sich gut, und kurze, lesbare Tokens sind das, womit
+LLMs am besten schließen können. Stabil innerhalb einer Session; setzt sich
+sessionübergreifend zurück.
+
+## `hashed({ secret })` — keyed, stabil
+
+Ein gekeyter **HMAC** des Werts, sodass derselbe Wert sessions- und
+geräteübergreifend (bei gemeinsamem Secret) dasselbe Token erhält.
+
+> **Warum keyed?** Ein einfacher Hash des Werts (`sha256(email)`) ist ein
+> Privacy-Leak: Platzhalter erreichen den Provider, und PII hat niedrige
+> Entropie, sodass jeder einen erratenen Wert offline bestätigen kann, indem
+> er den Hash neu berechnet. `hashed()` ist HMAC-keyed mit einem
+> geräte-lokalen Secret, das das Gerät nie verlässt. Ungekeytes Hashing wird
+> nicht angeboten. Siehe [Sicherheit](/docs/security).
+
+Ein persistiertes Device-Secret holen (Expo):
+
+```ts
+import { getOrCreateDeviceSecret } from "local-pii/expo"
+import { hashed } from "local-pii"
+
+const secret = await getOrCreateDeviceSecret() // expo-secure-store
+createAnonymizer({ placeholders: hashed({ secret }) })
+```
+
+## `token()` — opak, verstümmelungstolerant
+
+`PII` + Crockford Base32 — **keine Klammern, keine Unterstriche, kein
+Typname**.
+
+Verwende dies immer, wenn **Tools** im Spiel sind oder die Ausgabe maschinell
+geparst wird. Geklammerte `[TYPE_N]`-Tokens werden von LLMs verstümmelt:
+Case-Änderungen, Markdown-Link-Kollisionen (`[x](…)`), übersetzte Typ-Wörter
+oder Behandlung als auszufüllender Template-Slot. Eine opake ID sieht wie
+Daten aus, die das Modell wortgetreu kopieren muss, und übersteht das
+deshalb — und ein nachsichtiges Decoding behebt `O`/`0`- und
+`I`/`L`/`1`-Verwechslungen.
+
+```ts
+import { token } from "local-pii"
+
+token()                       // zufällig pro Wert — gibt nicht einmal Gleichheit preis
+token({ secret })             // HMAC — stabil über Sessions/Geräte hinweg
+token({ bits: 100, prefix: "PII" })
+```
+
+Es gibt nichts preis — nicht einmal den Entitätstyp. Das `entities`-Array im
+Ergebnis führt weiterhin Typen für deine UI mit.

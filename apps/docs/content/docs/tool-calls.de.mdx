@@ -1,0 +1,75 @@
+---
+title: Tool Calls
+description: Warum Tool-/Function-Calling naive Anonymisierung zerbricht, und wie local-pii das End-to-End löst.
+---
+
+Tool Calling ist kein gewöhnlicher Text-Round-Trip. Ein einzelner Schritt
+überquert die Vertrauensgrenze **viermal**:
+
+```text
+user text ──anonymize──▶ provider
+provider ──tool_call { args JSON with placeholders }──▶ app   ← REHYDRATE args (dein Tool braucht echte Daten)
+app tool result (REAL data) ──anonymize──▶ provider           ← neue PII gelangt mitten in die Konversation
+provider ──final text──▶ app                                  ← rehydrate (oft gestreamt)
+```
+
+## Was dabei kaputtgeht
+
+1. **Platzhalter im Argument-JSON.** Das Modell muss das Token Byte für Byte
+   in das von ihm generierte JSON kopieren. Geklammerte `[TYPE_N]`-Tokens
+   werden verstümmelt — Case-Änderungen, Markdown-Kollisionen, übersetzte
+   Typ-Wörter oder Behandlung als auszufüllender Slot mit einem erfundenen
+   Wert.
+2. **JSON-Gültigkeit.** String-Substitution in serialisiertem JSON bricht,
+   wenn ein wiederhergestellter Wert `"`, `\` oder Zeilenumbrüche enthält.
+   **Regel: immer parsen → String-Blätter tief mappen → neu serialisieren.**
+   Genau das tut `rehydrateToolArgs`, mit einem Raw-Fallback (und einem
+   `clean: false`-Flag), wenn das Modell ungültiges JSON ausgibt.
+3. **Streaming-Splits.** Ein Token kann als `[[EMA` und dann als `IL_1]]`
+   ankommen. Der Streaming-Rehydrator hält ein Tail-Ende zurück, solange ein
+   Platzhalter noch weiterwachsen könnte.
+4. **Session-Drift.** Wenn Schritt N+1 die Historie erneut anonymisiert und
+   dabei *andere* Platzhalter erzeugt, sieht der Provider zwei Namen für eine
+   Entität. Das **Vault Dictionary** + **Idempotenz** halten Platzhalter über
+   jeden Schritt hinweg byte-stabil.
+
+## Die Regel
+
+> Alles, was Richtung Provider geht, wird anonymisiert; alles, was an deinen
+> Code zurückgegeben wird, wird rehydriert; eine `PiiSession` umspannt den
+> gesamten Austausch, sodass erneutes Anonymisieren eines rehydrierten Werts
+> exakt denselben Platzhalter reproduziert.
+
+Verwende die opake [`token()`](/docs/strategies)-Strategie, wenn Tools im
+Spiel sind.
+
+## Mit einem Adapter (empfohlen)
+
+Die [AI-SDK](/docs/adapters)- und [OpenAI](/docs/adapters)-Adapter setzen die
+Regel für dich um — die Agent-Loop des SDK führt deine Tools mit echten
+Werten aus, ohne dass ein Tool-Wrapper nötig ist.
+
+## Von Hand
+
+```ts
+import { createPiiChat } from "local-pii/openai"
+
+const chat = createPiiChat() // standardmäßig opake Tokens
+let messages = await chat.anonymizeMessages(userMessages)
+
+const res = await client.chat.completions.create({ model, messages, tools })
+const assistant = chat.rehydrateMessage(res.choices[0].message) // echte Tool-Call-Argumente
+
+// das Tool mit ECHTEN Argumenten ausführen, dann das (echte-PII-)Ergebnis zurückspeisen:
+const toolResult = { role: "tool", tool_call_id: id, content: runTool(assistant) }
+messages = await chat.anonymizeMessages([...messages, assistant, toolResult])
+```
+
+## Ein Vorbehalt, den man verstehen sollte
+
+Ein Tool ist ein **separates Disclosure-Ziel**. Das Rehydrieren von
+Tool-Call-Argumenten gibt deinem Tool die echten Werte — korrekt, wenn das
+Tool **dein eigener Code** ist (ein On-Device-Lookup, dein Backend). Wenn ein
+Tool aber Daten an einen **Dritten** weiterleitet, offenbart das
+Wiederherstellen von PII in diesem Call sie erneut. Entscheide pro Tool, ob
+es echte Werte sehen soll oder bei den Platzhaltern bleiben soll.

@@ -1,0 +1,61 @@
+---
+title: Modelo On-device (Expo)
+description: Execute o modelo NER Rampart em iOS e Android com onnxruntime-react-native.
+---
+
+O modelo NER [Rampart](https://huggingface.co/nationaldesignstudio/rampart)
+(nomes, endereços, IDs) é um modelo ONNX quantizado de 14,7 MB que roda no
+dispositivo via `onnxruntime-react-native`.
+
+```bash
+bun add onnxruntime-react-native expo-asset expo-file-system @local-pii/model-rampart
+bun run fetch-model   # downloads the model into @local-pii/model-rampart (sha256-pinned)
+```
+
+> Requer um **dev client / prebuild — não o Expo Go**
+> (`onnxruntime-react-native` é um módulo nativo). Execute
+> `bunx expo prebuild` e depois compile um dev client.
+
+## 1. Metro
+
+Deixe o Metro empacotar o modelo `.onnx` como asset:
+
+```js
+// metro.config.js
+const { getDefaultConfig } = require("expo/metro-config")
+const { withLocalPiiMetro } = require("local-pii/metro")
+
+module.exports = withLocalPiiMetro(getDefaultConfig(__dirname))
+```
+
+## 2. Uso
+
+```ts
+import { createAnonymizer } from "local-pii"
+import { rampart } from "local-pii/expo"
+
+const pii = createAnonymizer({
+  ner: rampart({ model: require("@local-pii/model-rampart/assets/rampart-q4.onnx") }),
+})
+
+const { redactedText } = await pii.anonymize(
+  "Ontem encontrei João Silva na Müllerstraße 42.",
+)
+// → "Ontem encontrei [GIVEN_NAME_1] [SURNAME_1] na [STREET_NAME_1] [BUILDING_NUMBER_1]."
+```
+
+## Degradação suave
+
+Se o modelo não conseguir carregar, o anonymizer **degrada para apenas
+determinístico** e chama `onDegraded` (defina `strict: true` para lançar uma
+exceção em vez disso):
+
+```ts
+createAnonymizer({
+  ner: rampart({ model: require("@local-pii/model-rampart/assets/rampart-q4.onnx") }),
+  onDegraded: (e) => console.warn("PII model unavailable, rules only:", e.message),
+})
+```
+
+Por padrão, `CITY`, `STATE` e `ZIP_CODE` são mantidos (não redigidos) — altere
+isso com `keep` / `redact`.

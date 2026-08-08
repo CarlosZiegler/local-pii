@@ -1,0 +1,53 @@
+---
+title: Einschränkungen
+description: Was local-pii NICHT erfasst. Lies dies, bevor du dich darauf verlässt.
+---
+
+**PII-Entfernung ist keine perfekte Anonymisierung.** Betrachte local-pii als
+starke Defense-in-Depth, nicht als Garantie. Diese Grenzen sind real, und
+einige davon werden von der Testsuite abgesichert, damit die Dokumentation
+ehrlich bleibt.
+
+## Indirekte Identifikatoren bleiben erhalten
+
+Das Entfernen von Name, E-Mail und Telefonnummer de-identifiziert nicht:
+
+> "I'm the only Brazilian engineer at company X in Kempten, diagnosed yesterday
+> with a rare disease."
+
+Kein Detektor erfasst das. Abmildern lässt sich das mit dem
+[Dictionary](/docs/detectors), dem `strict`-Modus und einem "Private Mode",
+der die API bei sensiblen Notizen komplett überspringt.
+
+## Das Modell hat eine Recall-Obergrenze
+
+Rampart ist ein kleines Modell, das auf Sprachen mit **lateinischer Schrift**
+abgestimmt ist. Aus dem Model Card:
+
+- Private-Term-Recall ~97–99 % bei EN/ES/FR/DE/IT/PT/NL.
+- **Nicht-lateinische Schriften (Kyrillisch, CJK, Arabisch): ~13,7 %** — werden
+  größtenteils übersehen.
+- Behördliche IDs verlassen sich auf das Modell (~68 %).
+
+Deterministische Detektoren haben diese Grenze nicht (sie basieren auf
+Checksummen/Struktur), weshalb sie zuerst laufen und Überlappungen gewinnen.
+
+## Erkennung ist nicht dasselbe wie Reversibilität
+
+Der [Round-Trip](/docs/tool-calls) ist unabhängig davon garantiert, was
+erkannt wurde: Rehydrierung stellt exakt das wieder her, was geschwärzt
+wurde. Aber etwas, das die Detektoren **übersehen**, wird nie geschwärzt — es
+erreicht den Provider also im Klartext. Abdeckung und Reversibilität sind
+getrennte Belange.
+
+## Das richtige Token für den Job wählen
+
+Lesbare `[TYPE_N]`-Platzhalter können mit bereits placeholder-förmigem Text
+im Input kollidieren, und LLMs verstümmeln Klammern in JSON-/Markdown-/
+Tool-Kontexten. Verwende die opake [`token()`](/docs/strategies)-Strategie
+für Tool Calls und maschinell geparste Ausgaben.
+
+## Community-Paket
+
+`local-pii` ist ein unabhängiges Community-Projekt — nicht verbunden mit oder
+unterstützt von Expo, Vercel, OpenAI oder National Design Studio.

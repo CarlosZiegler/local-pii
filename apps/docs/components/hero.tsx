@@ -4,6 +4,7 @@ import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { ArrowRight, Check, Copy, MessagesSquare } from 'lucide-react';
 import { Button } from '@/components/ui/button';
+import { getLanding } from '@/lib/landing-i18n';
 
 type Seg = { t: string; pii?: string };
 
@@ -118,36 +119,31 @@ function Install() {
   );
 }
 
-export function Hero() {
+export function Hero({ lang = 'en' }: { lang?: string }) {
+  const s = getLanding(lang);
   return (
     <section className="mx-auto max-w-4xl px-6 pt-16 pb-10 sm:pt-24">
       <div className="mb-5 inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs text-muted-foreground">
         <span className="size-1.5 rounded-full bg-emerald-500" />
-        on-device PII · Expo · browser · Node
+        {s.eyebrow}
       </div>
 
-      <h1 className="max-w-2xl font-mono text-4xl font-semibold leading-[1.05] tracking-tight sm:text-6xl">
-        The PII never
-        <br />
-        leaves the device.
+      <h1 className="max-w-2xl font-mono text-4xl font-semibold leading-[1.05] tracking-tight text-balance sm:text-6xl">
+        {s.h1}
       </h1>
 
-      <p className="mt-5 max-w-xl text-lg text-muted-foreground">
-        <span className="font-medium text-foreground">local-pii</span> redacts names, emails, phones
-        and more on device — only placeholders reach your LLM, and the reply is rehydrated locally.
-        The mapping never leaves.
-      </p>
+      <p className="mt-5 max-w-xl text-lg text-muted-foreground">{s.sub}</p>
 
       <div className="mt-7 flex flex-wrap items-center gap-3">
         <Install />
         <Button asChild size="lg">
-          <Link href="/docs">
-            Read the docs <ArrowRight className="size-4" />
+          <Link href={`/${lang}/docs`}>
+            {s.docs} <ArrowRight className="size-4" />
           </Link>
         </Button>
         <Button asChild size="lg" variant="outline">
-          <Link href="/docs/playground">
-            <MessagesSquare className="size-4" /> Try the live chat
+          <Link href={`/${lang}/docs/playground`}>
+            <MessagesSquare className="size-4" /> {s.chat}
           </Link>
         </Button>
       </div>

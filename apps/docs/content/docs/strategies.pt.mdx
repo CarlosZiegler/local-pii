@@ -1,0 +1,72 @@
+---
+title: Estratégias de Placeholder
+description: sequential (padrão), hashed (com chave), e token (opaco) — qual usar e por quê.
+---
+
+Uma **estratégia de placeholder** decide o token que substitui cada valor.
+
+| Estratégia | Exemplo | Estável entre sessões | Ideal para |
+| --- | --- | :---: | --- |
+| `sequential()` | `[GIVEN_NAME_1]` | não | chat simples, depuração |
+| `hashed({ secret })` | `[GIVEN_NAME_a3f2c1d0]` | sim | IDs estáveis e razoavelmente legíveis |
+| `token()` | `PIIQ2X9K7M3TZ8R4EJ0V` | com `secret` | **tool calls, JSON, saída estruturada** |
+
+```ts
+import { createAnonymizer, sequential, hashed, token } from "local-pii"
+
+createAnonymizer({ placeholders: sequential() }) // default
+createAnonymizer({ placeholders: hashed({ secret }) })
+createAnonymizer({ placeholders: token() })
+```
+
+## `sequential()` — o padrão
+
+`[TYPE_N]`, numerado por tipo. Não vaza nada (o número não diz nada sobre o
+valor), tem boa legibilidade, e tokens curtos e legíveis são o que os LLMs
+raciocinam melhor. Estável dentro de uma sessão; reinicia entre sessões.
+
+## `hashed({ secret })` — com chave, estável
+
+Um **HMAC** com chave do valor, para que o mesmo valor receba o mesmo token
+entre sessões e dispositivos que compartilhem o segredo.
+
+> **Por que com chave?** Um hash simples do valor (`sha256(email)`) é um
+> vazamento de privacidade: os placeholders chegam ao provedor, e PII tem
+> baixa entropia, então qualquer um pode confirmar um valor adivinhado offline
+> recalculando o hash. `hashed()` usa HMAC com chave, com um segredo local ao
+> dispositivo que nunca sai dele. Hashing sem chave não é oferecido. Veja
+> [Segurança](/docs/security).
+
+Obtenha um segredo de dispositivo persistido (Expo):
+
+```ts
+import { getOrCreateDeviceSecret } from "local-pii/expo"
+import { hashed } from "local-pii"
+
+const secret = await getOrCreateDeviceSecret() // expo-secure-store
+createAnonymizer({ placeholders: hashed({ secret }) })
+```
+
+## `token()` — opaco, tolerante a distorções
+
+`PII` + Crockford base32 — **sem colchetes, sem underscores, sem nome de
+tipo**.
+
+Use isso sempre que **tools** estiverem envolvidas ou a saída for processada
+por máquina. Tokens entre colchetes `[TYPE_N]` são corrompidos por LLMs:
+mudanças de maiúsculas/minúsculas, colisões com links markdown (`[x](…)`),
+palavras de tipo traduzidas, ou sendo tratados como um slot de template a
+preencher. Um ID opaco parece um dado que o modelo precisa copiar literalmente,
+então ele sobrevive — e a decodificação tolerante recupera confusões entre
+`O`/`0` e `I`/`L`/`1`.
+
+```ts
+import { token } from "local-pii"
+
+token()                       // random per value — leaks not even equality
+token({ secret })             // HMAC — stable across sessions/devices
+token({ bits: 100, prefix: "PII" })
+```
+
+Ele não vaza nada — nem mesmo o tipo da entidade. O array `entities` no
+resultado ainda carrega os tipos para a sua UI.

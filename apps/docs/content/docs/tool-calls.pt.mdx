@@ -1,0 +1,75 @@
+---
+title: Tool Calls
+description: Por que tool/function calling quebra a anonimização ingênua, e como o local-pii resolve isso de ponta a ponta.
+---
+
+Tool calling não é um round-trip de texto comum. Um único passo cruza a
+fronteira de confiança **quatro** vezes:
+
+```text
+user text ──anonymize──▶ provider
+provider ──tool_call { args JSON with placeholders }──▶ app   ← REHYDRATE args (your tool needs real data)
+app tool result (REAL data) ──anonymize──▶ provider           ← fresh PII enters mid-conversation
+provider ──final text──▶ app                                  ← rehydrate (often streamed)
+```
+
+## O que quebra
+
+1. **Placeholders no JSON de argumentos.** O modelo precisa copiar o token
+   byte a byte para o JSON que ele gera. Tokens entre colchetes `[TYPE_N]` são
+   corrompidos — mudanças de maiúsculas/minúsculas, colisões com markdown,
+   palavras de tipo traduzidas, ou sendo tratados como um slot a preencher com
+   um valor inventado.
+2. **Validade do JSON.** Substituir strings dentro de um JSON serializado
+   quebra quando um valor restaurado contém `"`, `\` ou quebras de linha.
+   **Regra: sempre parse → deep-map nas folhas de string → re-serialize.** É
+   exatamente isso que `rehydrateToolArgs` faz, com um fallback bruto (e uma
+   flag `clean: false`) para quando o modelo emite um JSON inválido.
+3. **Divisões de streaming.** Um token pode chegar como `[[EMA` e depois
+   `IL_1]]`. O rehydrator de streaming retém uma cauda até que nenhum
+   placeholder possa mais estar crescendo dentro dela.
+4. **Desvio de sessão.** Se o passo N+1 reanonimizar o histórico e produzir
+   placeholders *diferentes*, o provedor vê dois nomes para uma entidade. O
+   **vault dictionary** + **idempotência** mantêm os placeholders
+   byte-estáveis em cada etapa.
+
+## A regra
+
+> Tudo que cruza em direção ao provedor é anonimizado; tudo que é devolvido
+> para o seu código é reidratado; uma única `PiiSession` abrange toda a troca,
+> de modo que reanonimizar um valor reidratado reproduz o placeholder
+> idêntico.
+
+Use a estratégia opaca [`token()`](/docs/strategies) quando tools estiverem em
+jogo.
+
+## Com um adaptador (recomendado)
+
+Os adaptadores do [AI SDK](/docs/adapters) e da [OpenAI](/docs/adapters)
+implementam a regra para você — o loop de agente do SDK roda suas tools com
+valores reais e nenhum wrapper de tool é necessário.
+
+## Manualmente
+
+```ts
+import { createPiiChat } from "local-pii/openai"
+
+const chat = createPiiChat() // opaque tokens by default
+let messages = await chat.anonymizeMessages(userMessages)
+
+const res = await client.chat.completions.create({ model, messages, tools })
+const assistant = chat.rehydrateMessage(res.choices[0].message) // real tool-call args
+
+// run the tool with REAL args, then feed the (real-PII) result back:
+const toolResult = { role: "tool", tool_call_id: id, content: runTool(assistant) }
+messages = await chat.anonymizeMessages([...messages, assistant, toolResult])
+```
+
+## Uma ressalva que vale entender
+
+Uma tool é um **destino de divulgação separado**. Reidratar os argumentos de
+uma tool call dá à sua tool os valores reais — correto quando a tool é o
+**seu próprio código** (uma consulta on-device, seu backend). Mas se uma tool
+encaminha dados para **terceiros**, restaurar PII nessa chamada volta a
+divulgá-los. Decida por tool se ela deve ver valores reais ou manter os
+placeholders.

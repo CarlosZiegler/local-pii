@@ -1,16 +1,16 @@
 import type { BaseLayoutProps } from 'fumadocs-ui/layouts/shared';
 import { appName, gitConfig } from './shared';
 
-export function baseOptions(): BaseLayoutProps {
+export function baseOptions(lang = 'en'): BaseLayoutProps {
   return {
+    i18n: true,
     nav: {
       title: <span className="font-mono font-semibold">{appName}</span>,
-      url: '/',
+      url: `/${lang}`,
     },
-    // Top navbar links.
     links: [
-      { text: 'Docs', url: '/docs' },
-      { text: 'Playground', url: '/docs/playground' },
+      { text: 'Docs', url: `/${lang}/docs` },
+      { text: 'Playground', url: `/${lang}/docs/playground` },
     ],
     githubUrl: `https://github.com/${gitConfig.user}/${gitConfig.repo}`,
   };

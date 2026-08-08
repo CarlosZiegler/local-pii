@@ -1,14 +1,8 @@
-import { RootProvider } from 'fumadocs-ui/provider/next';
 import './global.css';
+import type { ReactNode } from 'react';
 
-export default function Layout({ children }: LayoutProps<'/'>) {
-  return (
-    <html lang="en" suppressHydrationWarning>
-      <body className="flex flex-col min-h-screen">
-        {/* Server search route isn't available in a static export; disabled
-            for the Cloudflare deploy. Re-enable with Fumadocs static search. */}
-        <RootProvider search={{ enabled: false }}>{children}</RootProvider>
-      </body>
-    </html>
-  );
+// The <html>/<body> live in app/[lang]/layout.tsx so the lang attribute is
+// per-locale. This root only loads global styles and passes children through.
+export default function RootLayout({ children }: { children: ReactNode }) {
+  return children;
 }

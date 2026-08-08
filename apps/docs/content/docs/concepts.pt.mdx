@@ -1,0 +1,60 @@
+---
+title: Conceitos Fundamentais
+description: O pipeline, sessões, o vault, o mapping e as duas fronteiras de confiança que o local-pii suporta.
+---
+
+## O pipeline
+
+Toda chamada `anonymize` passa pelo mesmo conjunto de etapas sobre o seu texto:
+
+```text
+text ─▶ deterministic detectors (email, phone, card+Luhn, IBAN, SSN, IP, URL)
+     ─▶ dictionary (your own terms)
+     ─▶ vault dictionary (values already seen this session)
+     ─▶ NER model (names, addresses, IDs) — optional, on device
+     ─▶ resolve overlaps (priority: dictionary > deterministic > NER)
+     ─▶ placeholder engine ─▶ redacted text
+```
+
+Detectores determinísticos são precisos (validados por checksum/estrutura),
+portanto têm prioridade sobre os palpites do modelo. Detecções sobrepostas são
+resolvidas em um conjunto único e sem sobreposição antes que os placeholders
+sejam atribuídos.
+
+## Vault, Mapping e Sessão
+
+- **Vault** — o armazenamento em memória que atribui um **placeholder estável
+  por valor distinto**. O mesmo valor sempre recebe o mesmo placeholder.
+- **Mapping** — um snapshot simples do tipo `Record<placeholder, original>` do
+  vault. Isso é o segredo. Mantenha-o em memória; nunca o serialize para fora
+  do dispositivo.
+- **Sessão** — mantém um único vault ao longo de vários turnos, para que
+  `João` seja `[GIVEN_NAME_1]` em toda mensagem de uma conversa e ao longo de
+  todo um loop de tools.
+
+```ts
+const session = pii.createSession()
+await session.anonymize("First, about João…") // João → [GIVEN_NAME_1]
+await session.anonymize("Tell João I said hi") // João → [GIVEN_NAME_1] again
+session.rehydrate(assistantReply) // bound to this session's mapping
+```
+
+Dois comportamentos de sessão tornam os loops multi-etapas robustos:
+
+- **Vault dictionary** — qualquer valor já visto é correspondido novamente em
+  turnos posteriores, para que um modelo que pare de detectar um nome não
+  possa renumerá-lo ou vazá-lo.
+- **Idempotência** — reanonimizar um texto que já foi redigido não tem efeito
+  (é um no-op).
+
+## Fronteiras de confiança
+
+O mesmo código atende dois formatos de implantação:
+
+- **No dispositivo (Expo / navegador)** — seu app chama o provedor
+  diretamente, o adaptador roda no app, e o mapping nunca sai do dispositivo.
+  Esse é o território natural do local-pii.
+- **No lado do servidor (uma rota Next.js / gateway)** — o adaptador roda no
+  **seu** servidor; o mapping permanece lá e protege contra o **provedor**.
+  Crie uma sessão por requisição — nunca uma sessão em nível de módulo
+  compartilhada entre usuários.

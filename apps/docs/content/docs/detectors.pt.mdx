@@ -1,0 +1,74 @@
+---
+title: Detectores
+description: Os detectores determinísticos embutidos, o dicionário customizado, e como escrever o seu próprio.
+---
+
+## Detectores determinísticos embutidos
+
+Sempre ativos, precisos, validados por checksum/estrutura:
+
+| Detector | Tipo | Validação |
+| --- | --- | --- |
+| `emailDetector` | `EMAIL` | estrutural |
+| `phoneDetector` | `PHONE` | 7–15 dígitos, formatos internacionais |
+| `creditCardDetector` | `CREDIT_CARD` | 13–19 dígitos + Luhn |
+| `ibanDetector` | `IBAN` | ISO 7064 mod-97 |
+| `ssnDetector` | `SSN` | estrutural + rejeição de faixa reservada |
+| `ipDetector` | `IP_ADDRESS` | limites de octeto IPv4, IPv6 |
+| `urlDetector` | `URL` | esquema / `www.` |
+
+Escolha um subconjunto:
+
+```ts
+import { createAnonymizer, emailDetector, phoneDetector } from "local-pii"
+
+createAnonymizer({ detectors: [emailDetector, phoneDetector] })
+createAnonymizer({ detectors: "none" }) // dictionary + NER only
+```
+
+## Dicionário customizado
+
+Sempre redija seus próprios termos — seu nome, família, empregador, nomes-
+código de projetos. Correspondências do dicionário têm prioridade tanto sobre
+os detectores quanto sobre o modelo.
+
+```ts
+createAnonymizer({
+  dictionary: [
+    { value: "Projeto Fênix", type: "ORGANIZATION" },
+    { value: "Carlos Ziegler", type: "PERSON" },
+  ],
+})
+```
+
+Por padrão, as entradas correspondem sem diferenciar maiúsculas/minúsculas e
+por palavra inteira (ambos configuráveis por entrada com `caseSensitive` /
+`wholeWord`).
+
+## Escrevendo um detector
+
+Um detector mapeia texto para entidades. Detectores determinísticos são puros
+e síncronos:
+
+```ts
+import type { Detector } from "local-pii"
+
+const zipDetector: Detector = {
+  name: "us-zip",
+  type: "ZIP_CODE",
+  detect(text) {
+    const out = []
+    for (const m of text.matchAll(/\b\d{5}(?:-\d{4})?\b/g)) {
+      out.push({
+        start: m.index,
+        end: m.index + m[0].length,
+        text: m[0],
+        type: "ZIP_CODE",
+        source: "deterministic",
+        confidence: 1,
+      })
+    }
+    return out
+  },
+}
+```

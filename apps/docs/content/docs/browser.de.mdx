@@ -1,0 +1,49 @@
+---
+title: Browser
+description: Dasselbe Rampart-Modell im Browser mit onnxruntime-web (WASM + WebGPU) ausführen.
+---
+
+Der pure-JS-Kern läuft bereits im Browser. Für NER on-device im Browser
+verdrahtet `local-pii/web` `onnxruntime-web` (WASM, mit WebGPU wo verfügbar)
+mit demselben Modell-Kern, den auch die Expo- und Node-Pfade verwenden.
+
+```bash
+bun add onnxruntime-web local-pii
+```
+
+## Zero-Config
+
+```ts
+import { createAnonymizer } from "local-pii"
+import { rampartWeb } from "local-pii/web"
+
+const pii = createAnonymizer({ ner: rampartWeb() }) // lädt Modell + Tokenizer vom HF-CDN
+const { redactedText } = await pii.anonymize("Hi, I'm João Silva")
+```
+
+## Self-Hosted (empfohlen für Produktion)
+
+Kopiere Modell + Tokenizer in dein `public/`-Verzeichnis und verweise darauf —
+besser für CSP und Verfügbarkeit:
+
+```ts
+import { rampartWeb, rampartAssets } from "local-pii/web"
+
+createAnonymizer({
+  ner: rampartWeb({
+    model: "/models/rampart-q4.onnx",
+    vocab: rampartAssets.vocab,
+    labels: rampartAssets.labels,
+    wasmPaths: "/ort/", // wo du die onnxruntime-web .wasm-Dateien ausliefertst
+    executionProviders: ["webgpu", "wasm"], // Standard; fällt auf wasm zurück
+  }),
+})
+```
+
+Der Modell-Download selbst enthält keine Nutzerdaten. Die Rampart-Autoren
+berichten von einer In-Browser-Latenz von ~3,9 ms (WebGPU) / ~12,6 ms (WASM)
+für kurze Texte.
+
+> Der WASM-Execution-Provider läuft auch unter Node — so verifiziert local-piis
+> eigene Testsuite, dass der Browser-Pfad dieselben Entitäten erkennt wie die
+> native Runtime.

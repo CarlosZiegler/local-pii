@@ -1,0 +1,61 @@
+---
+title: Kernkonzepte
+description: Die Pipeline, Sessions, der Vault, das Mapping und die zwei Vertrauensgrenzen, die local-pii unterstützt.
+---
+
+## Die Pipeline
+
+Jeder `anonymize`-Call durchläuft dieselben Stufen über deinen Text:
+
+```text
+text ─▶ deterministische Detektoren (email, phone, card+Luhn, IBAN, SSN, IP, URL)
+     ─▶ dictionary (deine eigenen Begriffe)
+     ─▶ vault dictionary (in dieser Session bereits gesehene Werte)
+     ─▶ NER-Modell (Namen, Adressen, IDs) — optional, on device
+     ─▶ Überlappungen auflösen (Priorität: dictionary > deterministic > NER)
+     ─▶ Placeholder-Engine ─▶ geschwärzter Text
+```
+
+Deterministische Detektoren sind präzise (checksum-/struktur-validiert) und
+gewinnen daher gegenüber Modell-Schätzungen. Überlappende Erkennungen werden
+zu einer nicht überlappenden Menge aufgelöst, bevor Platzhalter zugewiesen
+werden.
+
+## Vault, Mapping, Session
+
+- **Vault** — der In-Memory-Speicher, der jedem **eindeutigen Wert einen
+  stabilen Platzhalter** zuweist. Derselbe Wert erhält immer denselben
+  Platzhalter.
+- **Mapping** — ein einfacher `Record<placeholder, original>`-Snapshot des
+  Vaults. Das ist das Geheimnis. Halte es im Speicher; serialisiere es nie
+  vom Gerät weg.
+- **Session** — hält einen Vault über mehrere Turns hinweg, sodass `João` in
+  jeder Nachricht einer Konversation und über eine ganze Tool-Loop hinweg
+  `[GIVEN_NAME_1]` bleibt.
+
+```ts
+const session = pii.createSession()
+await session.anonymize("First, about João…") // João → [GIVEN_NAME_1]
+await session.anonymize("Tell João I said hi") // João → wieder [GIVEN_NAME_1]
+session.rehydrate(assistantReply) // gebunden an das Mapping dieser Session
+```
+
+Zwei Session-Verhalten machen mehrstufige Loops robust:
+
+- **Vault Dictionary** — jeder bereits gesehene Wert wird in späteren Turns
+  erneut erkannt, sodass ein Modell, das einen Namen nicht mehr erkennt, ihn
+  weder umnummerieren noch leaken kann.
+- **Idempotenz** — bereits geschwärzten Text erneut zu anonymisieren ist ein
+  No-op.
+
+## Vertrauensgrenzen
+
+Derselbe Code bedient zwei Deployment-Formen:
+
+- **On Device (Expo / Browser)** — deine App ruft den Provider direkt auf,
+  der Adapter läuft in der App, und das Mapping verlässt das Gerät nie. Das
+  ist local-piis ureigenes Terrain.
+- **Server-seitig (eine Next.js-Route / ein Gateway)** — der Adapter läuft
+  auf **deinem** Server; das Mapping bleibt dort und schützt gegenüber dem
+  **Provider**. Erzeuge eine Session pro Request — niemals eine Session auf
+  Modulebene, die zwischen Nutzern geteilt wird.

@@ -1,0 +1,52 @@
+---
+title: Limitações
+description: O que o local-pii NÃO captura. Leia isso antes de confiar nele.
+---
+
+**A remoção de PII não é uma anonimização perfeita.** Trate o local-pii como
+uma defesa em profundidade forte, não como uma garantia. Esses limites são
+reais e alguns são verificados pela suíte de testes para que a documentação
+permaneça honesta.
+
+## Identificadores indiretos não são detectados
+
+Remover nome, email e telefone não desidentifica:
+
+> "Sou o único engenheiro brasileiro na empresa X em Kempten, diagnosticado
+> ontem com uma doença rara."
+
+Nenhum detector captura isso. Mitigue com o [dicionário](/docs/detectors), o
+modo `strict`, e um "modo privado" que pula a API completamente para notas
+sensíveis.
+
+## O modelo tem um teto de recall
+
+O Rampart é um modelo pequeno ajustado para idiomas de **escrita latina**. De
+acordo com seu model card:
+
+- Recall de termos privados de ~97–99% em EN/ES/FR/DE/IT/PT/NL.
+- **Escritas não latinas (cirílico, CJK, árabe): ~13,7%** — majoritariamente
+  não detectados.
+- IDs no estilo governamental dependem do modelo (~68%).
+
+Detectores determinísticos não têm esse limite (são baseados em
+checksum/estrutura), por isso eles rodam primeiro e vencem as sobreposições.
+
+## Detecção não é reversibilidade
+
+O [round-trip](/docs/tool-calls) é garantido independentemente do que for
+detectado: reidratar restaura exatamente o que foi redigido. Mas algo que os
+detectores **não captam** nunca é redigido — então chega ao provedor em texto
+claro. Cobertura e reversibilidade são preocupações separadas.
+
+## Escolha o token certo para o trabalho
+
+Placeholders legíveis `[TYPE_N]` podem colidir com texto no formato de
+placeholder que já existe no input, e LLMs bagunçam colchetes em contextos de
+JSON/markdown/tools. Use a estratégia opaca [`token()`](/docs/strategies)
+para tool calls e saída processada por máquina.
+
+## Pacote da comunidade
+
+`local-pii` é um projeto de comunidade independente — não afiliado a, nem
+endossado por, Expo, Vercel, OpenAI ou National Design Studio.

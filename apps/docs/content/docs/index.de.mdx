@@ -1,0 +1,84 @@
+---
+title: Erste Schritte
+description: On-Device-PII-Anonymisierung für Expo, React Native, den Browser und Node. Lokal schwärzen, nur Platzhalter an ein beliebiges LLM senden, die Antwort rehydrieren.
+---
+
+**local-pii** anonymisiert personenbezogene Daten, **bevor** sie das Gerät
+verlassen, sendet nur Platzhalter an dein LLM und rehydriert die Antwort
+lokal. Das Mapping `Platzhalter → Original` verlässt das Gerät nie.
+
+```text
+Ontem encontrei João Silva. Meu telefone é +49 151 12345678.
+        │  anonymize (on device)
+        ▼
+Ontem encontrei [GIVEN_NAME_1] [SURNAME_1]. Meu telefone é [PHONE_1].   ← nur das wird gesendet
+        │  ↕ dein LLM
+        ▼  rehydrate (on device)
+João Silva / +49 151 12345678 kommen zurück — das Mapping hat das Gerät nie verlassen.
+```
+
+## Installation
+
+```bash
+bun add local-pii   # oder npm / pnpm / yarn
+```
+
+Die deterministische Pipeline (E-Mails, Telefonnummern, Karten, IBAN, SSN,
+IP, URLs) funktioniert ohne weitere Installation, in React Native, im
+Browser und in Node.
+
+## Schnellstart
+
+```ts
+import { createAnonymizer, rehydrate } from "local-pii"
+
+const pii = createAnonymizer()
+
+const { redactedText, mapping } = await pii.anonymize(
+  "Email me at ana@acme.com or call +49 151 12345678",
+)
+// redactedText → "Email me at [EMAIL_1] or call [PHONE_1]"
+
+const reply = await callYourLlm(redactedText) // nur Platzhalter verlassen das Gerät
+const answer = rehydrate(reply, mapping) // Originale lokal wiederhergestellt
+```
+
+`mapping` ist reine Daten (`{ "[EMAIL_1]": "ana@acme.com", … }`). Halte es im
+Speicher — logge es nie, sende es nicht und packe es nicht in
+Analytics-/Crash-Reports.
+
+## On-Device-KI hinzufügen
+
+Die deterministischen Detektoren erkennen keine Namen oder Adressen — das ist
+die Aufgabe des
+[Rampart](https://huggingface.co/nationaldesignstudio/rampart)-NER-Modells.
+Wähle das Backend für deine Plattform:
+
+- **Expo / React Native** → [`rampart()`](/docs/expo) über `onnxruntime-react-native`.
+- **Browser / Web** → [`rampartWeb()`](/docs/browser) über `onnxruntime-web` (WASM/WebGPU).
+
+```ts
+import { createAnonymizer } from "local-pii"
+import { rampart } from "local-pii/expo" // oder: rampartWeb aus "local-pii/web"
+
+const pii = createAnonymizer({
+  ner: rampart({ model: require("@local-pii/model-rampart/assets/rampart-q4.onnx") }),
+})
+// "Ontem encontrei João Silva" → "Ontem encontrei [GIVEN_NAME_1] [SURNAME_1]"
+```
+
+## Deine LLM-Calls umschließen
+
+Adapter umschließen den gesamten anonymize → call → rehydrate-Zyklus,
+**einschließlich Tool Calls**, sodass du kaum etwas an deinem Code ändern
+musst:
+
+- [Vercel AI SDK](/docs/adapters) — `withPii(model)`
+- [OpenAI & Grok/xAI](/docs/adapters) — `withPiiOpenAI(client)`
+
+## Wie geht's weiter
+
+- [Kernkonzepte](/docs/concepts) — die Pipeline, Sessions, der Vault, Vertrauensgrenzen
+- [Placeholder-Strategien](/docs/strategies) — `sequential`, `hashed`, `token`
+- [Tool Calls](/docs/tool-calls) — der schwierige Teil, gelöst
+- [Einschränkungen](/docs/limitations) — was **nicht** erfasst wird (unbedingt lesen)

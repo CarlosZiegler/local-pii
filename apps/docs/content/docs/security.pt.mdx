@@ -1,0 +1,51 @@
+---
+title: Segurança e Hashing
+description: O que cada estratégia vaza, por que hashing sem chave é proibido, e como lidar com o mapping.
+---
+
+## O mapping é o segredo
+
+O `mapping` (`placeholder → original`) é a única coisa capaz de reverter a
+anonimização. Mantenha-o **em memória**. Não o registre em log, não o envie
+para analytics ou crash reporters, nem o persista a menos que seja necessário
+— e, se for necessário, use o keystore da plataforma (`expo-secure-store`),
+nunca armazenamento simples.
+
+Mantenha também o **texto bruto** fora de logs/analytics/crash reporters que
+rodam *antes* da anonimização.
+
+## O que cada estratégia vaza para o provedor
+
+| Estratégia | Vaza o valor? | Vaza igualdade? | Vaza o tipo? |
+| --- | :---: | :---: | :---: |
+| `sequential()` | não | dentro de uma sessão | sim (`[EMAIL_1]`) |
+| `hashed({ secret })` | não | sim (estável) | sim |
+| `token()` (aleatório) | não | não | não |
+| `token({ secret })` | não | sim (estável) | não |
+
+"Vaza igualdade" = o provedor consegue saber que duas menções são a mesma
+entidade. Isso é um recurso útil para IDs estáveis, mas é mais metadado do que
+`sequential` dentro de uma sessão — por isso `sequential` continua sendo o
+padrão.
+
+## Por que hashing sem chave é proibido
+
+Um hash simples de um valor (`sha256(email)`) usado como placeholder é um
+**vazamento de privacidade, pior do que numeração sequencial**:
+
+- Placeholders são enviados ao provedor.
+- PII tem baixa entropia — nomes, telefones e emails são
+  adivinháveis/enumeráveis.
+- Então qualquer um que tenha o placeholder pode confirmar um valor adivinhado
+  **offline**, recalculando o hash (um ataque de rainbow table/dicionário).
+
+Por isso o local-pii só oferece hashing **com chave** (`hashed` /
+`token({ secret })`) usando um segredo aleatório de ≥128 bits gerado no
+dispositivo (`getOrCreateDeviceSecret`) que nunca sai dele. Sem a chave, um
+palpite correto não é verificável.
+
+## Tool calls são um destino de divulgação
+
+Reidratar os argumentos de uma tool call entrega à sua tool os valores reais —
+apropriado quando é o seu próprio código, mas uma nova divulgação se a tool
+encaminhar os dados para terceiros. Veja [Tool Calls](/docs/tool-calls).
