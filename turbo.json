@@ -10,6 +10,9 @@
     "test": {
       "dependsOn": ["^build"]
     },
+    "local-pii#test": {
+      "dependsOn": ["build", "^build"]
+    },
     "lint": {
       "dependsOn": ["^lint"]
     },

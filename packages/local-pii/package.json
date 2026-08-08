@@ -71,7 +71,7 @@
   "scripts": {
     "build": "rslib build",
     "dev": "rslib build --watch",
-    "test": "rslib build && vitest run",
+    "test": "vitest run",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
