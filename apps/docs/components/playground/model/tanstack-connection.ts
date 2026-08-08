@@ -46,13 +46,15 @@ function promptMessage(
   message: UIMessage | ModelMessage
 ): LanguageModelMessage | LanguageModelSystemMessage {
   return {
-    role: message.role as LanguageModelMessageRole | LanguageModelSystemMessageRole,
+    role: message.role as
+      LanguageModelMessageRole | LanguageModelSystemMessageRole,
     content: messageText(message),
   } as LanguageModelMessage | LanguageModelSystemMessage
 }
 
 function fallbackId(prefix: string): string {
-  const suffix = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
+  const suffix =
+    globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
   return `${prefix}-${suffix}`
 }
 

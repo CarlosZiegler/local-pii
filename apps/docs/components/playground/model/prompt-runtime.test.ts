@@ -25,23 +25,26 @@ describe("Prompt runtime controller", () => {
     ["downloadable", "native-downloadable"],
     ["downloading", "native-downloadable"],
     ["unavailable", "fallback-available"],
-  ] as const)("maps native %s without creating or loading", async (value, status) => {
-    const native = factory(value)
-    const loadFallback = vi.fn()
-    const controller = createPromptRuntimeController({
-      getNative: () => native,
-      loadFallback,
-    })
+  ] as const)(
+    "maps native %s without creating or loading",
+    async (value, status) => {
+      const native = factory(value)
+      const loadFallback = vi.fn()
+      const controller = createPromptRuntimeController({
+        getNative: () => native,
+        loadFallback,
+      })
 
-    await controller.check()
+      await controller.check()
 
-    expect(controller.getSnapshot()).toMatchObject({
-      nativeAvailability: value,
-      status,
-    })
-    expect(native.create).not.toHaveBeenCalled()
-    expect(loadFallback).not.toHaveBeenCalled()
-  })
+      expect(controller.getSnapshot()).toMatchObject({
+        nativeAvailability: value,
+        status,
+      })
+      expect(native.create).not.toHaveBeenCalled()
+      expect(loadFallback).not.toHaveBeenCalled()
+    }
+  )
 
   it("does not touch fallback code until explicit activation", async () => {
     const loadFallback = vi.fn(async () => factory("available"))

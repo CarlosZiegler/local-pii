@@ -1,4 +1,8 @@
-import { EventType, type ModelMessage, type StreamChunk } from "@tanstack/ai/client"
+import {
+  EventType,
+  type ModelMessage,
+  type StreamChunk,
+} from "@tanstack/ai/client"
 import { describe, expect, it, vi } from "vitest"
 import type { BrowserModelRuntime } from "./types"
 import { createPromptConnection } from "./tanstack-connection"

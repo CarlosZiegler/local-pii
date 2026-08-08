@@ -90,7 +90,12 @@ export function createPromptRuntimeController(
     kind: LocalRuntimeKind,
     getFactory: () => Promise<LanguageModelFactory>
   ) => {
-    publish({ kind, metadata: METADATA[kind], progress: 0, status: "downloading" })
+    publish({
+      kind,
+      metadata: METADATA[kind],
+      progress: 0,
+      status: "downloading",
+    })
     try {
       const factory = await getFactory()
       const warmSession = await factory.create(
@@ -195,7 +200,8 @@ export function createBrowserPromptRuntime(): PromptRuntimeController {
       }
       await import("prompt-api-polyfill")
       const factory = getWindowLanguageModel()
-      if (!factory) throw new Error("The local Prompt API fallback did not load")
+      if (!factory)
+        throw new Error("The local Prompt API fallback did not load")
       return factory
     },
   })
