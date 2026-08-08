@@ -9,9 +9,11 @@ import {
   type ChatStatus,
   type LanguageModel,
 } from "ai"
-import { useMemo, useState } from "react"
+import { useCallback, useMemo, useState } from "react"
 import { ChatShell, type ChatShellMessage } from "./chat-shell"
 import { createEphemeralBrowserAIModel } from "./model/ephemeral-browser-ai"
+import { normalizeChatTransportAbort } from "./model/normalize-chat-transport-abort"
+import { settleChatStop } from "./model/settle-chat-stop"
 import type { BrowserModelRuntime } from "./model/types"
 import type { PrivacyInspection } from "./privacy-inspector"
 
@@ -38,6 +40,7 @@ function inspectionFrom(
 export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
   const [session] = useState(createSession)
   const [inspection, setInspection] = useState<PrivacyInspection>()
+  const [controlError, setControlError] = useState<Error>()
   const protectedModel = useMemo(
     () =>
       withPii(model ?? createEphemeralBrowserAIModel({ runtime }), { session }),
@@ -45,9 +48,11 @@ export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
   )
   const transport = useMemo(
     () =>
-      new DirectChatTransport({
-        agent: new ToolLoopAgent({ model: protectedModel }),
-      }),
+      normalizeChatTransportAbort(
+        new DirectChatTransport({
+          agent: new ToolLoopAgent({ model: protectedModel }),
+        })
+      ),
     [protectedModel]
   )
   const {
@@ -59,6 +64,11 @@ export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
     status,
     stop,
   } = useChat({ transport })
+  const handleStop = useCallback(() => {
+    void settleChatStop(stop).then((stopError) => {
+      if (stopError) setControlError(stopError)
+    })
+  }, [stop])
 
   const shellMessages = useMemo<Array<ChatShellMessage>>(
     () =>
@@ -82,19 +92,21 @@ export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
 
   return (
     <ChatShell
-      error={error}
+      error={controlError ?? error}
       framework="Vercel AI SDK"
       inspection={inspection}
       messages={shellMessages}
       onNewChat={() => {
-        stop()
+        handleStop()
         setMessages([])
         clearError()
+        setControlError(undefined)
         session.clear()
         setInspection(undefined)
       }}
-      onStop={stop}
+      onStop={handleStop}
       onSubmit={async (text) => {
+        setControlError(undefined)
         const result = await session.anonymize(text)
         setInspection(inspectionFrom(result.redactedText, result.entities))
         await sendMessage({ text })

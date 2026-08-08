@@ -19,6 +19,45 @@ type PromptGlobal = typeof globalThis & {
 
 let promptRuntimeTail = Promise.resolve()
 
+function withoutSignal<Options extends { signal?: AbortSignal }>(
+  options: Options | undefined
+): Options | undefined {
+  if (!options) return undefined
+  const next = { ...options }
+  delete next.signal
+  return next
+}
+
+export function isolatePromptSessionAbort(
+  runtime: BrowserModelRuntime
+): BrowserModelRuntime {
+  return {
+    kind: runtime.kind,
+    availability: (options) => runtime.availability(options),
+    async create(options) {
+      const session = await runtime.create(withoutSignal(options))
+      return new Proxy(session, {
+        get(target, property) {
+          if (property === "prompt") {
+            return (
+              input: LanguageModelPrompt,
+              promptOptions?: LanguageModelPromptOptions
+            ) => target.prompt(input, promptOptions)
+          }
+          if (property === "promptStreaming") {
+            return (
+              input: LanguageModelPrompt,
+              promptOptions?: LanguageModelPromptOptions
+            ) => target.promptStreaming(input, withoutSignal(promptOptions))
+          }
+          const value = Reflect.get(target, property, target)
+          return typeof value === "function" ? value.bind(target) : value
+        },
+      })
+    },
+  }
+}
+
 async function acquirePromptRuntimeLock(): Promise<() => void> {
   const previous = promptRuntimeTail
   let release = () => {}
@@ -37,6 +76,7 @@ async function withPromptRuntime<Result>(
 
   const release = await acquirePromptRuntimeLock()
   const promptGlobal = globalThis as PromptGlobal
+  const promptRuntime = isolatePromptSessionAbort(runtime)
   const previous = Object.getOwnPropertyDescriptor(
     promptGlobal,
     "LanguageModel"
@@ -45,7 +85,7 @@ async function withPromptRuntime<Result>(
   try {
     Object.defineProperty(promptGlobal, "LanguageModel", {
       configurable: true,
-      value: runtime,
+      value: promptRuntime,
       writable: true,
     })
     installed = true

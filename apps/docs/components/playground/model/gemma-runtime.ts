@@ -250,7 +250,8 @@ export async function createGemmaLanguageModelFactory(
     (async () =>
       (await import("@huggingface/transformers")) as unknown as TransformersRuntime)
   const runtime = (await loadTransformers()) as TransformersRuntime
-  runtime.env.experimental_useCrossOriginStorage = true
+  // Keep cache inspection and artifact loading on the same observable backend.
+  runtime.env.experimental_useCrossOriginStorage = false
   let generatorPromise: Promise<TextGenerator> | undefined
 
   const loadGenerator = (monitor?: CreateMonitor) => {

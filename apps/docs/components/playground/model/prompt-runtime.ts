@@ -13,6 +13,16 @@ const TEXT_EXPECTATIONS: Pick<
   expectedOutputs: [{ type: "text", languages: ["en"] }],
 }
 
+const GEMMA_CACHE_NAME = "transformers-cache"
+const GEMMA_CACHE_URLS = [
+  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/config.json",
+  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/generation_config.json",
+  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/tokenizer_config.json",
+  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/tokenizer.json",
+  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/onnx/model_q4f16.onnx",
+  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/onnx/model_q4f16.onnx_data",
+] as const
+
 export interface LanguageModelFactory {
   availability(options?: LanguageModelCreateCoreOptions): Promise<Availability>
   create(options?: LanguageModelCreateOptions): Promise<LanguageModel>
@@ -21,6 +31,7 @@ export interface LanguageModelFactory {
 export interface PromptRuntimeDependencies {
   availabilityTimeoutMs?: number
   getNative?: () => LanguageModelFactory | undefined
+  isFallbackCached?: () => Promise<boolean>
   loadFallback: () => Promise<LanguageModelFactory>
 }
 
@@ -77,6 +88,23 @@ export function createPromptRuntimeController(
     for (const listener of listeners) listener()
   }
 
+  const publishFallback = async (nativeAvailability?: Availability) => {
+    let fallbackCached: boolean | undefined
+    if (dependencies.isFallbackCached) {
+      try {
+        fallbackCached = await dependencies.isFallbackCached()
+      } catch {
+        // Cache inspection must never prevent explicit fallback activation.
+        fallbackCached = false
+      }
+    }
+    publish({
+      ...(fallbackCached === undefined ? {} : { fallbackCached }),
+      ...(nativeAvailability === undefined ? {} : { nativeAvailability }),
+      status: "fallback-available",
+    })
+  }
+
   const activate = async (
     kind: LocalRuntimeKind,
     getFactory: () => Promise<LanguageModelFactory>
@@ -124,7 +152,7 @@ export function createPromptRuntimeController(
       try {
         const native = dependencies.getNative?.()
         if (!native) {
-          publish({ status: "fallback-available" })
+          await publishFallback()
           return
         }
         let timeout: ReturnType<typeof setTimeout> | undefined
@@ -140,18 +168,20 @@ export function createPromptRuntimeController(
           if (timeout) clearTimeout(timeout)
         })
         if (nativeAvailability === "timeout") {
-          publish({ status: "fallback-available" })
+          await publishFallback()
           return
         }
-        publish({
-          nativeAvailability,
-          status:
-            nativeAvailability === "available"
-              ? "native-ready"
-              : nativeAvailability === "unavailable"
-                ? "fallback-available"
+        if (nativeAvailability === "unavailable") {
+          await publishFallback(nativeAvailability)
+        } else {
+          publish({
+            nativeAvailability,
+            status:
+              nativeAvailability === "available"
+                ? "native-ready"
                 : "native-downloadable",
-        })
+          })
+        }
       } catch (cause) {
         publish({
           error: cause instanceof Error ? cause : new Error(String(cause)),
@@ -185,9 +215,23 @@ function getWindowLanguageModel(): LanguageModelFactory | undefined {
     .LanguageModel
 }
 
+export async function hasCachedGemmaArtifacts(
+  cacheStorage: CacheStorage | undefined = typeof caches === "undefined"
+    ? undefined
+    : caches
+): Promise<boolean> {
+  if (!cacheStorage || !(await cacheStorage.has(GEMMA_CACHE_NAME))) return false
+  const cache = await cacheStorage.open(GEMMA_CACHE_NAME)
+  const artifacts = await Promise.all(
+    GEMMA_CACHE_URLS.map((url) => cache.match(url))
+  )
+  return artifacts.every(Boolean)
+}
+
 export function createBrowserPromptRuntime(): PromptRuntimeController {
   return createPromptRuntimeController({
     getNative: getWindowLanguageModel,
+    isFallbackCached: hasCachedGemmaArtifacts,
     async loadFallback() {
       if (typeof window === "undefined") {
         throw new Error("The local fallback requires a browser")

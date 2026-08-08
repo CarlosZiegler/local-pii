@@ -69,7 +69,10 @@ function RuntimePlayground() {
                   }}
                   type="button"
                 >
-                  <DownloadIcon /> Download local Gemma fallback
+                  {runtime.fallbackCached ? <CpuIcon /> : <DownloadIcon />}
+                  {runtime.fallbackCached
+                    ? "Use cached Gemma fallback"
+                    : "Download local Gemma fallback"}
                 </Button>
               ) : null}
               {runtime.status === "error" ? (

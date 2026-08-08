@@ -1,6 +1,9 @@
 import type { LanguageModel } from "ai"
 import { describe, expect, it, vi } from "vitest"
-import { createEphemeralBrowserAIModel } from "./ephemeral-browser-ai"
+import {
+  createEphemeralBrowserAIModel,
+  isolatePromptSessionAbort,
+} from "./ephemeral-browser-ai"
 import type { BrowserModelRuntime } from "./types"
 
 type V4Model = Extract<LanguageModel, { specificationVersion: "v4" }>
@@ -27,6 +30,29 @@ function delegate(chunks = ["one", "two"]) {
 }
 
 describe("ephemeral Browser AI model", () => {
+  it("keeps provider session creation isolated without disabling complete-call abort", async () => {
+    const prompt = vi.fn(async () => "done")
+    const promptStreaming = vi.fn(() => new ReadableStream<string>())
+    const create = vi.fn(async () => ({
+      prompt,
+      promptStreaming,
+    }))
+    const runtime = isolatePromptSessionAbort({
+      availability: vi.fn(async () => "available" as const),
+      create: create as unknown as BrowserModelRuntime["create"],
+      kind: "gemma-3-270m",
+    })
+    const abort = new AbortController()
+
+    const session = await runtime.create({ signal: abort.signal })
+    await session.prompt("hello", { signal: abort.signal })
+    session.promptStreaming("hello", { signal: abort.signal })
+
+    expect(create).toHaveBeenCalledWith({})
+    expect(prompt).toHaveBeenCalledWith("hello", { signal: abort.signal })
+    expect(promptStreaming).toHaveBeenCalledWith("hello", {})
+  })
+
   it("exposes the fallback only for provider session creation and restores the global", async () => {
     const previous = { marker: "native" }
     const fallback = {
@@ -48,7 +74,9 @@ describe("ephemeral Browser AI model", () => {
     })
     const current = delegate()
     current.model.doGenerate.mockImplementation(async () => {
-      expect(promptGlobal.LanguageModel).toBe(fallback)
+      expect(promptGlobal.LanguageModel).toMatchObject({
+        kind: "gemma-3-270m",
+      })
       throw new Error("provider failed")
     })
     const model = createEphemeralBrowserAIModel({
@@ -63,11 +91,7 @@ describe("ephemeral Browser AI model", () => {
       expect(promptGlobal.LanguageModel).toBe(previous)
     } finally {
       if (previousDescriptor) {
-        Object.defineProperty(
-          promptGlobal,
-          "LanguageModel",
-          previousDescriptor
-        )
+        Object.defineProperty(promptGlobal, "LanguageModel", previousDescriptor)
       } else {
         Reflect.deleteProperty(promptGlobal, "LanguageModel")
       }
@@ -103,7 +127,9 @@ describe("ephemeral Browser AI model", () => {
         })
     )
     second.model.doGenerate.mockImplementation(async () => {
-      expect(promptGlobal.LanguageModel).toBe(fallback)
+      expect(promptGlobal.LanguageModel).toMatchObject({
+        kind: "gemma-3-270m",
+      })
       return { content: [] }
     })
     const createModel = vi
@@ -121,7 +147,9 @@ describe("ephemeral Browser AI model", () => {
       const secondGeneration = model.doGenerate({ prompt: [] })
       await Promise.resolve()
 
-      expect(promptGlobal.LanguageModel).toBe(fallback)
+      expect(promptGlobal.LanguageModel).toMatchObject({
+        kind: "gemma-3-270m",
+      })
       expect(second.model.doGenerate).not.toHaveBeenCalled()
 
       finishFirst()
@@ -132,11 +160,7 @@ describe("ephemeral Browser AI model", () => {
       expect(promptGlobal.LanguageModel).toBe(previous)
     } finally {
       if (previousDescriptor) {
-        Object.defineProperty(
-          promptGlobal,
-          "LanguageModel",
-          previousDescriptor
-        )
+        Object.defineProperty(promptGlobal, "LanguageModel", previousDescriptor)
       } else {
         Reflect.deleteProperty(promptGlobal, "LanguageModel")
       }

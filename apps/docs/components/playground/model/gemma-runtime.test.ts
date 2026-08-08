@@ -21,6 +21,7 @@ class FakeTextStreamer {
 }
 
 function fakeTransformers(tokens = ["one ", "two ", "three"]) {
+  const env: { experimental_useCrossOriginStorage?: boolean } = {}
   let generated = 0
   let promptMessages: Array<{ role: string; content: string }> = []
   const progress = vi.fn()
@@ -69,11 +70,12 @@ function fakeTransformers(tokens = ["one ", "two ", "three"]) {
   return {
     generated: () => generated,
     loadTransformers: vi.fn(async () => ({
-      env: {},
+      env,
       InterruptableStoppingCriteria: FakeStoppingCriteria,
       pipeline,
       TextStreamer: FakeTextStreamer,
     })),
+    env,
     pipeline,
     progress,
     promptMessages: () => promptMessages,
@@ -113,6 +115,7 @@ describe("Gemma browser runtime", () => {
     await factory.create()
 
     expect(loaded).toEqual([0.5, 1])
+    expect(fake.env.experimental_useCrossOriginStorage).toBe(false)
     expect(fake.pipeline).toHaveBeenCalledOnce()
     expect(fake.promptMessages()).toEqual([
       { role: "user", content: "Earlier" },
@@ -134,6 +137,20 @@ describe("Gemma browser runtime", () => {
     await expect(reader.read()).resolves.toEqual({ done: false, value: "one " })
     abort.abort(new DOMException("Stopped", "AbortError"))
     await expect(reader.read()).rejects.toMatchObject({ name: "AbortError" })
+    await vi.waitFor(() => expect(fake.generated()).toBe(1))
+  })
+
+  it("interrupts Transformers generation when its stream is cancelled", async () => {
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const model = await factory.create()
+    const reader = model.promptStreaming("Generate").getReader()
+
+    await expect(reader.read()).resolves.toEqual({ done: false, value: "one " })
+    await reader.cancel("stop")
+
     await vi.waitFor(() => expect(fake.generated()).toBe(1))
   })
 })

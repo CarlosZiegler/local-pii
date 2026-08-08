@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest"
-import { createPromptRuntimeController } from "./prompt-runtime"
+import {
+  createPromptRuntimeController,
+  hasCachedGemmaArtifacts,
+} from "./prompt-runtime"
 
 function session(): LanguageModel {
   return { destroy: vi.fn() } as unknown as LanguageModel
@@ -65,6 +68,45 @@ describe("Prompt runtime controller", () => {
       progress: 1,
       status: "ready",
     })
+  })
+
+  it("reports when the complete fallback is already cached", async () => {
+    const controller = createPromptRuntimeController({
+      getNative: () => undefined,
+      isFallbackCached: vi.fn(async () => true),
+      loadFallback: vi.fn(),
+    })
+
+    await controller.check()
+
+    expect(controller.getSnapshot()).toEqual({
+      fallbackCached: true,
+      status: "fallback-available",
+    })
+  })
+
+  it("requires every runtime artifact before reporting a cached fallback", async () => {
+    const cachedUrls = new Set([
+      "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/config.json",
+      "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/generation_config.json",
+      "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/tokenizer_config.json",
+      "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/tokenizer.json",
+      "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/onnx/model_q4f16.onnx",
+    ])
+    const cacheStorage = {
+      has: vi.fn(async () => true),
+      open: vi.fn(async () => ({
+        match: vi.fn(async (url: string) =>
+          cachedUrls.has(url) ? new Response() : undefined
+        ),
+      })),
+    } as unknown as CacheStorage
+
+    await expect(hasCachedGemmaArtifacts(cacheStorage)).resolves.toBe(false)
+    cachedUrls.add(
+      "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/onnx/model_q4f16.onnx_data"
+    )
+    await expect(hasCachedGemmaArtifacts(cacheStorage)).resolves.toBe(true)
   })
 
   it("offers the fallback when native capability detection stalls", async () => {

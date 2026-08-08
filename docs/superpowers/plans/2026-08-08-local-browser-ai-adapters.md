@@ -669,6 +669,13 @@ Serve the static docs export, open the localized playground in desktop Chrome, a
 8. Network shows model artifacts only and no inference endpoint;
 9. English, Portuguese, and German routes render without hydration errors.
 
+Fallback smoke evidence (2026-08-08): explicit Gemma activation downloaded the
+q4f16 artifacts, both framework tabs protected and restored email addresses,
+Stop and new chat worked, cached activation reused the artifacts without new
+Hugging Face requests, and no inference fetch/XHR was observed. The native
+Gemini Nano portion remains open because `LanguageModel.availability()` did not
+resolve in the available Chrome 151 environment.
+
 - [x] **Step 7: Perform final code review**
 
 Use the `code-review` skill against all changes since the first feature commit. Resolve high and medium findings, rerun focused tests for every fix, then rerun the complete automated suite.
