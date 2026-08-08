@@ -38,8 +38,10 @@ function RuntimePlayground() {
               </h3>
               <p className="max-w-2xl text-sm text-muted-foreground">
                 Gemini Nano uses Chrome&apos;s built-in Prompt API. If it is not
-                available, you can opt into Gemma 3 270M IT q4f16 (~426 MB) via
-                WebGPU. Nothing downloads when this page opens.
+                available, you can opt into onnx-community/gemma-3-270m-it-ONNX
+                q4f16 (~426 MB) via WebGPU on a compatible desktop GPU.
+                Gemma&apos;s license terms apply; the model card is linked
+                below. Nothing downloads when this page opens.
               </p>
             </div>
             <div className="flex flex-wrap gap-2">

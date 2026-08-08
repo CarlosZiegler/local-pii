@@ -28,7 +28,9 @@ cancels the current browser generation rather than calling a remote service.
 - Gemini Nano is browser-managed and currently depends on compatible desktop
   Chrome hardware and Prompt API availability.
 - The fallback is `onnx-community/gemma-3-270m-it-ONNX`, q4f16, approximately
-  426 MB. It is loaded only after explicit consent and prefers WebGPU.
+  426 MB. It is loaded only after explicit consent and requires a compatible
+  desktop browser with WebGPU. Review its [model card and Gemma license terms](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
+  before downloading.
 - Artifact downloads may appear in DevTools Network. Prompts, restored values,
   and the privacy vault are never sent to an application inference server.
 - Small local models are useful for this demonstration, but language quality and

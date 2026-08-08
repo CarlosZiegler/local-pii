@@ -27,7 +27,9 @@ no navegador; não chama um serviço remoto.
 - O Gemini Nano é gerenciado pelo navegador e depende de Chrome desktop,
   hardware compatível e disponibilidade da Prompt API.
 - O fallback é `onnx-community/gemma-3-270m-it-ONNX`, q4f16, com cerca de
-  426 MB. Ele só é carregado após consentimento explícito e prefere WebGPU.
+  426 MB. Ele só é carregado após consentimento explícito e exige um navegador
+  desktop compatível com WebGPU. Revise o [model card e os termos da licença Gemma](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
+  antes do download.
 - Downloads dos artefatos podem aparecer no Network do DevTools. Prompts,
   valores reidratados e o vault nunca vão para um servidor de inferência do app.
 - Modelos locais pequenos são adequados para a demonstração, mas qualidade de
