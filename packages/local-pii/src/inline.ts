@@ -1,28 +1,34 @@
-import { createAnonymizer, type Anonymizer } from "./anonymizer"
+import { createAnonymizer } from "./anonymizer"
 import { token } from "./placeholder/strategies"
 import type { PiiSession } from "./session"
 
 export interface InlineContext {
-  readonly session: PiiSession
   readonly signal?: AbortSignal
+}
+
+export interface InlineTransformContext extends InlineContext {
+  /** Available only to the caller-owned protection and restoration steps. */
+  readonly session: PiiSession
 }
 
 export interface InlineSessionOptions {
   /** Borrow a session whose vault should survive this call. */
   session?: PiiSession
-  /** Create an owned session from this anonymizer when no session is supplied. */
-  anonymizer?: Anonymizer
   signal?: AbortSignal
 }
 
-export interface RunInlineOptions<Input, Protected, Output, Restored>
-  extends InlineSessionOptions {
+export interface RunInlineOptions<
+  Input,
+  Protected,
+  Output,
+  Restored,
+> extends InlineSessionOptions {
   input: Input
-  protect: (input: Input, context: InlineContext) => Promise<Protected>
+  protect: (input: Input, context: InlineTransformContext) => Promise<Protected>
   call: (input: Protected, context: InlineContext) => Promise<Output>
   restore: (
     output: Output,
-    context: InlineContext,
+    context: InlineTransformContext
   ) => Promise<Restored> | Restored
 }
 
@@ -34,8 +40,7 @@ interface ResolvedSession {
 function resolveSession(options: InlineSessionOptions): ResolvedSession {
   if (options.session) return { session: options.session, owned: false }
 
-  const anonymizer =
-    options.anonymizer ?? createAnonymizer({ placeholders: token() })
+  const anonymizer = createAnonymizer({ placeholders: token() })
   return { session: anonymizer.createSession(), owned: true }
 }
 
@@ -44,21 +49,25 @@ function resolveSession(options: InlineSessionOptions): ResolvedSession {
  * callers provide the input/output transforms required by their model API.
  */
 export async function runInline<Input, Protected, Output, Restored>(
-  options: RunInlineOptions<Input, Protected, Output, Restored>,
+  options: RunInlineOptions<Input, Protected, Output, Restored>
 ): Promise<Restored> {
   const resolved = resolveSession(options)
-  const context: InlineContext = {
+  const transformContext: InlineTransformContext = {
     session: resolved.session,
     signal: options.signal,
   }
+  const callContext: InlineContext = { signal: options.signal }
 
   try {
     options.signal?.throwIfAborted()
-    const protectedInput = await options.protect(options.input, context)
+    const protectedInput = await options.protect(
+      options.input,
+      transformContext
+    )
     options.signal?.throwIfAborted()
-    const output = await options.call(protectedInput, context)
+    const output = await options.call(protectedInput, callContext)
     options.signal?.throwIfAborted()
-    return await options.restore(output, context)
+    return await options.restore(output, transformContext)
   } finally {
     if (resolved.owned) resolved.session.clear()
   }
@@ -80,15 +89,17 @@ export function runInlineText(options: RunInlineTextOptions): Promise<string> {
   })
 }
 
-export interface RunInlineJsonOptions<Input, Output>
-  extends InlineSessionOptions {
+export interface RunInlineJsonOptions<
+  Input,
+  Output,
+> extends InlineSessionOptions {
   input: Input
   call: (input: Input, context: InlineContext) => Promise<Output>
 }
 
 /** Protect and restore every string leaf while preserving the JSON shape. */
 export function runInlineJson<Input, Output>(
-  options: RunInlineJsonOptions<Input, Output>,
+  options: RunInlineJsonOptions<Input, Output>
 ): Promise<Output> {
   return runInline<Input, Input, Output, Output>({
     ...options,

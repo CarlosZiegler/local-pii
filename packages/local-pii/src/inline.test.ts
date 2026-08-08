@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest"
-import { createAnonymizer, type Anonymizer } from "./anonymizer"
+import { createAnonymizer } from "./anonymizer"
 import {
   runInline,
   runInlineJson,
@@ -11,14 +11,6 @@ import type { PiiSession } from "./session"
 
 const TOKEN = /PII[0-9A-HJKMNP-TV-Z]+/
 
-function withOwnedSession(session: PiiSession): Anonymizer {
-  const base = createAnonymizer({ placeholders: token() })
-  return {
-    ...base,
-    createSession: () => session,
-  }
-}
-
 describe("runInlineText", () => {
   it("protects the model-facing input and restores the complete response", async () => {
     const wire: string[] = []
@@ -26,7 +18,9 @@ describe("runInlineText", () => {
     const output = await runInlineText({
       input: "Email ana@acme.com",
       call: async (protectedText, context) => {
-        expect(context.session.mapping).not.toEqual({})
+        expect("session" in context).toBe(false)
+        // @ts-expect-error The model callback must not receive the PII vault.
+        expect(context.session).toBeUndefined()
         wire.push(protectedText)
         return `Confirmed ${protectedText}`
       },
@@ -53,60 +47,77 @@ describe("runInlineText", () => {
   })
 
   it("clears an internally owned session after a successful call", async () => {
-    const owned = createAnonymizer({ placeholders: token() }).createSession()
-    const clear = vi.spyOn(owned, "clear")
+    let owned: PiiSession | undefined
+    let clear: ReturnType<typeof vi.spyOn> | undefined
 
-    await runInlineText({
+    await runInline({
       input: "Email ana@acme.com",
-      anonymizer: withOwnedSession(owned),
+      protect: async (input, context) => {
+        owned = context.session
+        clear = vi.spyOn(context.session, "clear")
+        return (await context.session.anonymize(input)).redactedText
+      },
       call: async (protectedText) => protectedText,
+      restore: (output, { session }) =>
+        session.rehydrate(output, { lenient: true }),
     })
 
     expect(clear).toHaveBeenCalledOnce()
-    expect(owned.mapping).toEqual({})
+    expect(owned?.mapping).toEqual({})
   })
 
   it("preserves the original callback error and still clears owned state", async () => {
     const failure = new Error("model failed")
-    const owned = createAnonymizer({ placeholders: token() }).createSession()
-    const clear = vi.spyOn(owned, "clear")
+    let owned: PiiSession | undefined
+    let clear: ReturnType<typeof vi.spyOn> | undefined
 
-    const result = runInlineText({
+    const result = runInline({
       input: "Email ana@acme.com",
-      anonymizer: withOwnedSession(owned),
+      protect: async (input, context) => {
+        owned = context.session
+        clear = vi.spyOn(context.session, "clear")
+        return (await context.session.anonymize(input)).redactedText
+      },
       call: async () => {
         throw failure
       },
+      restore: (output) => output,
     })
 
     await expect(result).rejects.toBe(failure)
     expect(clear).toHaveBeenCalledOnce()
-    expect(owned.mapping).toEqual({})
+    expect(owned?.mapping).toEqual({})
   })
 
   it("forwards the AbortSignal and preserves its abort reason", async () => {
     const controller = new AbortController()
     const reason = new Error("user stopped")
-    const owned = createAnonymizer({ placeholders: token() }).createSession()
-    const clear = vi.spyOn(owned, "clear")
+    let owned: PiiSession | undefined
+    let clear: ReturnType<typeof vi.spyOn> | undefined
     let context: InlineContext | undefined
 
-    const result = runInlineText({
+    const result = runInline({
       input: "Email ana@acme.com",
-      anonymizer: withOwnedSession(owned),
       signal: controller.signal,
+      protect: async (input, transformContext) => {
+        owned = transformContext.session
+        clear = vi.spyOn(transformContext.session, "clear")
+        return (await transformContext.session.anonymize(input)).redactedText
+      },
       call: async (protectedText, nextContext) => {
         context = nextContext
         controller.abort(reason)
         nextContext.signal?.throwIfAborted()
         return protectedText
       },
+      restore: (output) => output,
     })
 
     await expect(result).rejects.toBe(reason)
     expect(context?.signal).toBe(controller.signal)
+    expect(context && "session" in context).toBe(false)
     expect(clear).toHaveBeenCalledOnce()
-    expect(owned.mapping).toEqual({})
+    expect(owned?.mapping).toEqual({})
   })
 })
 
@@ -123,7 +134,10 @@ describe("runInlineJson", () => {
     const snapshot = structuredClone(input)
     let wire: unknown
 
-    const output = await runInlineJson<typeof input, { summary: string; nested: unknown }>({
+    const output = await runInlineJson<
+      typeof input,
+      { summary: string; nested: unknown }
+    >({
       input,
       call: async (protectedInput) => {
         wire = protectedInput
