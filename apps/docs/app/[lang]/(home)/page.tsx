@@ -1,4 +1,5 @@
 import Link from 'next/link';
+import type { Metadata } from 'next';
 import { Cpu, Wrench, Plug, Feather, ArrowRight } from 'lucide-react';
 import { Hero } from '@/components/hero';
 import { Card } from '@/components/ui/card';
@@ -6,6 +7,16 @@ import { Button } from '@/components/ui/button';
 import { getLanding } from '@/lib/landing-i18n';
 
 const ICONS = [Cpu, Wrench, Plug, Feather];
+
+export async function generateMetadata({
+  params,
+}: {
+  params: Promise<{ lang: string }>;
+}): Promise<Metadata> {
+  const { lang } = await params;
+  const s = getLanding(lang);
+  return { title: 'local-pii', description: s.sub };
+}
 
 export default async function HomePage({ params }: { params: Promise<{ lang: string }> }) {
   const { lang } = await params;
