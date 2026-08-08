@@ -14,7 +14,7 @@ import { escapeRegex } from "./util"
 export function rehydrate(
   text: string,
   mapping: Mapping,
-  opts?: RehydrateOptions,
+  opts?: RehydrateOptions
 ): string {
   const keys = Object.keys(mapping)
   if (keys.length === 0) return text
@@ -24,7 +24,8 @@ export function rehydrate(
   const normalize = opts?.lenient ? opts.strategy?.normalizeMatch : undefined
   if (normalize) {
     const index = new Map<string, string>()
-    for (const key of keys) index.set(normalize.call(opts!.strategy!, key) || key, mapping[key]!)
+    for (const key of keys)
+      index.set(normalize.call(opts!.strategy!, key) || key, mapping[key]!)
     const scan = opts!.strategy!.lenientPattern?.() ?? opts!.strategy!.pattern()
     const flags = scan.flags.includes("g") ? scan.flags : `${scan.flags}g`
     return text.replace(new RegExp(scan.source, flags), (match) => {
@@ -61,6 +62,8 @@ export interface StreamingRehydrator {
   push(chunk: string): string
   /** Emit whatever is still buffered. Call once when the stream ends. */
   flush(): string
+  /** Emit only a safe final prefix, discarding a partial known placeholder. */
+  flushSafe(): string
 }
 
 /**
@@ -73,7 +76,7 @@ export interface StreamingRehydrator {
  * Use with the opaque {@link token} strategy, whose tokens LLMs don't mangle.
  */
 export function createStreamingRehydrator(
-  source: Mapping | (() => Mapping),
+  source: Mapping | (() => Mapping)
 ): StreamingRehydrator {
   // A getter lets the rehydrator see entries added mid-loop (e.g. a tool result
   // that introduced new PII part-way through a streamed answer).
@@ -102,6 +105,23 @@ export function createStreamingRehydrator(
     flush() {
       const mapping = getMapping()
       const out = buffer ? rehydrate(buffer, mapping) : ""
+      buffer = ""
+      return out
+    },
+    flushSafe() {
+      const mapping = getMapping()
+      let safeEnd = buffer.length
+      for (const key of Object.keys(mapping)) {
+        const maxPrefix = Math.min(key.length - 1, buffer.length)
+        for (let length = maxPrefix; length > 0; length -= 1) {
+          if (buffer.endsWith(key.slice(0, length))) {
+            safeEnd = Math.min(safeEnd, buffer.length - length)
+            break
+          }
+        }
+      }
+      const out =
+        safeEnd > 0 ? rehydrate(buffer.slice(0, safeEnd), mapping) : ""
       buffer = ""
       return out
     },

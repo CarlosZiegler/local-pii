@@ -13,6 +13,26 @@ async function protectText(session: PiiSession, text: string): Promise<string> {
   return (await session.anonymize(text)).redactedText
 }
 
+async function protectJsonText(
+  session: PiiSession,
+  text: string
+): Promise<string> {
+  try {
+    return JSON.stringify(await session.anonymizeJson(JSON.parse(text)))
+  } catch {
+    return protectText(session, text)
+  }
+}
+
+async function protectParts(
+  session: PiiSession,
+  parts: Array<unknown>
+): Promise<Array<unknown>> {
+  const output: Array<unknown> = []
+  for (const part of parts) output.push(await protectContentPart(session, part))
+  return output
+}
+
 async function protectContentPart(
   session: PiiSession,
   part: unknown
@@ -31,7 +51,50 @@ async function protectContentPart(
     return { ...part, raw: await protectText(session, part.raw) }
   }
 
+  if (part.type === "tool-call") {
+    const next: UnknownRecord = { ...part }
+    if (typeof part.arguments === "string") {
+      next.arguments = await protectJsonText(session, part.arguments)
+    }
+    if (part.input !== undefined) {
+      next.input = await session.anonymizeJson(part.input)
+    }
+    if (part.output !== undefined) {
+      next.output = await session.anonymizeJson(part.output)
+    }
+    return next
+  }
+
+  if (part.type === "tool-result") {
+    const next: UnknownRecord = { ...part }
+    if (typeof part.content === "string") {
+      next.content = await protectJsonText(session, part.content)
+    } else if (Array.isArray(part.content)) {
+      next.content = await protectParts(session, part.content)
+    }
+    if (typeof part.error === "string") {
+      next.error = await protectText(session, part.error)
+    }
+    return next
+  }
+
   return part
+}
+
+async function protectModelToolCall(
+  session: PiiSession,
+  toolCall: unknown
+): Promise<unknown> {
+  if (!isRecord(toolCall) || !isRecord(toolCall.function)) return toolCall
+  if (typeof toolCall.function.arguments !== "string") return toolCall
+
+  return {
+    ...toolCall,
+    function: {
+      ...toolCall.function,
+      arguments: await protectJsonText(session, toolCall.function.arguments),
+    },
+  }
 }
 
 async function protectMessage(
@@ -42,17 +105,21 @@ async function protectMessage(
   const next: UnknownRecord = { ...source }
 
   if (Array.isArray(source.parts)) {
-    next.parts = await Promise.all(
-      source.parts.map((part) => protectContentPart(session, part))
-    )
+    next.parts = await protectParts(session, source.parts)
   }
 
   if (typeof source.content === "string") {
     next.content = await protectText(session, source.content)
   } else if (Array.isArray(source.content)) {
-    next.content = await Promise.all(
-      source.content.map((part) => protectContentPart(session, part))
-    )
+    next.content = await protectParts(session, source.content)
+  }
+
+  if (Array.isArray(source.toolCalls)) {
+    const toolCalls: Array<unknown> = []
+    for (const toolCall of source.toolCalls) {
+      toolCalls.push(await protectModelToolCall(session, toolCall))
+    }
+    next.toolCalls = toolCalls
   }
 
   return next as unknown as UIMessage | ModelMessage

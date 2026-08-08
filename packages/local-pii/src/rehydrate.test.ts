@@ -3,15 +3,20 @@ import { createStreamingRehydrator, rehydrate } from "./rehydrate"
 
 describe("rehydrate", () => {
   it("restores placeholders from the mapping", () => {
-    const mapping = { "[GIVEN_NAME_1]": "João", "[PHONE_1]": "+49 151 12345678" }
+    const mapping = {
+      "[GIVEN_NAME_1]": "João",
+      "[PHONE_1]": "+49 151 12345678",
+    }
     expect(rehydrate("ligue para [GIVEN_NAME_1] no [PHONE_1]", mapping)).toBe(
-      "ligue para João no +49 151 12345678",
+      "ligue para João no +49 151 12345678"
     )
   })
 
   it("restores every occurrence", () => {
     const mapping = { "[GIVEN_NAME_1]": "Ana" }
-    expect(rehydrate("[GIVEN_NAME_1] e [GIVEN_NAME_1]", mapping)).toBe("Ana e Ana")
+    expect(rehydrate("[GIVEN_NAME_1] e [GIVEN_NAME_1]", mapping)).toBe(
+      "Ana e Ana"
+    )
   })
 
   it("matches the longest placeholder first (10 before 1)", () => {
@@ -21,7 +26,7 @@ describe("rehydrate", () => {
 
   it("leaves unknown / model-invented placeholders untouched", () => {
     expect(rehydrate("[GIVEN_NAME_9] stays", { "[GIVEN_NAME_1]": "Ana" })).toBe(
-      "[GIVEN_NAME_9] stays",
+      "[GIVEN_NAME_9] stays"
     )
   })
 
@@ -31,14 +36,16 @@ describe("rehydrate", () => {
 
   it("matches bracket-mangled tokens in lenient mode", () => {
     const mapping = { "[GIVEN_NAME_1]": "Ana" }
-    expect(rehydrate("call GIVEN_NAME_1 today", mapping, { lenient: true })).toBe(
-      "call Ana today",
-    )
-    expect(rehydrate("call [[GIVEN_NAME_1]] today", mapping, { lenient: true })).toBe(
-      "call Ana today",
-    )
+    expect(
+      rehydrate("call GIVEN_NAME_1 today", mapping, { lenient: true })
+    ).toBe("call Ana today")
+    expect(
+      rehydrate("call [[GIVEN_NAME_1]] today", mapping, { lenient: true })
+    ).toBe("call Ana today")
     // Without lenient, a bracket-stripped token is left as-is.
-    expect(rehydrate("call GIVEN_NAME_1 today", mapping)).toBe("call GIVEN_NAME_1 today")
+    expect(rehydrate("call GIVEN_NAME_1 today", mapping)).toBe(
+      "call GIVEN_NAME_1 today"
+    )
   })
 })
 
@@ -62,7 +69,16 @@ describe("createStreamingRehydrator", () => {
 
   it("emits a completed token once enough trailing text has arrived", () => {
     const r = createStreamingRehydrator(mapping)
-    const emitted = r.push(`see ${key} for more text well past the holdback window`)
+    const emitted = r.push(
+      `see ${key} for more text well past the holdback window`
+    )
     expect(emitted).toContain("a@b.io")
+  })
+
+  it("flushes ordinary text but discards an incomplete known-token suffix", () => {
+    const r = createStreamingRehydrator(mapping)
+    expect(r.push(`safe ${key.slice(0, 10)}`)).toBe("")
+    expect(r.flushSafe()).toBe("safe ")
+    expect(r.flush()).toBe("")
   })
 })
