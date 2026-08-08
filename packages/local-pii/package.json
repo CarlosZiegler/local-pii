@@ -52,6 +52,11 @@
       "import": "./dist/ai-sdk.js",
       "require": "./dist/ai-sdk.cjs"
     },
+    "./inline": {
+      "types": "./dist/inline.d.ts",
+      "import": "./dist/inline.js",
+      "require": "./dist/inline.cjs"
+    },
     "./package.json": "./package.json"
   },
   "files": [

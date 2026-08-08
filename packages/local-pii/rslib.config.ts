@@ -12,6 +12,7 @@ export default defineConfig({
       web: "./src/web.ts",
       openai: "./src/openai.ts",
       "ai-sdk": "./src/ai-sdk.ts",
+      inline: "./src/inline.ts",
     },
   },
   lib: [
