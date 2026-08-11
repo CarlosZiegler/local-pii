@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest"
-import { managedGeneration } from "./browser-generation-runtime"
+import {
+  managedGeneration,
+  trackActiveGeneration,
+} from "./browser-generation-runtime"
 import { createFakeBrowserRuntime } from "./fake-runtime"
 import { createProtectedBrowserRequest } from "./protected-request"
 
@@ -73,6 +76,38 @@ describe("managedGeneration", () => {
     expect(returned).toHaveBeenCalledWith("stop")
   })
 
+  it("awaits late-open cleanup from consumer return", async () => {
+    const opening = deferred<AsyncIterator<string>>()
+    const returned = vi.fn(async () => ({
+      done: true as const,
+      value: undefined,
+    }))
+    const settled = vi.fn()
+    const reader = managedGeneration(() => opening.promise, undefined, settled)[
+      Symbol.asyncIterator
+    ]()
+    const pendingNext = reader.next()
+    const close = reader.return?.("stop")
+
+    await Promise.resolve()
+    let returnedClose = false
+    void close?.then(() => {
+      returnedClose = true
+    })
+    await Promise.resolve()
+    expect(returnedClose).toBe(false)
+    expect(settled).not.toHaveBeenCalled()
+
+    opening.resolve({
+      next: async () => ({ done: true, value: undefined }),
+      return: returned,
+    })
+    await close
+    await pendingNext
+    expect(returned).toHaveBeenCalledWith("stop")
+    expect(settled).toHaveBeenCalledOnce()
+  })
+
   it("returns the source on abort while next is pending", async () => {
     const abort = new AbortController()
     const pending = deferred<IteratorResult<string>>()
@@ -92,6 +127,25 @@ describe("managedGeneration", () => {
 
     await expect(next).rejects.toThrow("stop")
     expect(returned).toHaveBeenCalledWith(expect.any(Error))
+  })
+
+  it("delivers an abort reason only to the pending next", async () => {
+    const abort = new AbortController()
+    const reader = managedGeneration(
+      async () => ({
+        next: () => new Promise<IteratorResult<string>>(() => {}),
+        return: async () => ({ done: true as const, value: undefined }),
+      }),
+      abort.signal
+    )[Symbol.asyncIterator]()
+    const pending = reader.next()
+    const reason = new Error("stop once")
+    abort.abort(reason)
+    await expect(pending).rejects.toBe(reason)
+    await expect(reader.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
   })
 
   it("rejects promptly when abort interrupts a pending open", async () => {
@@ -142,6 +196,47 @@ describe("managedGeneration", () => {
     ).toThrow("leading system")
   })
 
+  it("rejects a signal missing the symmetric abort interface", () => {
+    expect(() =>
+      createProtectedBrowserRequest({
+        protectedHistory: [],
+        protectedContent: "Current",
+        signal: {
+          aborted: false,
+          addEventListener() {},
+        } as unknown as AbortSignal,
+      })
+    ).toThrow("AbortSignal")
+  })
+
+  it("surfaces late cleanup failure through return and the disposal barrier", async () => {
+    const opening = deferred<AsyncIterator<string>>()
+    const cleanupError = new Error("late cleanup")
+    const active = new Set<Promise<void>>()
+    const source = trackActiveGeneration(
+      managedGeneration(
+        () => opening.promise,
+        undefined,
+        () => {
+          throw cleanupError
+        }
+      ),
+      active
+    )
+    const reader = source[Symbol.asyncIterator]()
+    const pending = reader.next()
+    const close = reader.return?.("stop")
+    const disposal = Promise.all([...active])
+
+    opening.resolve({
+      next: async () => ({ done: true, value: undefined }),
+      return: async () => ({ done: true, value: undefined }),
+    })
+    await expect(pending).resolves.toEqual({ done: true, value: undefined })
+    await expect(close).rejects.toBe(cleanupError)
+    await expect(disposal).rejects.toBe(cleanupError)
+  })
+
   it("preserves a generation error over cleanup failure", async () => {
     const generationError = new Error("generation")
     const cleanupError = new Error("cleanup")
@@ -183,6 +278,25 @@ describe("managedGeneration", () => {
         )
       )
     ).rejects.toBe(cleanupError)
+  })
+
+  it("delivers a terminal cleanup failure only once", async () => {
+    const cleanupError = new Error("terminal cleanup")
+    const reader = managedGeneration(
+      async () => ({
+        next: async () => ({ done: true as const, value: undefined }),
+      }),
+      undefined,
+      () => {
+        throw cleanupError
+      }
+    )[Symbol.asyncIterator]()
+
+    await expect(reader.next()).rejects.toBe(cleanupError)
+    await expect(reader.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
   })
 
   it("preserves an undefined primary error over cleanup failure", async () => {

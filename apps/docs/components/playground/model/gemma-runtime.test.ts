@@ -1,5 +1,8 @@
 import { describe, expect, it, vi } from "vitest"
-import { createGemmaBrowserRuntime } from "./gemma-runtime"
+import {
+  createGemmaBrowserRuntime,
+  createGemmaLanguageModelFactory,
+} from "./gemma-runtime"
 import { createProtectedBrowserRequest } from "./protected-request"
 
 class FakeStoppingCriteria {
@@ -21,11 +24,16 @@ class FakeTextStreamer {
   }
 }
 
-function fakeTransformers(tokens = ["one ", "two ", "three"] as const) {
+function fakeTransformers(
+  tokens: readonly string[] = ["one ", "two ", "three"]
+) {
   const env: { experimental_useCrossOriginStorage?: boolean } = {}
   const promptMessages: Array<{ role: string; content: string }> = []
   const criteria: FakeStoppingCriteria[] = []
-  const dispose = vi.fn(async () => {})
+  let disposed = false
+  const dispose = vi.fn(async () => {
+    disposed = true
+  })
   const generator = Object.assign(
     vi.fn(
       async (
@@ -35,6 +43,7 @@ function fakeTransformers(tokens = ["one ", "two ", "three"] as const) {
           streamer: FakeTextStreamer
         }
       ) => {
+        if (disposed) throw new Error("used disposed generator")
         criteria.push(options.stopping_criteria[0]!)
         for (const value of tokens) {
           await new Promise((resolve) => setTimeout(resolve, 0))
@@ -211,6 +220,60 @@ describe("Gemma browser-generation runtime", () => {
     await expect(runtime.dispose()).rejects.toBe(disposalError)
     await expect(runtime.dispose()).rejects.toBe(disposalError)
     expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("does not dispose the shared pipeline for one aborted run", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers()
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const abort = new AbortController()
+    const first = runtime
+      .generate(request(abort.signal))
+      [Symbol.asyncIterator]()
+    const second = runtime.generate(request())[Symbol.asyncIterator]()
+    const firstNext = first.next()
+    const secondNext = second.next()
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+
+    const reason = new DOMException("Stopped", "AbortError")
+    abort.abort(reason)
+    await expect(firstNext).rejects.toBe(reason)
+
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      pipeline: fake.pipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await expect(secondNext).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    expect(fake.dispose).not.toHaveBeenCalled()
+    await second.return?.("stop")
+    await runtime.dispose()
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("preserves a leading system role through the compatibility bridge", async () => {
+    const fake = fakeTransformers(["ok"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const model = await factory.create({
+      initialPrompts: [{ role: "system", content: "Follow these rules" }],
+    })
+    const stream = await model.promptStreaming("Current question")
+    const reader = stream.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the compatibility stream so the tokenizer is invoked.
+    }
+
+    expect(fake.promptMessages).toEqual([
+      { role: "system", content: "Follow these rules" },
+      { role: "user", content: "Current question" },
+    ])
   })
 })
 

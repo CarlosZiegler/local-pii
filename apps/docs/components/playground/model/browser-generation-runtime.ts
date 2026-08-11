@@ -42,9 +42,12 @@ export function managedGeneration(
         | undefined
       let pumping = false
       let resolveSettled!: () => void
-      const settled = new Promise<void>((resolve) => {
+      let rejectSettled!: (reason: unknown) => void
+      const settled = new Promise<void>((resolve, reject) => {
         resolveSettled = resolve
+        rejectSettled = reject
       })
+      void settled.catch(() => undefined)
 
       const beginUpstreamReturn = (): Promise<void> => {
         if (upstreamReturn) return upstreamReturn
@@ -88,10 +91,18 @@ export function managedGeneration(
           if (!hasPrimaryError && cleanupFailed) {
             throw cleanupError
           }
-        })().finally(resolveSettled)
-        // Abort/return paths intentionally do not await late-open cleanup;
-        // this attached handler prevents an unhandled loser rejection while
-        // runtime.dispose() waits on the settlement promise.
+        })().then(
+          () => {
+            resolveSettled()
+          },
+          (error) => {
+            rejectSettled(error)
+            throw error
+          }
+        )
+        // Keep a rejection handler attached so late cleanup cannot become an
+        // unhandled loser; the iterator return and runtime disposal each
+        // observe the same settlement outcome.
         void cleanup.catch(() => undefined)
         return cleanup
       }
@@ -114,7 +125,9 @@ export function managedGeneration(
         closeReason = reason
         primaryError = reason
         hasPrimaryError = true
+        const hadPendingNext = pendingNext !== undefined
         rejectPending(reason)
+        if (hadPendingNext) pendingErrorDelivered = true
         signal?.removeEventListener("abort", onAbort)
         void settle()
       }
@@ -127,13 +140,12 @@ export function managedGeneration(
           closeReason = reason
           resolvePending(done())
           signal?.removeEventListener("abort", onAbort)
+          // Consumer cancellation must await the full cleanup chain, even
+          // when the source resolves after return. The pending next above
+          // still settles immediately; runtime disposal independently tracks
+          // this same settlement promise as its barrier.
           const cleanupPromise = settle()
-          // If a source has already been acquired, callers such as
-          // ReadableStream.cancel await destruction. If open is still pending,
-          // return promptly and let the disposal barrier await late cleanup.
-          if (upstream || openingFinished) {
-            return cleanupPromise.then(() => done())
-          }
+          return cleanupPromise.then(() => done())
         }
         return Promise.resolve(done())
       }
@@ -187,7 +199,9 @@ export function managedGeneration(
             } catch (error) {
               primaryError = error
               hasPrimaryError = true
+              const hadPendingNext = pendingNext !== undefined
               rejectPending(error)
+              if (hadPendingNext) pendingErrorDelivered = true
             }
             return
           }
@@ -204,6 +218,13 @@ export function managedGeneration(
       const iterator: ManagedIterator = {
         [generationSettlement]: settled,
         next() {
+          if (closed) {
+            if (hasPrimaryError && !pendingErrorDelivered) {
+              pendingErrorDelivered = true
+              return Promise.reject(primaryError)
+            }
+            return Promise.resolve(done())
+          }
           if (!started) {
             started = true
             if (signal?.aborted) {
@@ -215,13 +236,6 @@ export function managedGeneration(
               return Promise.resolve(done())
             }
             signal?.addEventListener("abort", onAbort, { once: true })
-          }
-          if (closed) {
-            if (hasPrimaryError && !pendingErrorDelivered) {
-              pendingErrorDelivered = true
-              return Promise.reject(primaryError)
-            }
-            return Promise.resolve(done())
           }
           if (pendingNext) {
             return Promise.reject(
@@ -260,17 +274,27 @@ export function trackActiveGeneration(
       const settlement = iterator[generationSettlement] ?? Promise.resolve()
       let tracked = false
       let release!: () => void
-      const activeRun = new Promise<void>((resolve) => {
+      let rejectActive!: (reason: unknown) => void
+      const activeRunWithRejection = new Promise<void>((resolve, reject) => {
         release = resolve
+        rejectActive = reject
       })
+      void activeRunWithRejection.catch(() => undefined)
       const track = () => {
         if (tracked) return
         tracked = true
-        active.add(activeRun)
-        void settlement.then(() => {
-          release()
-          active.delete(activeRun)
-        })
+        active.add(activeRunWithRejection)
+        void settlement.then(
+          () => {
+            release()
+            active.delete(activeRunWithRejection)
+          },
+          (error) => {
+            rejectActive(error)
+            // Retain rejected settlement promises so a later runtime dispose
+            // cannot lose a late cleanup failure from its barrier.
+          }
+        )
       }
       return {
         [Symbol.asyncIterator]() {

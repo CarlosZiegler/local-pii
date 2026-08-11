@@ -51,7 +51,10 @@ function validateInput(input: ProtectedBrowserRequest): void {
   if (
     input.signal !== undefined &&
     (typeof input.signal !== "object" ||
-      typeof input.signal.addEventListener !== "function")
+      typeof input.signal.aborted !== "boolean" ||
+      typeof input.signal.addEventListener !== "function" ||
+      typeof input.signal.removeEventListener !== "function" ||
+      typeof input.signal.throwIfAborted !== "function")
   ) {
     throw new InvalidProtectedBrowserRequestError(
       "Protected request signal must be an AbortSignal"

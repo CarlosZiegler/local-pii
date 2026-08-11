@@ -16,6 +16,12 @@ import type {
 const MODEL_ID = "onnx-community/gemma-3-270m-it-ONNX"
 const MODEL_REVISION = "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
 
+function compatibleRole(role: unknown): ProtectedBrowserTurn["role"] {
+  if (role === "system") return "system"
+  if (role === "assistant") return "assistant"
+  return "user"
+}
+
 interface InterruptableCriteria {
   interrupt(): void
 }
@@ -43,7 +49,7 @@ interface TextGenerator {
       }
     ): string
   }
-  dispose?: () => void | Promise<void>
+  dispose: () => void | Promise<void>
 }
 
 interface TransformersRuntime {
@@ -236,7 +242,7 @@ export function createGemmaBrowserRuntime(
     const key = generator as object
     const existing = generatorDisposals.get(key)
     if (existing) return existing
-    const disposal = Promise.resolve(generator.dispose?.())
+    const disposal = Promise.resolve(generator.dispose())
     generatorDisposals.set(key, disposal)
     return disposal
   }
@@ -299,12 +305,8 @@ export function createGemmaBrowserRuntime(
             throw new Error("The Gemma browser runtime is disposed")
           }
           if (request.signal?.aborted) {
-            try {
-              await disposeGenerator(generator)
-            } catch {
-              // Preserve the caller's abort reason as the primary error.
-            }
-            if (generatorPromise === loading) generatorPromise = undefined
+            // The pipeline is shared by all runs. A run-level abort only
+            // interrupts that run; runtime.dispose owns the shared cache.
             throw request.signal.reason
           }
           return createTextIterator(
@@ -357,7 +359,7 @@ export async function createGemmaLanguageModelFactory(
     async create(options = {}) {
       options.signal?.throwIfAborted()
       const history = (options.initialPrompts ?? []).map((message) => ({
-        role: message.role === "assistant" ? "assistant" : "user",
+        role: compatibleRole(message.role),
         protectedContent:
           typeof message.content === "string"
             ? message.content
@@ -382,7 +384,7 @@ export async function createGemmaLanguageModelFactory(
               ? input
               : (input
                   .map((message) => ({
-                    role: message.role === "assistant" ? "assistant" : "user",
+                    role: compatibleRole(message.role as unknown),
                     content:
                       typeof message.content === "string"
                         ? message.content

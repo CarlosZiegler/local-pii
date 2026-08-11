@@ -139,6 +139,51 @@ describe("createBrowserLanguageModel", () => {
     expect(outcome).toBe("cancelled")
     expect(returned).toHaveBeenCalledWith("stop")
   })
+
+  it("awaits late-open cleanup when a v4 stream is cancelled", async () => {
+    const opening = deferred<AsyncIterator<string>>()
+    const returned = vi.fn(async () => ({
+      done: true as const,
+      value: undefined,
+    }))
+    const settled = vi.fn()
+    const runtime: BrowserGenerationRuntime = {
+      id: "late-open-cancellable",
+      disclosure: {
+        label: "test",
+        model: "test",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate() {
+        return managedGeneration(() => opening.promise, undefined, settled)
+      },
+      dispose: async () => {},
+    }
+    const model = createBrowserLanguageModel(runtime)
+    const stream = (await model.doStream(options())).stream
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toMatchObject({
+      value: { type: "stream-start" },
+    })
+
+    const cancel = reader.cancel("stop")
+    let cancelled = false
+    void cancel.then(() => {
+      cancelled = true
+    })
+    await Promise.resolve()
+    expect(cancelled).toBe(false)
+    expect(settled).not.toHaveBeenCalled()
+
+    opening.resolve({
+      next: async () => ({ done: true, value: undefined }),
+      return: returned,
+    })
+    await cancel
+    expect(returned).toHaveBeenCalledWith("stop")
+    expect(settled).toHaveBeenCalledOnce()
+  })
 })
 
 function deferred<T>() {

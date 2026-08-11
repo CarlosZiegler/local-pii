@@ -14,8 +14,7 @@ export interface ChromePromptSession {
     input: string,
     options?: { readonly signal?: AbortSignal }
   ): ReadableStream<string> | AsyncIterable<string>
-  destroy?: () => void | Promise<void>
-  close?: () => void | Promise<void>
+  destroy: () => void | Promise<void>
 }
 
 export interface ChromePromptFactory {
@@ -55,11 +54,7 @@ function asIterator(
 }
 
 async function destroySession(session: ChromePromptSession): Promise<void> {
-  if (session.destroy) {
-    await session.destroy()
-    return
-  }
-  await session.close?.()
+  await session.destroy()
 }
 
 /**
