@@ -335,7 +335,22 @@ export function restoreTanStackStream(
         resolve: (result: IteratorResult<StreamChunk>) => void
         reject: (error: unknown) => void
       }>()
-      const queued: IteratorResult<StreamChunk>[] = []
+      type QueuedOutcome =
+        | { kind: "result"; result: IteratorResult<StreamChunk> }
+        | { kind: "error"; error: unknown }
+      const queued: QueuedOutcome[] = []
+
+      const queueResult = (result: IteratorResult<StreamChunk>) => {
+        arrayPush(queued, { kind: "result", result })
+      }
+
+      const queueValue = (value: StreamChunk) => {
+        queueResult({ done: false, value })
+      }
+
+      const queueError = (error: unknown) => {
+        arrayPush(queued, { kind: "error", error })
+      }
 
       type ThrowGate = {
         canceled: boolean
@@ -732,6 +747,32 @@ export function restoreTanStackStream(
         void Promise.resolve(closing).catch(() => undefined)
       }
 
+      const settleConcurrentThrow = (
+        operation: ThrowOperation,
+        outcome: QueuedOutcome
+      ) => {
+        activeThrows.delete(operation.gate)
+        if (outcome.kind === "error") {
+          closeAfterError(outcome.error)
+          operation.gate.reject(outcome.error)
+          return
+        }
+        settlePreemptedNext("throw", operation.error, true)
+        operation.gate.resolve(outcome.result)
+        if (outcome.result.done) closeAfterDone(outcome.result.value)
+      }
+
+      const deferConcurrentThrow = (
+        operation: ThrowOperation,
+        error: unknown
+      ) => {
+        if (!operation.concurrent || queued.length === 0) return false
+        const first = arrayShift(queued) as QueuedOutcome
+        queueError(error)
+        settleConcurrentThrow(operation, first)
+        return true
+      }
+
       const completeNext = (
         operation: NextOperation,
         result: IteratorResult<StreamChunk>
@@ -753,25 +794,18 @@ export function restoreTanStackStream(
         // oldest item to this throw and retain this throw's result for the
         // next public operation.
         if (operation.concurrent && queued.length > 0) {
-          const first = arrayShift(queued) as IteratorResult<StreamChunk>
-          if (result.done) arrayPush(queued, result)
+          const first = arrayShift(queued) as QueuedOutcome
+          if (result.done) queueResult(result)
           else {
             try {
               const restored = restoreChunk(result.value)
               for (let index = 0; index < restored.length; index += 1)
-                arrayPush(queued, {
-                  done: false,
-                  value: restored[index] as StreamChunk,
-                })
+                queueValue(restored[index] as StreamChunk)
             } catch (restoreError) {
-              closeAfterError(restoreError)
-              return
+              queueError(restoreError)
             }
           }
-          activeThrows.delete(operation.gate)
-          settlePreemptedNext("throw", operation.error, true)
-          operation.gate.resolve(first)
-          if (first.done) closeAfterDone(first.value)
+          settleConcurrentThrow(operation, first)
           return
         }
 
@@ -786,10 +820,7 @@ export function restoreTanStackStream(
           const restored = restoreChunk(result.value)
           const first = restored[0]
           for (let index = 1; index < restored.length; index += 1)
-            arrayPush(queued, {
-              done: false,
-              value: restored[index] as StreamChunk,
-            })
+            queueValue(restored[index] as StreamChunk)
           activeThrows.delete(operation.gate)
           settlePreemptedNext("throw", operation.error, true)
           operation.gate.resolve(
@@ -841,9 +872,10 @@ export function restoreTanStackStream(
 
         if (operation.kind === "next") {
           if (queued.length > 0) {
-            const value = arrayShift(queued) as IteratorResult<StreamChunk>
+            const outcome = arrayShift(queued) as QueuedOutcome
             activeOperation = undefined
-            completeNext(operation, value)
+            if (outcome.kind === "error") failNext(operation, outcome.error)
+            else completeNext(operation, outcome.result)
             pump()
             return
           }
@@ -864,7 +896,7 @@ export function restoreTanStackStream(
               if (operation.preempted) {
                 if (operation.preemptedSettled) {
                   if (!operation.preemptedTerminal && !next.done)
-                    arrayPush(queued, { done: false, value: next.value })
+                    queueValue(next.value)
                   return
                 }
                 if (next.done) closeAfterDone(next.value)
@@ -896,7 +928,7 @@ export function restoreTanStackStream(
           result = upstream.throw.call(upstream, operation.error)
         } catch (error) {
           if (activeOperation === operation) activeOperation = undefined
-          failThrow(operation, error)
+          if (!deferConcurrentThrow(operation, error)) failThrow(operation, error)
           pump()
           return
         }
@@ -910,7 +942,8 @@ export function restoreTanStackStream(
           (error: unknown) => {
             if (operation.gate.canceled) return
             if (activeOperation === operation) activeOperation = undefined
-            failThrow(operation, error)
+            if (!deferConcurrentThrow(operation, error))
+              failThrow(operation, error)
             pump()
           }
         )

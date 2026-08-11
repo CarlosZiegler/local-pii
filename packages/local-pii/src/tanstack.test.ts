@@ -4554,6 +4554,183 @@ describe("piiConnection text streaming", () => {
     }
   )
 
+  it.each([
+    ["connect", "sync"],
+    ["connect", "async"],
+    ["joinRun", "sync"],
+    ["joinRun", "async"],
+  ] as const)(
+    "orders a concurrent %s throw %s rejection after queued output",
+    async (entrypoint, rejectionKind) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize("ana@acme.com"))
+        .redactedText
+      const firstError = new Error(`${entrypoint} rejection first`)
+      const secondError = new Error(`${entrypoint} rejection second`)
+      let throwCalls = 0
+      let returnCalls = 0
+      let returnValue: unknown
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              if (throwCalls === 0)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "queued-rejection",
+                    delta: protectedContent,
+                  } satisfies StreamChunk,
+                }
+              return { done: true as const, value: undefined }
+            },
+            throw(value?: unknown) {
+              throwCalls += 1
+              if (throwCalls === 1) {
+                expect(value).toBe(firstError)
+                return Promise.resolve({
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_END,
+                    messageId: "queued-rejection",
+                  } satisfies StreamChunk,
+                })
+              }
+              expect(value).toBe(secondError)
+              if (rejectionKind === "sync") throw secondError
+              return Promise.reject(secondError)
+            },
+            async return(value?: unknown) {
+              returnCalls += 1
+              returnValue = value
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+
+      const first = iterator.throw!(firstError)
+      const second = iterator.throw!(secondError)
+      await expect(first).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_CONTENT, delta: "ana@acme.com" },
+      })
+      await expect(second).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_END },
+      })
+      expect(throwCalls).toBe(2)
+      await expect(iterator.next()).rejects.toBe(secondError)
+      expect(returnCalls).toBe(1)
+      expect(returnValue).toBe(secondError)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "orders a concurrent %s throw restoration failure after queued output",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize("ana@acme.com"))
+        .redactedText
+      const restoreError = new Error(`${entrypoint} concurrent restoration`)
+      vi.spyOn(session, "rehydrateJson").mockImplementation(() => {
+        throw restoreError
+      })
+      const firstError = new Error(`${entrypoint} restoration first`)
+      const secondError = new Error(`${entrypoint} restoration second`)
+      let throwCalls = 0
+      let returnCalls = 0
+      let returnValue: unknown
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "queued-restoration",
+                  delta: protectedContent,
+                } satisfies StreamChunk,
+              }
+            },
+            async throw(value?: unknown) {
+              throwCalls += 1
+              if (throwCalls === 1) {
+                expect(value).toBe(firstError)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_END,
+                    messageId: "queued-restoration",
+                  } satisfies StreamChunk,
+                }
+              }
+              expect(value).toBe(secondError)
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.CUSTOM,
+                  name: "structured-output.complete",
+                  value: { object: { email: "protected" } },
+                } as unknown as StreamChunk,
+              }
+            },
+            async return(value?: unknown) {
+              returnCalls += 1
+              returnValue = value
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+
+      const first = iterator.throw!(firstError)
+      const second = iterator.throw!(secondError)
+      await expect(first).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_CONTENT, delta: "ana@acme.com" },
+      })
+      await expect(second).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_END },
+      })
+      expect(throwCalls).toBe(2)
+      await expect(iterator.next()).rejects.toBe(restoreError)
+      expect(returnCalls).toBe(1)
+      expect(returnValue).toBe(restoreError)
+    }
+  )
+
   it.each(["connect", "joinRun"] as const)(
     "does not trust a spoofed recoverable %s next marker",
     async (entrypoint) => {
