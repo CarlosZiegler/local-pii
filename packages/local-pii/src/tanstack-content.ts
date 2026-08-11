@@ -608,13 +608,10 @@ function shape(record: Captured): { ui: boolean; model: boolean } {
   const parts = descriptor(record, "parts")
   const content = descriptor(record, "content")
   const ui = !!id && !!parts
-  const model =
-    !!content &&
-    (("value" in content &&
-      (typeof content.value === "string" ||
-        content.value === null ||
-        Array.isArray(content.value))) ||
-      (!ui && !("value" in content)))
+  // Presence is the model signal even for an accessor or malformed value.
+  // Otherwise a UI parts array could preserve a live fallback getter that
+  // the pinned wire serializer would read after this phase.
+  const model = !!content
   return { ui, model }
 }
 

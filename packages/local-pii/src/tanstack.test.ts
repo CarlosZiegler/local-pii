@@ -295,6 +295,37 @@ describe("piiConnection message protection", () => {
     expect(JSON.stringify(received)).not.toContain("ana@acme.com")
   })
 
+  it("rejects an accessor-backed UI fallback before wire serialization", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const anonymize = vi.spyOn(session, "anonymize")
+    const connect = vi.fn(() => emptyStream())
+    let contentGets = 0
+    const message = {
+      id: "ui-fallback",
+      role: "user" as const,
+      parts: [],
+    } as UIMessage & Record<string, unknown>
+    Object.defineProperty(message, "content", {
+      configurable: true,
+      enumerable: true,
+      get() {
+        contentGets += 1
+        return "ana@acme.com"
+      },
+    })
+
+    await expect(
+      collect(piiConnection({ connect }, { session }).connect([message]))
+    ).rejects.toMatchObject({
+      path: [0],
+      discriminant: "<ambiguous>",
+    })
+    expect(contentGets).toBe(0)
+    expect(anonymize).not.toHaveBeenCalled()
+    expect(connect).not.toHaveBeenCalled()
+    expect(Object.keys(session.mapping)).toHaveLength(0)
+  })
+
   it("rejects an ambiguous record even when a later record identifies the family", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const connect = vi.fn(() => emptyStream())
@@ -769,9 +800,12 @@ describe("piiConnection message protection", () => {
       id: "ui-1",
       role: "user" as const,
       parts: [{ type: "text" as const, content: "ana@acme.com" }],
-      content: { future: futurePart },
+      unknownContent: { future: futurePart },
       toolCalls: [futurePart],
-    } as unknown as UIMessage & { content: unknown; toolCalls: unknown }
+    } as unknown as UIMessage & {
+      unknownContent: unknown
+      toolCalls: unknown
+    }
     const model = {
       role: "user" as const,
       content: "ana@acme.com",
@@ -783,7 +817,7 @@ describe("piiConnection message protection", () => {
     const protectedUiText = protectedUi.parts[0]!
     if (protectedUiText.type !== "text") throw new Error("expected UI text")
     expect(protectedUiText.content).toMatch(TOKEN)
-    expect(protectedUi.content).toBe(ui.content)
+    expect(protectedUi.unknownContent).toBe(ui.unknownContent)
     expect(protectedUi.toolCalls).toBe(ui.toolCalls)
     const protectedModel = calls[1]![0][0] as typeof model
     expect(protectedModel.content).toMatch(TOKEN)
