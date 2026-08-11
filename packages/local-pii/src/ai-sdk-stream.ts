@@ -185,7 +185,8 @@ function clearChannels(
 
 /**
  * Transform one LanguageModelV4 stream. All channels and terminal state are
- * created per invocation, so concurrent calls cannot exchange private maps.
+ * created per invocation, so concurrent calls cannot exchange Private mapping
+ * state.
  */
 export function restoreAiSdkStream<T extends ReadableStream<unknown>>(
   session: PiiSession,
@@ -213,8 +214,9 @@ export function restoreAiSdkStream<T extends ReadableStream<unknown>>(
       }
 
       const cancelSource = async (reason: unknown): Promise<void> => {
-        if (sourceDone || sourceCancelled || !reader) return
+        if (sourceDone || sourceCancelled) return
         sourceCancelled = true
+        reader ??= source.getReader()
         await reader.cancel(reason)
       }
 
@@ -223,9 +225,12 @@ export function restoreAiSdkStream<T extends ReadableStream<unknown>>(
         cancel = false
       ): Promise<void> => {
         removeAbortListener()
-        if (cancel) await cancelSource(reason)
-        reader?.releaseLock()
-        reader = undefined
+        try {
+          if (cancel) await cancelSource(reason)
+        } finally {
+          reader?.releaseLock()
+          reader = undefined
+        }
       }
 
       const fail = async (error: unknown): Promise<never> => {
@@ -269,16 +274,8 @@ export function restoreAiSdkStream<T extends ReadableStream<unknown>>(
           return
         }
         if (part.type === "error") {
-          terminal = true
-          primaryError = part.error
           clearChannels(textChannels, toolChannels)
           controller.enqueue(part)
-          try {
-            await cleanup(part.error, true)
-          } catch {
-            // Error chunks are terminal; cleanup must not replace them.
-          }
-          controller.close()
           return
         }
         if (part.type === "text-delta" && typeof part.id === "string") {
@@ -320,7 +317,7 @@ export function restoreAiSdkStream<T extends ReadableStream<unknown>>(
             clearChannels(textChannels, toolChannels)
             const reason = abortReason(signal)
             try {
-              await cancelSource(reason)
+              await cleanup(reason, true)
             } catch {
               // The abort reason remains primary.
             }
@@ -332,6 +329,7 @@ export function restoreAiSdkStream<T extends ReadableStream<unknown>>(
           })()
         }
         signal.addEventListener("abort", abortListener, { once: true })
+        if (signal.aborted) abortListener()
       }
 
       pullFn = async () => {

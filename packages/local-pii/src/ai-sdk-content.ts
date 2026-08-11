@@ -7,6 +7,23 @@ function isRecord(value: unknown): value is AiSdkRecord {
   return value !== null && typeof value === "object"
 }
 
+function createAiSdkOverrides(): Record<PropertyKey, unknown> {
+  return Object.create(null) as Record<PropertyKey, unknown>
+}
+
+function defineAiSdkProperty(
+  target: object,
+  key: PropertyKey,
+  value: unknown
+): void {
+  Object.defineProperty(target, key, {
+    configurable: true,
+    enumerable: true,
+    value,
+    writable: true,
+  })
+}
+
 /**
  * Clone only a changed object path.  Own descriptors, prototypes, symbols,
  * and non-enumerable provider fields survive the adapter unchanged.
@@ -23,19 +40,22 @@ export function cloneAiSdkValue<T>(
   if (Array.isArray(original))
     Object.setPrototypeOf(clone, Object.getPrototypeOf(original))
 
-  const descriptors = Object.getOwnPropertyDescriptors(original)
+  const descriptors = Object.getOwnPropertyDescriptors(original) as Record<
+    PropertyKey,
+    PropertyDescriptor
+  >
   for (const key of Reflect.ownKeys(overrides)) {
-    const descriptor = descriptors[key as string]
+    const descriptor = descriptors[key]
     const value = overrides[key]
     if (descriptor && "value" in descriptor) {
-      descriptors[key as string] = { ...descriptor, value }
+      defineAiSdkProperty(descriptors, key, { ...descriptor, value })
     } else {
-      descriptors[key as string] = {
+      defineAiSdkProperty(descriptors, key, {
         configurable: descriptor?.configurable ?? true,
         enumerable: descriptor?.enumerable ?? true,
         writable: true,
         value,
-      }
+      })
     }
   }
   Object.defineProperties(clone, descriptors)
@@ -64,7 +84,7 @@ export async function protectAiSdkJson(
     return { changed: protectedValue !== value, value: protectedValue }
   }
   if (Array.isArray(value)) {
-    const overrides: Record<PropertyKey, unknown> = {}
+    const overrides = createAiSdkOverrides()
     let changed = false
     for (let index = 0; index < value.length; index++) {
       const child = await protectAiSdkJson(session, value[index])
@@ -80,7 +100,7 @@ export async function protectAiSdkJson(
   }
   if (!isRecord(value)) return { changed: false, value }
 
-  const overrides: Record<PropertyKey, unknown> = {}
+  const overrides = createAiSdkOverrides()
   let changed = false
   for (const key of Object.keys(value)) {
     const child = await protectAiSdkJson(session, value[key])
@@ -105,7 +125,7 @@ export function restoreAiSdkJson(
     return { changed: restored !== value, value: restored }
   }
   if (Array.isArray(value)) {
-    const overrides: Record<PropertyKey, unknown> = {}
+    const overrides = createAiSdkOverrides()
     let changed = false
     for (let index = 0; index < value.length; index++) {
       const child = restoreAiSdkJson(session, value[index])
@@ -121,7 +141,7 @@ export function restoreAiSdkJson(
   }
   if (!isRecord(value)) return { changed: false, value }
 
-  const overrides: Record<PropertyKey, unknown> = {}
+  const overrides = createAiSdkOverrides()
   let changed = false
   for (const key of Object.keys(value)) {
     const child = restoreAiSdkJson(session, value[key])
@@ -184,9 +204,9 @@ function parseJsonString(
 }
 
 /**
- * Restore JSON string leaves while retaining every unrelated lexeme.  This is
- * important for provider tool calls: parse/stringify would round large
- * numbers, whitespace, and escaping that the provider may depend on.
+ * Restore JSON string leaves while retaining structural whitespace and numeric
+ * lexemes outside changed string tokens. Parse/stringify would round large
+ * numbers and normalize unrelated structure that providers may depend on.
  */
 export function restoreAiSdkJsonString(
   session: PiiSession,
@@ -301,7 +321,7 @@ async function protectToolResultOutput(
       : { changed: false, value: output }
   }
   if (output.type === "content" && Array.isArray(output.value)) {
-    const overrides: Record<PropertyKey, unknown> = {}
+    const overrides = createAiSdkOverrides()
     let changed = false
     for (let index = 0; index < output.value.length; index++) {
       const part = output.value[index]
@@ -363,7 +383,7 @@ async function protectMessage(
   message: unknown
 ): Promise<{ changed: boolean; value: unknown }> {
   if (!isRecord(message)) return { changed: false, value: message }
-  const overrides: Record<PropertyKey, unknown> = {}
+  const overrides = createAiSdkOverrides()
   let changed = false
 
   if (message.role === "system" && typeof message.content === "string") {
@@ -373,18 +393,17 @@ async function protectMessage(
       overrides.content = content
     }
   } else if (Array.isArray(message.content)) {
-    const parts: unknown[] = []
+    const parts = createAiSdkOverrides()
     let partsChanged = false
-    for (const part of message.content) {
+    for (let index = 0; index < message.content.length; index++) {
+      const part = message.content[index]
       const protectedPart = await protectPart(session, part)
-      parts.push(protectedPart.value)
+      parts[index] = protectedPart.value
       partsChanged ||= protectedPart.changed
     }
     if (partsChanged) {
       changed = true
-      overrides.content = cloneAiSdkValue(message.content, {
-        ...Object.fromEntries(parts.map((part, index) => [index, part])),
-      })
+      overrides.content = cloneAiSdkValue(message.content, parts)
     }
   }
   return {
@@ -407,7 +426,7 @@ export async function protectAiSdkPrompt<T>(
     changed ||= protectedMessage.changed
   }
   if (!changed) return prompt
-  const overrides: Record<PropertyKey, unknown> = {}
+  const overrides = createAiSdkOverrides()
   for (let index = 0; index < messages.length; index++) {
     if (messages[index] !== prompt[index]) overrides[index] = messages[index]
   }
@@ -438,7 +457,7 @@ function restoreToolResultOutput(
       : { changed: false, value: output }
   }
   if (output.type === "content" && Array.isArray(output.value)) {
-    const overrides: Record<PropertyKey, unknown> = {}
+    const overrides = createAiSdkOverrides()
     let changed = false
     for (let index = 0; index < output.value.length; index++) {
       const part = output.value[index]
@@ -507,7 +526,7 @@ function restorePart(
 /** Restore semantic generated content while retaining the result envelope. */
 export function restoreAiSdkContent<T>(session: PiiSession, content: T): T {
   if (!Array.isArray(content)) return content
-  const overrides: Record<PropertyKey, unknown> = {}
+  const overrides = createAiSdkOverrides()
   let changed = false
   for (let index = 0; index < content.length; index++) {
     const part = restorePart(session, content[index])

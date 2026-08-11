@@ -43,17 +43,29 @@ export function piiMiddleware(
   opts: PiiMiddlewareOptions = {}
 ): LanguageModelMiddleware {
   const session = resolveSession(opts)
+  let protectionQueue = Promise.resolve()
 
   return {
     async transformParams({ params }) {
       throwIfAborted(params.abortSignal)
-      const prompt = await protectAiSdkPrompt(session, params.prompt)
-      // Protection can invoke asynchronous detection, so abort again before
-      // crossing the provider boundary.
-      throwIfAborted(params.abortSignal)
-      return prompt === params.prompt
-        ? params
-        : cloneAiSdkValue(params, { prompt })
+      const previousProtection = protectionQueue
+      let releaseProtection!: () => void
+      protectionQueue = new Promise<void>((resolve) => {
+        releaseProtection = resolve
+      })
+      try {
+        await previousProtection
+        throwIfAborted(params.abortSignal)
+        const prompt = await protectAiSdkPrompt(session, params.prompt)
+        // Protection can invoke asynchronous detection, so abort again before
+        // crossing the provider boundary.
+        throwIfAborted(params.abortSignal)
+        return prompt === params.prompt
+          ? params
+          : cloneAiSdkValue(params, { prompt })
+      } finally {
+        releaseProtection()
+      }
     },
 
     async wrapGenerate({ doGenerate }) {
@@ -83,12 +95,4 @@ export function withPii<M>(model: M, opts: PiiMiddlewareOptions = {}): M {
     model: model as never,
     middleware: piiMiddleware(opts),
   }) as M
-}
-
-/** Explicitly named alias retained for adapter-first callers. */
-export function withPiiLanguageModel<M>(
-  model: M,
-  opts: PiiMiddlewareOptions = {}
-): M {
-  return withPii(model, opts)
 }

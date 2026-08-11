@@ -23,6 +23,10 @@ type LanguageModelV4StreamPart =
   LanguageModelV4StreamResult["stream"] extends ReadableStream<infer Part>
     ? Part
     : never
+type GeneratedToolResult = Extract<
+  LanguageModelV4GenerateResult["content"][number],
+  { type: "tool-result" }
+>
 
 function at<T>(values: readonly T[], index: number): T {
   const value = values[index]
@@ -844,6 +848,110 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     ).rejects.toBe(providerError)
   })
 
+  it("serializes only protection mapping mutation and recovers after failure", async () => {
+    const mapping: Record<string, string> = {}
+    const calls: string[] = []
+    let releaseA!: () => void
+    let releaseB!: () => void
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    const gateB = new Promise<void>((resolve) => {
+      releaseB = resolve
+    })
+    const session: PiiSession = {
+      mapping,
+      async anonymize(text) {
+        calls.push(text)
+        if (text === "A") await gateA
+        if (text === "B") await gateB
+        const token = `[EMAIL_${Object.keys(mapping).length + 1}]`
+        mapping[token] = text
+        return {
+          redactedText: token,
+          entities: [],
+          mapping: { [token]: text },
+        }
+      },
+      async anonymizeJson(value) {
+        return value
+      },
+      rehydrate(value) {
+        return mapping[value] ?? value
+      },
+      rehydrateJson(value) {
+        return value
+      },
+      clear() {
+        for (const key of Object.keys(mapping)) delete mapping[key]
+      },
+    }
+    const seen: string[] = []
+    const model = testModel({
+      async doGenerate(options): Promise<LanguageModelV4GenerateResult> {
+        const system = at(options.prompt, 0)
+        if (system.role !== "system") throw new Error("expected system")
+        seen.push(system.content)
+        return resultEnvelope([])
+      },
+    })
+    const wrapped = withPii(model, { session })
+    const first = wrapped.doGenerate({
+      prompt: [{ role: "system", content: "A" }],
+    })
+    await Promise.resolve()
+    expect(calls).toEqual(["A"])
+    const second = wrapped.doGenerate({
+      prompt: [{ role: "system", content: "B" }],
+    })
+    await Promise.resolve()
+    expect(calls).toEqual(["A"])
+    releaseB()
+    releaseA()
+    await Promise.all([first, second])
+    expect(seen).toEqual(["[EMAIL_1]", "[EMAIL_2]"])
+
+    const failedMapping: Record<string, string> = {}
+    let failedCalls = 0
+    const failedSession: PiiSession = {
+      mapping: failedMapping,
+      async anonymize(text) {
+        failedCalls++
+        if (text === "A-fail") throw new Error("protection failed")
+        const token = `[EMAIL_${failedCalls}]`
+        failedMapping[token] = text
+        return { redactedText: token, entities: [], mapping: { [token]: text } }
+      },
+      async anonymizeJson(value) {
+        return value
+      },
+      rehydrate(value) {
+        return failedMapping[value] ?? value
+      },
+      rehydrateJson(value) {
+        return value
+      },
+      clear() {
+        for (const key of Object.keys(failedMapping)) delete failedMapping[key]
+      },
+    }
+    const recovered: string[] = []
+    const recoveryModel = testModel({
+      async doGenerate(options): Promise<LanguageModelV4GenerateResult> {
+        const system = at(options.prompt, 0)
+        if (system.role !== "system") throw new Error("expected system")
+        recovered.push(system.content)
+        return resultEnvelope([])
+      },
+    })
+    const recovery = withPii(recoveryModel, { session: failedSession })
+    await expect(
+      recovery.doGenerate({ prompt: [{ role: "system", content: "A-fail" }] })
+    ).rejects.toThrow("protection failed")
+    await recovery.doGenerate({ prompt: [{ role: "system", content: "B-ok" }] })
+    expect(recovered).toEqual(["[EMAIL_2]"])
+  })
+
   it("flushes safe tails on bare close without sharing concurrent channels", async () => {
     const session = createAnonymizer({
       detectors: "none",
@@ -1058,6 +1166,111 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     expect(providerText.text).not.toBe("hello ana@acme.com")
   })
 
+  it("protects and restores parsed JSON __proto__ keys without leaking or mutating", async () => {
+    const session = createAnonymizer({
+      detectors: "none",
+      dictionary: [{ type: "EMAIL", value: "ana@acme.com" }],
+    }).createSession()
+    const parsedInput = JSON.parse(
+      '{"__proto__":"ana@acme.com","nested":[{"__proto__":"ana@acme.com"}]}'
+    ) as Record<string, unknown>
+    const originalInput = JSON.stringify(parsedInput)
+    let seen: LanguageModelV4CallOptions | undefined
+    let providerResult: LanguageModelV4GenerateResult | undefined
+    const model = testModel({
+      async doGenerate(options): Promise<LanguageModelV4GenerateResult> {
+        seen = options
+        const token = Object.keys(session.mapping)[0]!
+        const parsedResult = JSON.parse(
+          `{"__proto__":"${token}","nested":[{"__proto__":"${token}"}]}`
+        ) as Record<string, unknown>
+        providerResult = resultEnvelope([
+          {
+            type: "tool-result",
+            toolCallId: "proto-call",
+            toolName: "lookup",
+            result: parsedResult as GeneratedToolResult["result"],
+          },
+        ])
+        return providerResult
+      },
+    })
+    const prompt: LanguageModelV4CallOptions["prompt"] = [
+      { role: "system", content: "contact ana@acme.com" },
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool-call",
+            toolCallId: "proto-call",
+            toolName: "lookup",
+            input: parsedInput,
+          },
+        ],
+      },
+    ]
+
+    await withPii(model, { session }).doGenerate({ prompt })
+
+    if (!seen) throw new Error("provider did not receive options")
+    const seenAssistant = at(seen.prompt, 1)
+    if (seenAssistant.role !== "assistant")
+      throw new Error("expected assistant message")
+    const protectedCall = at(seenAssistant.content, 0)
+    if (protectedCall.type !== "tool-call")
+      throw new Error("expected tool call")
+    expect(JSON.stringify(seen)).not.toContain("ana@acme.com")
+    expect(JSON.stringify(protectedCall.input)).not.toContain("ana@acme.com")
+    expect(
+      Object.prototype.hasOwnProperty.call(protectedCall.input, "__proto__")
+    ).toBe(true)
+    expect(parsedInput).toEqual(JSON.parse(originalInput))
+    expect(JSON.stringify(parsedInput)).toBe(originalInput)
+
+    if (!providerResult) throw new Error("provider did not return a result")
+    const firstProviderResult = providerResult
+    const firstProviderPart = at(firstProviderResult.content, 0)
+    if (firstProviderPart.type !== "tool-result")
+      throw new Error("expected provider tool result")
+    const firstProviderValue = firstProviderPart.result
+    if (
+      firstProviderValue === null ||
+      typeof firstProviderValue !== "object" ||
+      Array.isArray(firstProviderValue)
+    )
+      throw new Error("expected provider object result")
+    const placeholder = Object.keys(session.mapping)[0]!
+    expect(
+      Object.prototype.hasOwnProperty.call(firstProviderValue, "__proto__")
+    ).toBe(true)
+    expect(firstProviderValue["__proto__"]).toBe(placeholder)
+    expect(JSON.stringify(firstProviderResult)).not.toContain("ana@acme.com")
+
+    const restored = await withPii(model, { session }).doGenerate({ prompt })
+    const restoredPart = at(restored.content, 0)
+    if (restoredPart.type !== "tool-result")
+      throw new Error("expected tool result")
+    const restoredResult = restoredPart.result
+    if (
+      restoredResult === null ||
+      typeof restoredResult !== "object" ||
+      Array.isArray(restoredResult)
+    )
+      throw new Error("expected object result")
+    expect(
+      Object.prototype.hasOwnProperty.call(restoredResult, "__proto__")
+    ).toBe(true)
+    expect(restoredResult["__proto__"]).toBe("ana@acme.com")
+    const nested = restoredResult.nested
+    if (!Array.isArray(nested)) throw new Error("expected nested result array")
+    expect(Object.prototype.hasOwnProperty.call(nested[0], "__proto__")).toBe(
+      true
+    )
+    expect((nested[0] as Record<string, unknown>)["__proto__"]).toBe(
+      "ana@acme.com"
+    )
+  })
+
   it("preserves source errors and reaches the original stream cancel exactly once", async () => {
     const session = createAnonymizer({
       detectors: "none",
@@ -1068,30 +1281,32 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     let cancelCalls = 0
     let cancelValue: unknown
     let emitError = true
+    let sourceErrorStream: ReadableStream<LanguageModelV4StreamPart> | undefined
     const model = testModel({
       async doGenerate(): Promise<LanguageModelV4GenerateResult> {
         throw new Error("unused")
       },
       async doStream(): Promise<LanguageModelV4StreamResult> {
+        sourceErrorStream = new ReadableStream<LanguageModelV4StreamPart>({
+          pull(controller) {
+            if (emitError) {
+              emitError = false
+              controller.error(sourceError)
+            } else {
+              controller.enqueue({
+                type: "text-delta",
+                id: "t",
+                delta: "safe",
+              })
+            }
+          },
+          cancel(reason) {
+            cancelCalls++
+            cancelValue = reason
+          },
+        })
         return {
-          stream: new ReadableStream<LanguageModelV4StreamPart>({
-            pull(controller) {
-              if (emitError) {
-                emitError = false
-                controller.error(sourceError)
-              } else {
-                controller.enqueue({
-                  type: "text-delta",
-                  id: "t",
-                  delta: "safe",
-                })
-              }
-            },
-            cancel(reason) {
-              cancelCalls++
-              cancelValue = reason
-            },
-          }),
+          stream: sourceErrorStream,
         }
       },
     })
@@ -1103,6 +1318,7 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     // An errored source is already terminal, so Web Streams does not invoke
     // its underlying cancel algorithm a second time.
     expect(cancelCalls).toBe(0)
+    expect(sourceErrorStream?.locked).toBe(false)
 
     const second = await wrapped.doStream({
       prompt: [],
@@ -1132,7 +1348,117 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     ).rejects.toBe(cleanupError)
   })
 
-  it("treats an error part and abort as terminal without flushing privacy tails", async () => {
+  it("cancels before the first read and releases upstream locks", async () => {
+    const session = createAnonymizer({
+      detectors: "none",
+      dictionary: [{ type: "EMAIL", value: "ana@acme.com" }],
+    }).createSession()
+    const cancelReason = new Error("immediate consumer cancel")
+    const immediateError = new Error("immediate cleanup failed")
+    let immediateCalls = 0
+    let immediateValue: unknown
+    let immediateSource: ReadableStream<LanguageModelV4StreamPart> | undefined
+    const immediateModel = testModel({
+      async doStream(): Promise<LanguageModelV4StreamResult> {
+        immediateSource = new ReadableStream<LanguageModelV4StreamPart>({
+          cancel(reason) {
+            immediateCalls++
+            immediateValue = reason
+            throw immediateError
+          },
+        })
+        return { stream: immediateSource }
+      },
+    })
+    const immediateResult = await withPii(immediateModel, { session }).doStream(
+      {
+        prompt: [],
+      }
+    )
+    await expect(
+      immediateResult.stream.getReader().cancel(cancelReason)
+    ).rejects.toBe(immediateError)
+    expect(immediateCalls).toBe(1)
+    expect(immediateValue).toBe(cancelReason)
+    expect(immediateSource?.locked).toBe(false)
+
+    const abortReason = new Error("pre-read abort")
+    const abortController = new AbortController()
+    let abortCalls = 0
+    let abortValue: unknown
+    let abortSource: ReadableStream<LanguageModelV4StreamPart> | undefined
+    const abortModel = testModel({
+      async doStream(): Promise<LanguageModelV4StreamResult> {
+        abortSource = new ReadableStream<LanguageModelV4StreamPart>({
+          cancel(reason) {
+            abortCalls++
+            abortValue = reason
+          },
+        })
+        return { stream: abortSource }
+      },
+    })
+    const abortResult = await withPii(abortModel, { session }).doStream({
+      prompt: [],
+      abortSignal: abortController.signal,
+    })
+    abortController.abort(abortReason)
+    await expect(abortResult.stream.getReader().read()).rejects.toBe(
+      abortReason
+    )
+    expect(abortCalls).toBe(1)
+    expect(abortValue).toBe(abortReason)
+    expect(abortSource?.locked).toBe(false)
+  })
+
+  it("cancels a source returned after a provider abort and preserves the reason", async () => {
+    const session = createAnonymizer({
+      detectors: "none",
+      dictionary: [{ type: "EMAIL", value: "ana@acme.com" }],
+    }).createSession()
+    const controller = new AbortController()
+    const abortReason = new Error("provider was still starting")
+    let releaseProvider!: () => void
+    const providerGate = new Promise<void>((resolve) => {
+      releaseProvider = resolve
+    })
+    let providerEntered!: () => void
+    const providerStarted = new Promise<void>((resolve) => {
+      providerEntered = resolve
+    })
+    let source: ReadableStream<LanguageModelV4StreamPart> | undefined
+    let cancelCalls = 0
+    let cancelValue: unknown
+    const model = testModel({
+      async doStream(): Promise<LanguageModelV4StreamResult> {
+        providerEntered()
+        await providerGate
+        source = new ReadableStream<LanguageModelV4StreamPart>({
+          cancel(reason) {
+            cancelCalls++
+            cancelValue = reason
+          },
+        })
+        return { stream: source }
+      },
+    })
+
+    const pending = withPii(model, { session }).doStream({
+      prompt: [],
+      abortSignal: controller.signal,
+    })
+    await providerStarted
+    controller.abort(abortReason)
+    releaseProvider()
+
+    const result = await pending
+    await expect(result.stream.getReader().read()).rejects.toBe(abortReason)
+    expect(cancelCalls).toBe(1)
+    expect(cancelValue).toBe(abortReason)
+    expect(source?.locked).toBe(false)
+  })
+
+  it("forwards repeated error parts, discards tails, and treats abort as terminal", async () => {
     const session = createAnonymizer({
       detectors: "none",
       dictionary: [{ type: "EMAIL", value: "ana@acme.com" }],
@@ -1140,6 +1466,7 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     const abortReason = new Error("aborted")
     const controller = new AbortController()
     let sourceCancelCalls = 0
+    let errorSource: ReadableStream<LanguageModelV4StreamPart> | undefined
     let sourceController!: ReadableStreamDefaultController<LanguageModelV4StreamPart>
     const model = testModel({
       async doGenerate(): Promise<LanguageModelV4GenerateResult> {
@@ -1147,22 +1474,41 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
       },
       async doStream(): Promise<LanguageModelV4StreamResult> {
         const token = Object.keys(session.mapping)[0]!
+        errorSource = new ReadableStream<LanguageModelV4StreamPart>({
+          start(next) {
+            sourceController = next
+            next.enqueue({
+              type: "text-delta",
+              id: "t",
+              delta: token.slice(0, 3),
+            })
+            next.enqueue({ type: "error", error: new Error("part failed") })
+            next.enqueue({
+              type: "error",
+              error: new Error("second part failed"),
+            })
+            next.enqueue({
+              type: "finish",
+              usage: {
+                inputTokens: {
+                  total: 0,
+                  noCache: 0,
+                  cacheRead: 0,
+                  cacheWrite: 0,
+                },
+                outputTokens: { total: 0, text: 0, reasoning: 0 },
+              },
+              finishReason: { unified: "stop", raw: "done" },
+            })
+            next.close()
+          },
+          cancel() {
+            sourceCancelCalls++
+            throw new Error("error-part cleanup failed")
+          },
+        })
         return {
-          stream: new ReadableStream<LanguageModelV4StreamPart>({
-            start(next) {
-              sourceController = next
-              next.enqueue({
-                type: "text-delta",
-                id: "t",
-                delta: token.slice(0, 3),
-              })
-              next.enqueue({ type: "error", error: new Error("part failed") })
-            },
-            cancel() {
-              sourceCancelCalls++
-              throw new Error("error-part cleanup failed")
-            },
-          }),
+          stream: errorSource,
         }
       },
     })
@@ -1178,8 +1524,15 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     const errorPart = await reader.read()
     if (!errorPart.value || errorPart.value.type !== "error")
       throw new Error("expected error part")
+    const secondError = await reader.read()
+    if (!secondError.value || secondError.value.type !== "error")
+      throw new Error("expected second error part")
+    const finish = await reader.read()
+    if (!finish.value || finish.value.type !== "finish")
+      throw new Error("expected finish part")
     expect(await reader.read()).toEqual({ done: true, value: undefined })
-    expect(sourceCancelCalls).toBe(1)
+    expect(sourceCancelCalls).toBe(0)
+    expect(errorSource?.locked).toBe(false)
 
     const abortResult = await wrapped.doStream({
       prompt: [{ role: "system", content: "ana@acme.com" }],
@@ -1189,6 +1542,8 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     await abortReader.read()
     controller.abort(abortReason)
     await expect(abortReader.read()).rejects.toBe(abortReason)
+    expect(sourceCancelCalls).toBe(1)
+    expect(errorSource?.locked).toBe(false)
     expect(sourceController).toBeDefined()
   })
 })
