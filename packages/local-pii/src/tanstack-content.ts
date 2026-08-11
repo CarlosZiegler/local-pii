@@ -6,6 +6,48 @@ import type {
 } from "@tanstack/ai/client"
 import type { PiiSession } from "./session"
 
+const TRUSTED = {
+  arrayIsArray: Array.isArray,
+  arrayPrototype: Array.prototype,
+  objectPrototype: Object.prototype,
+  jsonParse: JSON.parse,
+  jsonStringify: JSON.stringify,
+  objectCreate: Object.create,
+  objectDefineProperty: Object.defineProperty,
+  objectFreeze: Object.freeze,
+  objectGetOwnPropertyDescriptor: Object.getOwnPropertyDescriptor,
+  objectGetOwnPropertyDescriptors: Object.getOwnPropertyDescriptors,
+  objectGetPrototypeOf: Object.getPrototypeOf,
+  objectKeys: Object.keys,
+  objectSetPrototypeOf: Object.setPrototypeOf,
+  ownKeys: Reflect.ownKeys,
+  reflectApply: Reflect.apply,
+  hasOwnProperty: Object.prototype.hasOwnProperty,
+} as const
+
+function trustedApply<T>(
+  fn: (...args: never[]) => T,
+  receiver: unknown,
+  args: readonly unknown[]
+): T {
+  return TRUSTED.reflectApply(fn, receiver, args) as T
+}
+
+function plan<T extends object>(value: T): T {
+  const detached = TRUSTED.objectCreate(null) as T
+  const descriptors = TRUSTED.objectGetOwnPropertyDescriptors(value)
+  const keys = TRUSTED.ownKeys(descriptors)
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!
+    TRUSTED.objectDefineProperty(
+      detached,
+      key,
+      descriptors[key as keyof typeof descriptors] as PropertyDescriptor
+    )
+  }
+  return TRUSTED.objectFreeze(detached)
+}
+
 type TanStackMessages = Array<UIMessage> | Array<ModelMessage>
 type Path = readonly (string | number)[]
 type Family = "ui" | "model"
@@ -77,7 +119,7 @@ function safeReason(reason: unknown): string {
 
 function safePath(path: Path): Path {
   const cleaned: Array<string | number> = []
-  Object.setPrototypeOf(cleaned, SAFE_ARRAY_PROTOTYPE)
+  TRUSTED.objectSetPrototypeOf(cleaned, SAFE_ARRAY_PROTOTYPE)
   for (let index = 0; index < path.length; index += 1) {
     const part = path[index]
     cleaned[index] =
@@ -87,7 +129,7 @@ function safePath(path: Path): Path {
           ? part
           : "<field>"
   }
-  return Object.freeze(cleaned)
+  return TRUSTED.objectFreeze(cleaned)
 }
 
 function printPath(path: Path): string {
@@ -143,8 +185,13 @@ function hasToJSON(prototype: object | null): boolean {
   while (current !== null) {
     if (seen.has(current)) return true
     seen.add(current)
-    if (Object.getOwnPropertyDescriptor(current, "toJSON")) return true
-    current = Object.getPrototypeOf(current)
+    const descriptor = TRUSTED.objectGetOwnPropertyDescriptor(current, "toJSON")
+    if (descriptor) {
+      if (!("value" in descriptor) || typeof descriptor.value === "function")
+        return true
+      return false
+    }
+    current = TRUSTED.objectGetPrototypeOf(current)
   }
   return false
 }
@@ -152,12 +199,12 @@ function hasToJSON(prototype: object | null): boolean {
 function capture(value: unknown, path: Path): Captured {
   if (!objectLike(value)) return fail(path, "<invalid>")
   try {
-    const prototype = Object.getPrototypeOf(value)
-    const raw = Object.getOwnPropertyDescriptors(value)
+    const prototype = TRUSTED.objectGetPrototypeOf(value)
+    const raw = TRUSTED.objectGetOwnPropertyDescriptors(value)
     const descriptors: DescriptorEntry[] = []
-    Object.setPrototypeOf(descriptors, SAFE_ARRAY_PROTOTYPE)
+    TRUSTED.objectSetPrototypeOf(descriptors, SAFE_ARRAY_PROTOTYPE)
     const descriptorMap = raw as Record<PropertyKey, PropertyDescriptor>
-    const keys = Reflect.ownKeys(raw)
+    const keys = TRUSTED.ownKeys(raw)
     for (let index = 0; index < keys.length; index += 1) {
       const key = keys[index]!
       const descriptor = descriptorMap[key]
@@ -168,11 +215,15 @@ function capture(value: unknown, path: Path): Captured {
         PropertyKey | PropertyDescriptor
       >() as unknown as [PropertyKey, PropertyDescriptor]
       entry[0] = key
-      entry[1] = Object.freeze({ ...descriptor })
-      descriptors[index] = Object.freeze(entry)
+      entry[1] = TRUSTED.objectFreeze({ ...descriptor })
+      descriptors[index] = TRUSTED.objectFreeze(entry)
     }
+    const ownToJSON = trustedApply(TRUSTED.hasOwnProperty, raw, ["toJSON"])
+      ? descriptorMap.toJSON
+      : undefined
     if (
-      Object.prototype.hasOwnProperty.call(raw, "toJSON") ||
+      (ownToJSON &&
+        (!("value" in ownToJSON) || typeof ownToJSON.value === "function")) ||
       hasToJSON(prototype)
     )
       return fail(path, "<unsupported>")
@@ -181,10 +232,10 @@ function capture(value: unknown, path: Path): Captured {
       const entry = descriptors[index]!
       lookup.set(keyOf(entry[0]), entry[1])
     }
-    return Object.freeze({
+    return plan({
       prototype,
-      array: Array.isArray(value),
-      descriptors: Object.freeze(descriptors),
+      array: TRUSTED.arrayIsArray(value),
+      descriptors: TRUSTED.objectFreeze(descriptors),
       lookup,
     })
   } catch (error) {
@@ -222,8 +273,8 @@ type Field =
 
 function field(record: Captured, key: PropertyKey): Field {
   const found = descriptor(record, key)
-  if (!found) return { kind: "missing" }
-  return { kind: "data", value: found.value }
+  if (!found) return plan({ kind: "missing" })
+  return plan({ kind: "data", value: found.value })
 }
 
 function required(record: Captured, key: PropertyKey, path: Path): unknown {
@@ -250,27 +301,27 @@ interface ArrayPrototypeFingerprint {
 function snapshotArrayPrototype(): ArrayPrototypeFingerprint | null {
   try {
     const nodes: Array<ArrayPrototypeChainNode> = []
-    let current: object | null = Array.prototype as object
+    let current: object | null = TRUSTED.arrayPrototype as object
     const seen = new WeakSet<object>()
     while (current !== null) {
       if (seen.has(current)) return null
       seen.add(current)
-      const keys = Reflect.ownKeys(current)
+      const keys = TRUSTED.ownKeys(current)
       const descriptors = new Map<PropertyKey, PropertyDescriptor>()
       for (let index = 0; index < keys.length; index += 1) {
         const key = keys[index]!
-        const descriptor = Object.getOwnPropertyDescriptor(current, key)
+        const descriptor = TRUSTED.objectGetOwnPropertyDescriptor(current, key)
         if (!descriptor) return null
-        descriptors.set(key, Object.freeze({ ...descriptor }))
+        descriptors.set(key, TRUSTED.objectFreeze({ ...descriptor }))
       }
-      const parent = Object.getPrototypeOf(current)
-      const node = Object.freeze({
+      const parent = TRUSTED.objectGetPrototypeOf(current)
+      const node = TRUSTED.objectFreeze({
         value: current,
         parent,
-        keys: Object.freeze(keys),
+        keys: TRUSTED.objectFreeze(keys),
         descriptors,
       })
-      Object.defineProperty(nodes, String(nodes.length), {
+      TRUSTED.objectDefineProperty(nodes, String(nodes.length), {
         configurable: true,
         enumerable: true,
         writable: true,
@@ -278,7 +329,7 @@ function snapshotArrayPrototype(): ArrayPrototypeFingerprint | null {
       })
       current = parent
     }
-    return Object.freeze({ nodes: Object.freeze(nodes) })
+    return TRUSTED.objectFreeze({ nodes: TRUSTED.objectFreeze(nodes) })
   } catch {
     return null
   }
@@ -340,7 +391,7 @@ export function assertTanStackArrayPrototypeStable(): void {
 }
 
 const SAFE_ARRAY_PROTOTYPE = (() => {
-  const prototype = Object.create(null) as object
+  const prototype = TRUSTED.objectCreate(null) as object
   const baseline = ARRAY_PROTOTYPE_BASELINE
   const arrayNode = baseline?.nodes[0]
   if (arrayNode)
@@ -351,20 +402,20 @@ const SAFE_ARRAY_PROTOTYPE = (() => {
       if (!descriptor) continue
       if (!("value" in descriptor)) continue
       if (typeof descriptor.value !== "function") continue
-      Object.defineProperty(prototype, key, {
+      TRUSTED.objectDefineProperty(prototype, key, {
         configurable: false,
         enumerable: descriptor.enumerable,
         writable: false,
         value: descriptor.value,
       })
     }
-  Object.defineProperty(prototype, "toJSON", {
+  TRUSTED.objectDefineProperty(prototype, "toJSON", {
     configurable: false,
     enumerable: false,
     writable: false,
     value: undefined,
   })
-  return Object.freeze(prototype)
+  return TRUSTED.objectFreeze(prototype)
 })()
 
 function appendPath(
@@ -372,7 +423,7 @@ function appendPath(
   ...segments: readonly (string | number)[]
 ): Path {
   const result: Array<string | number> = []
-  Object.setPrototypeOf(result, SAFE_ARRAY_PROTOTYPE)
+  TRUSTED.objectSetPrototypeOf(result, SAFE_ARRAY_PROTOTYPE)
   for (let index = 0; index < path.length; index += 1)
     result[index] = path[index]!
   for (let index = 0; index < segments.length; index += 1)
@@ -382,7 +433,7 @@ function appendPath(
 
 function safeArray<T>(): T[] {
   const result: T[] = []
-  Object.setPrototypeOf(result, SAFE_ARRAY_PROTOTYPE)
+  TRUSTED.objectSetPrototypeOf(result, SAFE_ARRAY_PROTOTYPE)
   return result
 }
 
@@ -392,14 +443,14 @@ function cloneRecord(
   path: Path
 ): object {
   try {
-    const target = record.array ? [] : Object.create(null)
-    if (record.array) Object.setPrototypeOf(target, SAFE_ARRAY_PROTOTYPE)
+    const target = record.array ? [] : TRUSTED.objectCreate(null)
+    if (record.array) TRUSTED.objectSetPrototypeOf(target, SAFE_ARRAY_PROTOTYPE)
     const define = (key: PropertyKey, original: PropertyDescriptor) => {
       const normalized = keyOf(key)
       const replacement = overrides.has(normalized)
         ? { ...original, value: overrides.get(normalized) }
         : original
-      Object.defineProperty(target, key, replacement)
+      TRUSTED.objectDefineProperty(target, key, replacement)
     }
     for (let index = 0; index < record.descriptors.length; index += 1) {
       const entry = record.descriptors[index]!
@@ -457,7 +508,10 @@ function captureArray(value: unknown, path: Path): CapturedArray {
     if (!("value" in item)) return fail(appendPath(path, index), "<accessor>")
     values[index] = item.value
   }
-  return Object.freeze({ record, values: Object.freeze(values) })
+  return plan({
+    record,
+    values: TRUSTED.objectFreeze(values),
+  })
 }
 
 type PreparedJson = null | boolean | number | string | JsonObject | JsonArray
@@ -496,7 +550,10 @@ function captureJson(
   try {
     const record = capture(value, path)
     if (record.array) {
-      if (record.prototype !== null && record.prototype !== Array.prototype)
+      if (
+        record.prototype !== null &&
+        record.prototype !== TRUSTED.arrayPrototype
+      )
         return fail(path, "<invalid-json>")
       const length = descriptor(record, "length")
       if (
@@ -537,11 +594,14 @@ function captureJson(
           active
         )
       }
-      return Object.freeze(output) as JsonArray
+      return TRUSTED.objectFreeze(output) as JsonArray
     }
-    if (record.prototype !== null && record.prototype !== Object.prototype)
+    if (
+      record.prototype !== null &&
+      record.prototype !== TRUSTED.objectPrototype
+    )
       return fail(path, "<invalid-json>")
-    const output = Object.create(null) as JsonObject
+    const output = TRUSTED.objectCreate(null) as JsonObject
     for (
       let descriptorIndex = 0;
       descriptorIndex < record.descriptors.length;
@@ -550,18 +610,17 @@ function captureJson(
       const entry = record.descriptors[descriptorIndex]!
       const key = entry[0]
       const item = entry[1]
-      if (typeof key !== "string" || key === "toJSON")
-        return fail(jsonPath(path), "<invalid-json>")
+      if (typeof key !== "string") return fail(jsonPath(path), "<invalid-json>")
       if (!item.enumerable || !("value" in item))
         return fail(jsonPath(path), "<accessor>")
-      Object.defineProperty(output, key, {
+      TRUSTED.objectDefineProperty(output, key, {
         configurable: true,
         enumerable: true,
         writable: false,
         value: captureJson(item.value, jsonPath(path), depth + 1, active),
       })
     }
-    return Object.freeze(output)
+    return TRUSTED.objectFreeze(output)
   } finally {
     active.delete(value)
   }
@@ -570,9 +629,20 @@ function captureJson(
 function strictJson(text: string, path: Path): PreparedJson {
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    parsed = TRUSTED.jsonParse(text)
   } catch (error) {
     if (error instanceof SyntaxError) return fail(path, "<invalid-json>")
+    throw error
+  }
+  return captureJson(parsed, path)
+}
+
+function lenientJson(text: string, path: Path): PreparedJson | undefined {
+  let parsed: unknown
+  try {
+    parsed = TRUSTED.jsonParse(text)
+  } catch (error) {
+    if (error instanceof SyntaxError) return undefined
     throw error
   }
   return captureJson(parsed, path)
@@ -585,12 +655,12 @@ type PreparedToolArguments =
 function partialJson(text: string, path: Path): PreparedToolArguments {
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    parsed = TRUSTED.jsonParse(text)
   } catch (error) {
-    if (error instanceof SyntaxError) return { kind: "partial" }
+    if (error instanceof SyntaxError) return plan({ kind: "partial" })
     throw error
   }
-  return { kind: "json", value: captureJson(parsed, path) }
+  return plan({ kind: "json", value: captureJson(parsed, path) })
 }
 
 type Freeform =
@@ -600,13 +670,12 @@ type Freeform =
 function freeform(text: string, path: Path): Freeform {
   let parsed: unknown
   try {
-    parsed = JSON.parse(text)
+    parsed = TRUSTED.jsonParse(text)
   } catch (error) {
-    if (error instanceof SyntaxError)
-      return Object.freeze({ kind: "text", value: text })
+    if (error instanceof SyntaxError) return plan({ kind: "text", value: text })
     throw error
   }
-  return Object.freeze({ kind: "json", value: captureJson(parsed, path) })
+  return plan({ kind: "json", value: captureJson(parsed, path) })
 }
 
 type PreparedPart =
@@ -624,7 +693,10 @@ type PreparedPart =
   | {
       readonly kind: "structured-fallback"
       readonly template: Captured
-      readonly json: PreparedJson
+      readonly json?: PreparedJson
+      readonly data?: PreparedJson
+      readonly partial?: PreparedJson
+      readonly errorMessage?: string
     }
   | {
       readonly kind: "tool-call"
@@ -647,7 +719,7 @@ interface PreparedPartList {
 function policy(family: Family, type: unknown): Policy | undefined {
   if (typeof type !== "string") return undefined
   const table = PART_POLICY[family]
-  return Object.prototype.hasOwnProperty.call(table, type)
+  return trustedApply(TRUSTED.hasOwnProperty, table, [type])
     ? table[type as keyof typeof table]
     : undefined
 }
@@ -661,7 +733,7 @@ function prepareParts(
   const captured = captureArray(value, path)
   const items = safeArray<PreparedPart>()
   for (let index = 0; index < captured.values.length; index += 1)
-    items[index] = Object.freeze(
+    items[index] = plan(
       preparePart(
         captured.values[index],
         appendPath(path, index),
@@ -669,9 +741,9 @@ function prepareParts(
         jsonText
       )
     )
-  return Object.freeze({
+  return plan({
     template: captured.record,
-    items: Object.freeze(items),
+    items: TRUSTED.objectFreeze(items),
   })
 }
 
@@ -702,21 +774,47 @@ function preparePart(
     const status = required(template, "status", appendPath(path, "status"))
     if (status !== "streaming" && status !== "complete" && status !== "error")
       return fail(appendPath(path, "status"), "<invalid>")
-    if (status !== "complete") return { kind: "opaque", template }
     const raw = required(template, "raw", appendPath(path, "raw"))
     if (typeof raw !== "string")
       return fail(appendPath(path, "raw"), "<invalid>")
-    return {
+    const data = optional(template, "data")
+    const partial = optional(template, "partial")
+    const errorMessage = optional(template, "errorMessage")
+    if (
+      errorMessage.kind === "data" &&
+      errorMessage.value !== undefined &&
+      typeof errorMessage.value !== "string"
+    )
+      return fail(appendPath(path, "errorMessage"), "<invalid>")
+    const preparedData =
+      data.kind === "data" && data.value !== undefined
+        ? captureJson(data.value, appendPath(path, "data"))
+        : undefined
+    const preparedPartial =
+      partial.kind === "data" && partial.value !== undefined
+        ? captureJson(partial.value, appendPath(path, "partial"))
+        : undefined
+    const json =
+      status === "complete"
+        ? raw === ""
+          ? preparedData !== undefined
+            ? preparedData
+            : captureJson(
+                required(template, "data", appendPath(path, "data")),
+                appendPath(path, "data")
+              )
+          : strictJson(raw, appendPath(path, "raw"))
+        : lenientJson(raw, appendPath(path, "raw"))
+    return plan({
       kind: "structured-fallback",
       template,
-      json:
-        raw === ""
-          ? captureJson(
-              required(template, "data", appendPath(path, "data")),
-              appendPath(path, "data")
-            )
-          : strictJson(raw, appendPath(path, "raw")),
-    }
+      ...(json !== undefined ? { json } : {}),
+      ...(preparedData !== undefined ? { data: preparedData } : {}),
+      ...(preparedPartial !== undefined ? { partial: preparedPartial } : {}),
+      ...(errorMessage.kind === "data" && typeof errorMessage.value === "string"
+        ? { errorMessage: errorMessage.value }
+        : {}),
+    })
   }
   if (kind === "tool-call") {
     const argumentsPath = appendPath(path, "arguments")
@@ -744,7 +842,9 @@ function preparePart(
         ? captureJson(output.value, appendPath(path, "output"))
         : undefined
     const partialState =
-      state === "awaiting-input" || state === "input-streaming"
+      state === "awaiting-input" ||
+      state === "input-streaming" ||
+      state === "error"
     return {
       kind,
       template,
@@ -762,7 +862,7 @@ function preparePart(
   const preparedContent =
     typeof content === "string"
       ? freeform(content, appendPath(path, "content"))
-      : Array.isArray(content)
+      : TRUSTED.arrayIsArray(content)
         ? prepareParts(content, appendPath(path, "content"), "model", true)
         : fail(appendPath(path, "content"), "<invalid>")
   const error = optional(template, "error")
@@ -804,15 +904,15 @@ function prepareToolCalls(value: unknown, path: Path): PreparedToolCalls {
     const functionTemplate = capture(functionValue, functionPath)
     const args = required(functionTemplate, "arguments", argumentsPath)
     if (typeof args !== "string") return fail(argumentsPath, "<invalid>")
-    items[index] = Object.freeze({
+    items[index] = plan({
       template,
       functionTemplate,
       args: strictJson(args, argumentsPath),
     })
   }
-  return Object.freeze({
+  return plan({
     template: captured.record,
-    items: Object.freeze(items),
+    items: TRUSTED.objectFreeze(items),
   })
 }
 
@@ -905,7 +1005,7 @@ function prepareMessage(
         : content
       : content === null
         ? null
-        : Array.isArray(content)
+        : TRUSTED.arrayIsArray(content)
           ? prepareParts(content, contentPath, "model", role === "tool")
           : fail(contentPath, "<invalid>")
   const toolCalls = optional(record, "toolCalls")
@@ -931,17 +1031,17 @@ function captureMessages(messages: TanStackMessages): PreparedMessages {
   for (let index = 0; index < root.values.length; index += 1)
     records[index] = capture(root.values[index], appendPath([], index))
   if (records.length === 0)
-    return Object.freeze({
+    return plan({
       template: root.record,
-      items: Object.freeze(safeArray<PreparedMessage>()),
+      items: TRUSTED.objectFreeze(safeArray<PreparedMessage>()),
     })
   const family = classify(records)
   const items = safeArray<PreparedMessage>()
   for (let index = 0; index < records.length; index += 1)
-    items[index] = Object.freeze(prepareMessage(records[index]!, index, family))
-  return Object.freeze({
+    items[index] = plan(prepareMessage(records[index]!, index, family))
+  return plan({
     template: root.record,
-    items: Object.freeze(items),
+    items: TRUSTED.objectFreeze(items),
   })
 }
 
@@ -957,29 +1057,34 @@ async function protectPreparedJson(
   if (value === null || typeof value === "boolean" || typeof value === "number")
     return value
   if (typeof value === "string") return protectText(session, value)
-  if (Array.isArray(value)) {
+  if (TRUSTED.arrayIsArray(value)) {
     const output = safeArray<PreparedJson>()
     for (let index = 0; index < value.length; index += 1)
       output[index] = await protectPreparedJson(session, value[index]!)
-    return Object.freeze(output) as JsonArray
+    return TRUSTED.objectFreeze(output) as JsonArray
   }
-  const output = Object.create(null) as JsonObject
+  const output = TRUSTED.objectCreate(null) as JsonObject
   const objectValue = value as JsonObject
-  const keys = Object.keys(objectValue)
+  const keys = TRUSTED.objectKeys(objectValue)
   for (let index = 0; index < keys.length; index += 1) {
     const key = keys[index]!
-    Object.defineProperty(output, key, {
+    TRUSTED.objectDefineProperty(output, key, {
       configurable: true,
       enumerable: true,
       writable: false,
       value: await protectPreparedJson(session, objectValue[key]!),
     })
   }
-  return Object.freeze(output)
+  return TRUSTED.objectFreeze(output)
 }
 
 function isFreeform(value: Freeform | PreparedPartList): value is Freeform {
-  return "kind" in value
+  const kind = TRUSTED.objectGetOwnPropertyDescriptor(value, "kind")
+  return (
+    !!kind &&
+    "value" in kind &&
+    (kind.value === "text" || kind.value === "json")
+  )
 }
 
 async function renderFreeform(
@@ -988,7 +1093,7 @@ async function renderFreeform(
 ): Promise<string> {
   return value.kind === "text"
     ? protectText(session, value.value)
-    : JSON.stringify(await protectPreparedJson(session, value.value))
+    : TRUSTED.jsonStringify(await protectPreparedJson(session, value.value))
 }
 
 async function renderParts(
@@ -1025,8 +1130,19 @@ async function renderPart(
     const overrides = new Map<PropertyKey, unknown>()
     overrides.set(
       "raw",
-      JSON.stringify(await protectPreparedJson(session, plan.json))
+      plan.json === undefined
+        ? ""
+        : TRUSTED.jsonStringify(await protectPreparedJson(session, plan.json))
     )
+    if (plan.data !== undefined)
+      overrides.set("data", await protectPreparedJson(session, plan.data))
+    if (plan.partial !== undefined)
+      overrides.set("partial", await protectPreparedJson(session, plan.partial))
+    if (plan.errorMessage !== undefined)
+      overrides.set(
+        "errorMessage",
+        await protectText(session, plan.errorMessage)
+      )
     return cloneRecord(plan.template, overrides, path)
   }
   if (plan.kind === "tool-call") {
@@ -1035,7 +1151,9 @@ async function renderPart(
       "arguments",
       plan.args.kind === "partial"
         ? ""
-        : JSON.stringify(await protectPreparedJson(session, plan.args.value))
+        : TRUSTED.jsonStringify(
+            await protectPreparedJson(session, plan.args.value)
+          )
     )
     if (plan.input !== undefined)
       overrides.set("input", await protectPreparedJson(session, plan.input))
@@ -1064,7 +1182,7 @@ async function renderToolCalls(
     const functionOverrides = new Map<PropertyKey, unknown>()
     functionOverrides.set(
       "arguments",
-      JSON.stringify(await protectPreparedJson(session, item.args))
+      TRUSTED.jsonStringify(await protectPreparedJson(session, item.args))
     )
     const functionValue = cloneRecord(
       item.functionTemplate,

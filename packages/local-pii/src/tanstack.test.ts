@@ -930,7 +930,8 @@ describe("piiConnection message protection", () => {
     expect(JSON.parse(part.raw)).toEqual({
       email: expect.stringMatching(TOKEN),
     })
-    expect(part.data).toBe(data)
+    expect(part.data).not.toBe(data)
+    expect(part.data).toEqual({ email: expect.stringMatching(TOKEN) })
 
     const cyclic: Record<string, unknown> = { email: "ana@acme.com" }
     cyclic.self = cyclic
@@ -977,6 +978,202 @@ describe("piiConnection message protection", () => {
     })
     expect(connect).toHaveBeenCalledOnce()
     expect(session.mapping).toEqual(before)
+  })
+
+  it("protects every structured-output representation used by the UI wire converter", async () => {
+    const original = "ana@acme.com"
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const connect = vi.fn(() => emptyStream())
+    const wrapped = piiConnection({ connect }, { session })
+    const message = {
+      id: "structured-wire",
+      role: "assistant" as const,
+      parts: [
+        {
+          type: "structured-output" as const,
+          status: "complete" as const,
+          raw: JSON.stringify({ raw: original }),
+          data: { data: original },
+          partial: { partial: original },
+          errorMessage: `failed ${original}`,
+        },
+        {
+          type: "structured-output" as const,
+          status: "streaming" as const,
+          raw: JSON.stringify({ streaming: original }),
+          data: { data: original },
+          partial: { partial: original },
+        },
+        {
+          type: "structured-output" as const,
+          status: "error" as const,
+          raw: `{"error":"${original}`,
+          partial: { partial: original },
+          errorMessage: `error ${original}`,
+        },
+      ],
+    } as unknown as UIMessage
+    const snapshot = structuredClone(message)
+
+    await collect(wrapped.connect([message]))
+    const forwarded = (
+      connect.mock.calls as unknown as Array<unknown[]>
+    )[0]![0] as Array<UIMessage>
+    const wire = uiMessagesToWire(forwarded)
+
+    expect(JSON.stringify(wire)).not.toContain(original)
+    expect(message).toEqual(snapshot)
+    const first = forwarded[0]!.parts[0]!
+    const second = forwarded[0]!.parts[1]!
+    const third = forwarded[0]!.parts[2]!
+    expect(first).toMatchObject({
+      raw: expect.stringMatching(TOKEN),
+      data: { data: expect.stringMatching(TOKEN) },
+      partial: { partial: expect.stringMatching(TOKEN) },
+      errorMessage: expect.stringMatching(TOKEN),
+    })
+    expect(second).toMatchObject({
+      raw: expect.stringMatching(TOKEN),
+      data: { data: expect.stringMatching(TOKEN) },
+      partial: { partial: expect.stringMatching(TOKEN) },
+    })
+    expect(third).toMatchObject({
+      raw: "",
+      partial: { partial: expect.stringMatching(TOKEN) },
+      errorMessage: expect.stringMatching(TOKEN),
+    })
+  })
+
+  it("protects error-state tool-call arguments when they are incomplete", async () => {
+    const original = 'Ana "Boss"'
+    const session = createAnonymizer({
+      dictionary: [{ value: original, type: "CUSTOM" }],
+      placeholders: token(),
+    }).createSession()
+    const connect = vi.fn(() => emptyStream())
+    const wrapped = piiConnection({ connect }, { session })
+    const message = {
+      id: "error-tool",
+      role: "assistant" as const,
+      parts: [
+        {
+          type: "tool-call" as const,
+          id: "call-error",
+          name: "lookup",
+          arguments: '{"name":"Ana \\"Boss}',
+          state: "error" as const,
+        },
+      ],
+    } as unknown as UIMessage
+
+    await collect(wrapped.connect([message]))
+    const forwarded = (
+      connect.mock.calls as unknown as Array<unknown[]>
+    )[0]![0] as Array<UIMessage>
+    const part = forwarded[0]!.parts[0]!
+    if (part.type !== "tool-call") throw new Error("expected tool call")
+    expect(part.arguments).toBe("")
+    expect(part.arguments).not.toContain("Ana")
+  })
+
+  it("uses captured JSON and collection intrinsics after anonymization yields", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const originalAnonymize = session.anonymize.bind(session)
+    const originalJsonStringify = Object.getOwnPropertyDescriptor(
+      JSON,
+      "stringify"
+    )!
+    const originalArrayIsArray = Object.getOwnPropertyDescriptor(
+      Array,
+      "isArray"
+    )!
+    const originalObjectKeys = Object.getOwnPropertyDescriptor(Object, "keys")!
+    const connect = vi.fn(() => emptyStream())
+    vi.spyOn(session, "anonymize").mockImplementation(async (text) => {
+      const result = await originalAnonymize(text)
+      Object.defineProperty(JSON, "stringify", {
+        configurable: true,
+        writable: true,
+        value: () => '{"leaked":"ana@acme.com"}',
+      })
+      Object.defineProperty(Array, "isArray", {
+        configurable: true,
+        writable: true,
+        value: () => false,
+      })
+      Object.defineProperty(Object, "keys", {
+        configurable: true,
+        writable: true,
+        value: () => [],
+      })
+      return result
+    })
+
+    try {
+      await collect(
+        piiConnection({ connect }, { session }).connect([
+          {
+            id: "late-intrinsics",
+            role: "assistant",
+            parts: [
+              {
+                type: "structured-output",
+                status: "complete",
+                raw: '{"email":"ana@acme.com"}',
+                data: { email: "ana@acme.com" },
+              },
+            ],
+          },
+        ] as unknown as Array<UIMessage>)
+      )
+      const forwarded = (
+        connect.mock.calls as unknown as Array<unknown[]>
+      )[0]![0] as Array<UIMessage>
+      const stableStringify =
+        originalJsonStringify.value as typeof JSON.stringify
+      expect(stableStringify(forwarded)).not.toContain("ana@acme.com")
+      const part = forwarded[0]!.parts[0]!
+      expect(part).toMatchObject({
+        raw: expect.stringMatching(TOKEN),
+        data: { email: expect.stringMatching(TOKEN) },
+      })
+    } finally {
+      Object.defineProperty(JSON, "stringify", originalJsonStringify)
+      Object.defineProperty(Array, "isArray", originalArrayIsArray)
+      Object.defineProperty(Object, "keys", originalObjectKeys)
+    }
+  })
+
+  it("allows non-callable toJSON data while protecting JSON values", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const connect = vi.fn(() => emptyStream())
+    const wrapped = piiConnection({ connect }, { session })
+    const message = Object.assign(Object.create({ toJSON: "control" }), {
+      id: "non-callable-toJSON",
+      role: "assistant" as const,
+      toJSON: "control",
+      parts: [
+        {
+          type: "structured-output" as const,
+          status: "complete" as const,
+          raw: "",
+          data: { toJSON: "ana@acme.com" },
+        },
+      ],
+    }) as unknown as UIMessage
+
+    await collect(wrapped.connect([message]))
+    const forwarded = (
+      connect.mock.calls as unknown as Array<unknown[]>
+    )[0]![0] as Array<UIMessage>
+    const forwardedMessage = forwarded[0]!
+    expect(
+      (forwardedMessage as unknown as Record<string, unknown>).toJSON
+    ).toBe("control")
+    const part = forwardedMessage.parts[0]!
+    if (part.type !== "structured-output")
+      throw new Error("expected structured output")
+    expect(part.data).toEqual({ toJSON: expect.stringMatching(TOKEN) })
   })
 
   it("rejects malformed tool-call JSON in included states", async () => {
@@ -1565,9 +1762,12 @@ describe("piiConnection message protection", () => {
       "ana@acme.com"
     )
     expect("raw" in structured ? structured.raw : "").toMatch(TOKEN)
-    expect("data" in structured ? structured.data : undefined).toBe(
+    expect("data" in structured ? structured.data : undefined).not.toBe(
       structuredData
     )
+    expect("data" in structured ? structured.data : undefined).toEqual({
+      email: expect.stringMatching(TOKEN),
+    })
     const toolMessage = protectedUi[1] as UIMessage
     const toolCallPart = toolMessage.parts[0]!
     const toolResultPart = toolMessage.parts[1]!

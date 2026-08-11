@@ -10,6 +10,8 @@ import { restoreTanStackStream } from "./tanstack-stream"
 
 export { UnsupportedTanStackSemanticContentError }
 
+const TRUSTED_REFLECT_APPLY = Reflect.apply
+
 export interface PiiConnectionOptions {
   /** One caller-owned session per conversation or thread. */
   session: PiiSession
@@ -51,7 +53,7 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
         )
         signal?.throwIfAborted()
         assertTanStackArrayPrototypeStable()
-        const upstream = Reflect.apply(pinnedConnect, inner, [
+        const upstream = TRUSTED_REFLECT_APPLY(pinnedConnect, inner, [
           protectedMessages,
           data,
           signal,
@@ -68,17 +70,18 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
   }
 
   if (pinnedHydrate) {
-    wrapped.hydrate = (...args) => Reflect.apply(pinnedHydrate, inner, args)
+    wrapped.hydrate = (...args) =>
+      TRUSTED_REFLECT_APPLY(pinnedHydrate, inner, args)
   }
   if (pinnedHydrateGeneration) {
     wrapped.hydrateGeneration = (...args) =>
-      Reflect.apply(pinnedHydrateGeneration, inner, args)
+      TRUSTED_REFLECT_APPLY(pinnedHydrateGeneration, inner, args)
   }
   if (pinnedJoinRun) {
     wrapped.joinRun = (runId, signal) =>
       restoreTanStackStream(
         options.session,
-        Reflect.apply(pinnedJoinRun, inner, [runId, signal]),
+        TRUSTED_REFLECT_APPLY(pinnedJoinRun, inner, [runId, signal]),
         signal
       )
   }
