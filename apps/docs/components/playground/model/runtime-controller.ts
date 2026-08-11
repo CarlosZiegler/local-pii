@@ -11,6 +11,13 @@ import type {
   RuntimeRecovery,
   RuntimeSnapshot,
 } from "./types"
+import {
+  GEMMA_ARTIFACT_URLS,
+  GEMMA_CACHE_NAME,
+  GEMMA_RUNTIME_DISCLOSURE,
+} from "./runtime-metadata"
+
+export { GEMMA_ARTIFACT_URLS } from "./runtime-metadata"
 
 type NativeFactory = ChromePromptFactory & {
   availability(options?: LanguageModelCreateCoreOptions): Promise<Availability>
@@ -21,16 +28,6 @@ const TEXT_EXPECTATIONS = {
   expectedOutputs: [{ type: "text", languages: ["en"] }],
 } as const
 
-const GEMMA_CACHE_NAME = "transformers-cache"
-const GEMMA_CACHE_URLS = [
-  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/config.json",
-  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/generation_config.json",
-  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/tokenizer_config.json",
-  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/tokenizer.json",
-  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/onnx/model_q4f16.onnx",
-  "https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX/resolve/main/onnx/model_q4f16.onnx_data",
-] as const
-
 const DISCLOSURES: Record<RuntimeKind, RuntimeDisclosure> = {
   "gemini-nano": {
     label: "Chrome built-in Prompt API",
@@ -38,21 +35,17 @@ const DISCLOSURES: Record<RuntimeKind, RuntimeDisclosure> = {
     source: "Chrome built-in Prompt API",
     artifacts: { kind: "browser-managed" },
   },
-  "gemma-3-270m": {
-    label: "Gemma 3 270M IT",
-    model: "onnx-community/gemma-3-270m-it-ONNX",
-    source: "Transformers.js browser runtime",
-    artifacts: {
-      kind: "explicit-download",
-      approximateBytes: 293_284_073,
-      origins: ["https://huggingface.co", "https://*.cdn.hf.co"],
-    },
-  },
+  "gemma-3-270m": GEMMA_RUNTIME_DISCLOSURE,
 }
 
 export interface RuntimeActivationLoadOptions {
   readonly signal?: AbortSignal
   readonly onProgress: (progress: number) => void
+}
+
+interface ActivatableBrowserRuntime extends BrowserGenerationRuntime {
+  /** Complete lazy model loading before the controller publishes ready. */
+  prepare?(signal?: AbortSignal): Promise<void>
 }
 
 export interface RuntimeControllerDependencies {
@@ -67,7 +60,7 @@ export interface RuntimeControllerDependencies {
   /** Load/construct Gemma after explicit activation. */
   readonly loadGemma?: (
     options: RuntimeActivationLoadOptions
-  ) => BrowserGenerationRuntime | Promise<BrowserGenerationRuntime>
+  ) => ActivatableBrowserRuntime | Promise<ActivatableBrowserRuntime>
   readonly availabilityTimeoutMs?: number
 }
 
@@ -99,7 +92,7 @@ export async function hasCachedGemmaArtifacts(
   if (!cacheStorage || !(await cacheStorage.has(GEMMA_CACHE_NAME))) return false
   const cache = await cacheStorage.open(GEMMA_CACHE_NAME)
   const artifacts = await Promise.all(
-    GEMMA_CACHE_URLS.map((url) => cache.match(url))
+    GEMMA_ARTIFACT_URLS.map((url) => cache.match(url))
   )
   return artifacts.every(Boolean)
 }
@@ -140,7 +133,9 @@ function awaitWithAbort<T>(
     value.then(
       (result) => {
         if (settled) {
-          void lateValueCleanup?.(result)
+          void Promise.resolve(lateValueCleanup?.(result)).catch(
+            () => undefined
+          )
           return
         }
         settled = true
@@ -232,7 +227,7 @@ export function createRuntimeController(
       if (currentRuntime === previous) currentRuntime = undefined
     }
     if (!isCurrent(operationId)) {
-      await next.dispose()
+      await next.dispose().catch(() => undefined)
       return false
     }
     currentRuntime = next
@@ -381,11 +376,20 @@ export function createRuntimeController(
         return createGemmaBrowserRuntime({ onProgress: progress })
       })
     const result = loadGemma({ signal, onProgress })
-    return await awaitWithAbort(
+    const runtime = await awaitWithAbort(
       Promise.resolve(result),
       signal,
       (lateRuntime) => lateRuntime.dispose()
     )
+    try {
+      await runtime.prepare?.(signal)
+      return runtime
+    } catch (cause) {
+      // Preserve the preparation error while still awaiting shared pipeline
+      // cleanup. This is especially important for cancellation.
+      await runtime.dispose().catch(() => undefined)
+      throw cause
+    }
   }
 
   const runActivation = async (

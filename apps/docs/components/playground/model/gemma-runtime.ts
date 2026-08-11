@@ -8,11 +8,14 @@ import {
   assertProtectedBrowserRequest,
   createProtectedBrowserRequest,
 } from "./protected-request"
-import type {
-  BrowserGenerationRuntime,
-  ProtectedBrowserTurn,
-  RuntimeDisclosure,
-} from "./types"
+import type { BrowserGenerationRuntime, ProtectedBrowserTurn } from "./types"
+import {
+  GEMMA_MODEL_ID,
+  GEMMA_MODEL_REVISION,
+  GEMMA_RUNTIME_DISCLOSURE,
+} from "./runtime-metadata"
+
+export { GEMMA_RUNTIME_DISCLOSURE } from "./runtime-metadata"
 
 /** Compatibility factory retained for the browser Prompt API test seam. */
 interface LanguageModelFactory {
@@ -20,8 +23,8 @@ interface LanguageModelFactory {
   create(options?: LanguageModelCreateOptions): Promise<LanguageModel>
 }
 
-const MODEL_ID = "onnx-community/gemma-3-270m-it-ONNX"
-const MODEL_REVISION = "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+const MODEL_ID = GEMMA_MODEL_ID
+const MODEL_REVISION = GEMMA_MODEL_REVISION
 // Pinned Gemma 3 270M config: max_position_embeddings is 32768.
 const CONTEXT_WINDOW = 32_768
 
@@ -93,15 +96,8 @@ export interface GemmaRuntimeDependencies {
   onProgress?: (progress: number) => void
 }
 
-export const GEMMA_RUNTIME_DISCLOSURE: RuntimeDisclosure = {
-  label: "Gemma 3 270M IT",
-  model: MODEL_ID,
-  source: "Transformers.js browser runtime",
-  artifacts: {
-    kind: "explicit-download",
-    approximateBytes: 293_284_073,
-    origins: ["https://huggingface.co", "https://*.cdn.hf.co"],
-  },
+export interface PreparedGemmaBrowserRuntime extends BrowserGenerationRuntime {
+  prepare(signal?: AbortSignal): Promise<void>
 }
 
 function createTextIterator(
@@ -182,6 +178,39 @@ function createTextIterator(
       return { done: true, value: undefined }
     },
   }
+}
+
+function awaitSignal<T>(value: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return value
+  return new Promise<T>((resolve, reject) => {
+    let settled = false
+    const remove = () => signal.removeEventListener("abort", onAbort)
+    const onAbort = () => {
+      if (settled) return
+      settled = true
+      remove()
+      reject(signal.reason)
+    }
+    if (signal.aborted) {
+      onAbort()
+      return
+    }
+    signal.addEventListener("abort", onAbort, { once: true })
+    value.then(
+      (result) => {
+        if (settled) return
+        settled = true
+        remove()
+        resolve(result)
+      },
+      (cause) => {
+        if (settled) return
+        settled = true
+        remove()
+        reject(cause)
+      }
+    )
+  })
 }
 
 function protectedMessages(
@@ -713,12 +742,12 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
 
 /**
  * Explicitly activated Gemma browser runtime. Transformers.js is not loaded
- * by construction; the first generation performs the lazy import and caches
- * one reusable q4f16 WebGPU generator for subsequent runs.
+ * by construction; `prepare()` performs the lazy import and caches one
+ * reusable q4f16 WebGPU generator before the controller reports readiness.
  */
 export function createGemmaBrowserRuntime(
   dependencies: GemmaRuntimeDependencies = {}
-): BrowserGenerationRuntime {
+): PreparedGemmaBrowserRuntime {
   const loadTransformers =
     dependencies.loadTransformers ??
     (async () =>
@@ -789,6 +818,11 @@ export function createGemmaBrowserRuntime(
   return {
     id: "gemma-3-270m",
     disclosure: GEMMA_RUNTIME_DISCLOSURE,
+    async prepare(signal) {
+      if (disposed) throw new Error("The Gemma browser runtime is disposed")
+      signal?.throwIfAborted()
+      await awaitSignal(loadGenerator(), signal)
+    },
     generate(input) {
       const request = input
       // Runtime callers must cross the same private marker as every other

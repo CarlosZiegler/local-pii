@@ -8,6 +8,7 @@ import {
   useEffect,
   useMemo,
   useRef,
+  useState,
   useSyncExternalStore,
 } from "react"
 import {
@@ -22,6 +23,7 @@ import type {
 
 type RuntimeContextValue = RuntimeSnapshot & {
   readonly runtime?: BrowserGenerationRuntime
+  readonly actionError?: Error
   activate(kind: RuntimeKind): Promise<void>
   abort(): void
   check(): Promise<void>
@@ -49,6 +51,7 @@ export function RuntimeProvider({
     () => SERVER_SNAPSHOT
   )
   const activeAbort = useRef<AbortController | null>(null)
+  const [actionError, setActionError] = useState<Error>()
 
   useEffect(() => {
     void controller.check()
@@ -62,17 +65,19 @@ export function RuntimeProvider({
 
   const activate = useCallback(
     (kind: RuntimeKind) => {
-      activeAbort.current?.abort(
-        new DOMException(
-          "A newer runtime activation was requested",
-          "AbortError"
-        )
-      )
       const abort = new AbortController()
-      activeAbort.current = abort
-      return controller.activate(kind, abort.signal).finally(() => {
-        if (activeAbort.current === abort) activeAbort.current = null
-      })
+      setActionError(undefined)
+      if (activeAbort.current === null) activeAbort.current = abort
+      return controller
+        .activate(kind, abort.signal)
+        .catch((cause) => {
+          setActionError(
+            cause instanceof Error ? cause : new Error(String(cause))
+          )
+        })
+        .finally(() => {
+          if (activeAbort.current === abort) activeAbort.current = null
+        })
     },
     [controller]
   )
@@ -88,11 +93,15 @@ export function RuntimeProvider({
     return {
       ...snapshot,
       ...(runtime === undefined ? {} : { runtime }),
+      ...(actionError === undefined ? {} : { actionError }),
       activate,
       abort,
-      check: controller.check,
+      check: () => {
+        setActionError(undefined)
+        return controller.check()
+      },
     }
-  }, [abort, activate, controller, snapshot])
+  }, [abort, actionError, activate, controller, snapshot])
 
   return (
     <RuntimeContext.Provider value={value}>{children}</RuntimeContext.Provider>

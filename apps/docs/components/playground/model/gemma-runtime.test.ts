@@ -111,6 +111,47 @@ async function collect(source: AsyncIterable<string>): Promise<string> {
 }
 
 describe("Gemma browser-generation runtime", () => {
+  it("prepares the shared pipeline without starting a generation", async () => {
+    const fake = fakeTransformers()
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+
+    await runtime.prepare()
+
+    expect(fake.loadTransformers).toHaveBeenCalledOnce()
+    expect(fake.pipeline).toHaveBeenCalledOnce()
+    expect(fake.generator).not.toHaveBeenCalled()
+    await runtime.prepare()
+    expect(fake.loadTransformers).toHaveBeenCalledOnce()
+    expect(fake.pipeline).toHaveBeenCalledOnce()
+    await runtime.dispose()
+  })
+
+  it("preserves a preparation abort reason while disposing the shared pipeline", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers()
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const abort = new AbortController()
+    const reason = new DOMException("Preparation stopped", "AbortError")
+    const preparation = runtime.prepare(abort.signal)
+
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+    abort.abort(reason)
+    await expect(preparation).rejects.toBe(reason)
+
+    const disposal = runtime.dispose()
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      pipeline: fake.pipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await disposal
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
   it("loads lazily once and formats supplied protected history per run", async () => {
     const fake = fakeTransformers()
     const runtime = createGemmaBrowserRuntime({

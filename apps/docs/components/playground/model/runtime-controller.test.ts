@@ -1,7 +1,9 @@
 import { describe, expect, it, vi } from "vitest"
 import {
+  GEMMA_ARTIFACT_URLS,
   RuntimeActivationBusyError,
   createRuntimeController,
+  hasCachedGemmaArtifacts,
   type RuntimeControllerDependencies,
 } from "./runtime-controller"
 import type { BrowserGenerationRuntime, RuntimeDisclosure } from "./types"
@@ -65,6 +67,24 @@ function controllerDependencies(
 }
 
 describe("browser runtime controller", () => {
+  it("recognizes only the complete pinned Gemma cache", async () => {
+    const cached = new Set(GEMMA_ARTIFACT_URLS)
+    const match = vi.fn(async (url: string) =>
+      cached.has(url) ? new Response() : undefined
+    )
+    const cacheStorage = {
+      has: vi.fn(async () => true),
+      open: vi.fn(async () => ({ match })),
+    } as unknown as CacheStorage
+
+    await expect(hasCachedGemmaArtifacts(cacheStorage)).resolves.toBe(true)
+    expect(match.mock.calls.map(([url]) => url)).toEqual(
+      expect.arrayContaining([...GEMMA_ARTIFACT_URLS])
+    )
+    cached.delete(GEMMA_ARTIFACT_URLS.at(-1)!)
+    await expect(hasCachedGemmaArtifacts(cacheStorage)).resolves.toBe(false)
+  })
+
   it("publishes ready for available native capability without acquiring a session", async () => {
     const native = nativeFactory("available")
     const controller = createRuntimeController(
@@ -172,6 +192,28 @@ describe("browser runtime controller", () => {
       true
     )
     expect(native.create).toHaveBeenCalledOnce()
+  })
+
+  it("prepares Gemma before ready without starting generation", async () => {
+    const selected = runtime("gemma-3-270m") as BrowserGenerationRuntime & {
+      prepare: ReturnType<typeof vi.fn>
+    }
+    selected.prepare = vi.fn(async () => undefined)
+    const loadGemma = vi.fn(async () => selected)
+    const controller = createRuntimeController(
+      controllerDependencies({ loadGemma })
+    )
+
+    await controller.check()
+    await controller.activate("gemma-3-270m")
+
+    expect(loadGemma).toHaveBeenCalledOnce()
+    expect(selected.prepare).toHaveBeenCalledOnce()
+    expect(selected.generate).not.toHaveBeenCalled()
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "ready",
+      kind: "gemma-3-270m",
+    })
   })
 
   it("fails overlapping activation visibly", async () => {

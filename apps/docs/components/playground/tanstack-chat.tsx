@@ -6,12 +6,12 @@ import { piiConnection } from "local-pii/tanstack"
 import type { ChatStatus } from "ai"
 import { useMemo, useState } from "react"
 import { ChatShell, type ChatShellMessage } from "./chat-shell"
-import { createPromptConnection } from "./model/tanstack-connection"
-import type { BrowserModelRuntime } from "./model/types"
+import { createBrowserConnection } from "./model/tanstack-connection"
+import type { BrowserGenerationRuntime } from "./model/types"
 import type { PrivacyInspection } from "./privacy-inspector"
 
 export interface TanStackChatProps {
-  runtime: BrowserModelRuntime
+  runtime: BrowserGenerationRuntime
   runtimeName: string
 }
 
@@ -23,7 +23,7 @@ export function TanStackChat({ runtime, runtimeName }: TanStackChatProps) {
   const [session] = useState(createSession)
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const connection = useMemo(
-    () => piiConnection(createPromptConnection(runtime), { session }),
+    () => piiConnection(createBrowserConnection(runtime), { session }),
     [runtime, session]
   )
   const { clear, error, isLoading, messages, sendMessage, stop } = useChat({

@@ -36,13 +36,6 @@ export interface BrowserGenerationRuntime {
 
 export type RuntimeKind = "gemini-nano" | "gemma-3-270m"
 
-/** Compatibility shape used by the adapters until they consume the direct seam. */
-export interface BrowserModelRuntime {
-  kind: RuntimeKind
-  availability(options?: LanguageModelCreateCoreOptions): Promise<Availability>
-  create(options?: LanguageModelCreateOptions): Promise<LanguageModel>
-}
-
 export type RuntimeAvailability =
   "ready" | "requires-activation" | "unavailable"
 

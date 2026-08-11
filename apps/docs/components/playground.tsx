@@ -55,7 +55,7 @@ function RuntimeChoice({ option }: { option: RuntimeOption }) {
         aria-label={`${cached ? "Use" : "Activate"} ${option.disclosure.label}`}
         disabled={unavailable}
         onClick={() => {
-          void runtime.activate(option.kind).catch(() => undefined)
+          void runtime.activate(option.kind)
         }}
         type="button"
       >
@@ -82,7 +82,7 @@ function RuntimePlayground() {
         <AlertDescription>
           Prompts stay in this browser. There is no gateway, API route, server
           action, or API key. Explicit artifact downloads contain no user
-          content and never send inference requests.
+          content and never send generation requests.
         </AlertDescription>
       </Alert>
 
@@ -152,9 +152,19 @@ function RuntimePlayground() {
               <span>Preparing runtime</span>
               <span>{Math.round((runtime.progress ?? 0) * 100)}%</span>
             </div>
-            <Progress value={(runtime.progress ?? 0) * 100} />
+            <Progress
+              aria-label="Runtime activation progress"
+              value={(runtime.progress ?? 0) * 100}
+            />
           </div>
         </section>
+      ) : null}
+
+      {runtime.actionError ? (
+        <Alert aria-live="polite" variant="destructive">
+          <AlertTitle>Runtime action failed</AlertTitle>
+          <AlertDescription>{runtime.actionError.message}</AlertDescription>
+        </Alert>
       ) : null}
 
       {runtime.status === "error" ? (
@@ -166,7 +176,7 @@ function RuntimePlayground() {
               {runtime.recovery.includes("retry-activation") && runtime.kind ? (
                 <Button
                   onClick={() => {
-                    void runtime.activate(runtime.kind!).catch(() => undefined)
+                    void runtime.activate(runtime.kind!)
                   }}
                   type="button"
                   variant="outline"

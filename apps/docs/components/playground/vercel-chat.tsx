@@ -11,15 +11,15 @@ import {
 } from "ai"
 import { useCallback, useMemo, useState } from "react"
 import { ChatShell, type ChatShellMessage } from "./chat-shell"
-import { createEphemeralBrowserAIModel } from "./model/ephemeral-browser-ai"
 import { normalizeChatTransportAbort } from "./model/normalize-chat-transport-abort"
 import { settleChatStop } from "./model/settle-chat-stop"
-import type { BrowserModelRuntime } from "./model/types"
+import { createBrowserLanguageModel } from "./model/vercel-model"
+import type { BrowserGenerationRuntime } from "./model/types"
 import type { PrivacyInspection } from "./privacy-inspector"
 
 export interface VercelChatProps {
   model?: LanguageModel
-  runtime?: BrowserModelRuntime
+  runtime?: BrowserGenerationRuntime
   runtimeName: string
 }
 
@@ -41,11 +41,13 @@ export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
   const [session] = useState(createSession)
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const [controlError, setControlError] = useState<Error>()
-  const protectedModel = useMemo(
-    () =>
-      withPii(model ?? createEphemeralBrowserAIModel({ runtime }), { session }),
-    [model, runtime, session]
-  )
+  const protectedModel = useMemo(() => {
+    const selectedModel =
+      model ?? (runtime && createBrowserLanguageModel(runtime))
+    if (!selectedModel)
+      throw new Error("A browser runtime or model is required")
+    return withPii(selectedModel, { session })
+  }, [model, runtime, session])
   const transport = useMemo(
     () =>
       normalizeChatTransportAbort(
