@@ -7,6 +7,7 @@ import type {
 import {
   managedGeneration,
   trackActiveGeneration,
+  waitForActiveGenerations,
 } from "./browser-generation-runtime"
 
 export interface ChromePromptSession {
@@ -126,7 +127,7 @@ export function createChromeBrowserRuntime(
     },
     async dispose() {
       disposed = true
-      await Promise.all([...active])
+      await waitForActiveGenerations(active)
     },
   }
 }

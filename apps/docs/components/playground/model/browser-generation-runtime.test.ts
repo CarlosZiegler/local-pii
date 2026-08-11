@@ -129,6 +129,42 @@ describe("managedGeneration", () => {
     expect(returned).toHaveBeenCalledWith(expect.any(Error))
   })
 
+  it("awaits existing cleanup when return follows abort", async () => {
+    const abort = new AbortController()
+    const releaseReturn = deferred<void>()
+    const returned = vi.fn(async () => {
+      await releaseReturn.promise
+      return { done: true as const, value: undefined }
+    })
+    const settled = vi.fn()
+    const reader = managedGeneration(
+      async () => ({
+        next: () => new Promise<IteratorResult<string>>(() => {}),
+        return: returned,
+      }),
+      abort.signal,
+      settled
+    )[Symbol.asyncIterator]()
+    const pending = reader.next()
+    const reason = new Error("abort first")
+    abort.abort(reason)
+    await expect(pending).rejects.toBe(reason)
+    await vi.waitFor(() => expect(returned).toHaveBeenCalledWith(reason))
+
+    const close = reader.return?.("return later")
+    let closed = false
+    void close?.then(() => {
+      closed = true
+    })
+    await Promise.resolve()
+    expect(closed).toBe(false)
+    expect(settled).not.toHaveBeenCalled()
+
+    releaseReturn.resolve()
+    await close
+    expect(settled).toHaveBeenCalledOnce()
+  })
+
   it("delivers an abort reason only to the pending next", async () => {
     const abort = new AbortController()
     const reader = managedGeneration(
@@ -235,6 +271,27 @@ describe("managedGeneration", () => {
     await expect(pending).resolves.toEqual({ done: true, value: undefined })
     await expect(close).rejects.toBe(cleanupError)
     await expect(disposal).rejects.toBe(cleanupError)
+  })
+
+  it("preserves an undefined upstream cleanup error over callback cleanup", async () => {
+    const callbackError = new Error("callback cleanup")
+    const reader = managedGeneration(
+      async () => ({
+        next: () => new Promise<IteratorResult<string>>(() => {}),
+        return: async () => {
+          throw undefined
+        },
+      }),
+      undefined,
+      () => {
+        throw callbackError
+      }
+    )[Symbol.asyncIterator]()
+    const pending = reader.next()
+    const close = reader.return?.("stop")
+
+    await expect(pending).resolves.toEqual({ done: true, value: undefined })
+    await expect(close).rejects.toBeUndefined()
   })
 
   it("preserves a generation error over cleanup failure", async () => {

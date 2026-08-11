@@ -2,6 +2,7 @@ import type { LanguageModelFactory } from "./prompt-runtime"
 import {
   managedGeneration,
   trackActiveGeneration,
+  waitForActiveGenerations,
 } from "./browser-generation-runtime"
 import {
   assertProtectedBrowserRequest,
@@ -242,8 +243,17 @@ export function createGemmaBrowserRuntime(
     const key = generator as object
     const existing = generatorDisposals.get(key)
     if (existing) return existing
-    const disposal = Promise.resolve(generator.dispose())
+    let resolveDisposal!: () => void
+    let rejectDisposal!: (error: unknown) => void
+    const disposal = new Promise<void>((resolve, reject) => {
+      resolveDisposal = resolve
+      rejectDisposal = reject
+    })
     generatorDisposals.set(key, disposal)
+    void Promise.resolve()
+      .then(() => generator.dispose())
+      .then(resolveDisposal, rejectDisposal)
+    void disposal.catch(() => undefined)
     return disposal
   }
 
@@ -330,13 +340,33 @@ export function createGemmaBrowserRuntime(
     async dispose() {
       runtimeDisposePromise ??= (async () => {
         disposed = true
-        await Promise.all([...active])
-        const loaded = generatorPromise
-        generatorPromise = undefined
-        if (loaded) {
-          const { generator } = await loaded
-          await disposeGenerator(generator)
+        let activeFailed = false
+        let activeError: unknown
+        try {
+          await waitForActiveGenerations(active)
+        } catch (error) {
+          activeFailed = true
+          activeError = error
         }
+
+        let disposalFailed = false
+        let disposalError: unknown
+        try {
+          const loaded = generatorPromise
+          generatorPromise = undefined
+          if (loaded) {
+            const { generator } = await loaded
+            await disposeGenerator(generator)
+          }
+        } catch (error) {
+          disposalFailed = true
+          disposalError = error
+        }
+
+        // Active-run cleanup has deterministic precedence, but shared
+        // pipeline disposal is always attempted before reporting either.
+        if (activeFailed) throw activeError
+        if (disposalFailed) throw disposalError
       })()
       return runtimeDisposePromise
     },
@@ -422,7 +452,7 @@ export async function createGemmaLanguageModelFactory(
           })
         },
         destroy() {
-          void runtime.dispose()
+          void runtime.dispose().catch(() => undefined)
         },
       }
       return session as unknown as LanguageModel

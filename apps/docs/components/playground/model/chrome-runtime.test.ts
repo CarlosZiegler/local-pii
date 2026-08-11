@@ -93,6 +93,63 @@ describe("Chrome browser-generation runtime", () => {
     })
   })
 
+  it("waits for every active cleanup before reporting the first failure", async () => {
+    const firstError = new Error("first destroy")
+    const releaseSecond = deferred<void>()
+    const destroyFirst = vi.fn(async () => {
+      throw firstError
+    })
+    const destroySecond = vi.fn(async () => {
+      await releaseSecond.promise
+    })
+    let created = 0
+    const create = vi.fn(async () => {
+      created += 1
+      const destroy = created === 1 ? destroyFirst : destroySecond
+      return {
+        destroy,
+        promptStreaming: () => ({
+          next: () => new Promise<IteratorResult<string>>(() => {}),
+          return: async () => ({ done: true as const, value: undefined }),
+          [Symbol.asyncIterator]() {
+            return this
+          },
+        }),
+      }
+    })
+    const runtime = createChromeBrowserRuntime({ create })
+    const first = runtime.generate(request())[Symbol.asyncIterator]()
+    const second = runtime.generate(request())[Symbol.asyncIterator]()
+    const firstNext = first.next()
+    const secondNext = second.next()
+    await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(2))
+
+    const firstReturn = first.return?.("first")
+    await expect(firstReturn).rejects.toBe(firstError)
+    await expect(firstNext).resolves.toEqual({ done: true, value: undefined })
+
+    const disposal = runtime.dispose()
+    let disposed = false
+    void disposal.catch(() => {
+      disposed = true
+    })
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+
+    const secondReturn = second.return?.("second")
+    await Promise.resolve()
+    expect(disposed).toBe(false)
+    releaseSecond.resolve()
+    await expect(secondReturn).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+    await expect(secondNext).resolves.toEqual({ done: true, value: undefined })
+    await expect(disposal).rejects.toBe(firstError)
+    expect(destroyFirst).toHaveBeenCalledOnce()
+    expect(destroySecond).toHaveBeenCalledOnce()
+  })
+
   it("destroys a late-created session after disposal", async () => {
     const opening = deferred<ChromePromptSession>()
     const destroy = vi.fn()

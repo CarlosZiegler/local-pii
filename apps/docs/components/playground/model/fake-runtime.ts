@@ -7,6 +7,7 @@ import type {
 import {
   managedGeneration,
   trackActiveGeneration,
+  waitForActiveGenerations,
 } from "./browser-generation-runtime"
 
 export interface FakeBrowserRuntimeOptions {
@@ -80,7 +81,7 @@ export function createFakeBrowserRuntime(
     },
     async dispose() {
       disposed = true
-      await Promise.all([...active])
+      await waitForActiveGenerations(active)
     },
   }
   return runtime

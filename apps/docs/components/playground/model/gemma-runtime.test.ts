@@ -222,6 +222,77 @@ describe("Gemma browser-generation runtime", () => {
     expect(fake.dispose).toHaveBeenCalledOnce()
   })
 
+  it("observes compatibility destroy disposal failures without unhandled rejection", async () => {
+    const fake = fakeTransformers(["ok"])
+    const disposalError = new Error("destroy disposal")
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const model = await factory.create()
+    const stream = await model.promptStreaming("Current question")
+    const reader = stream.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the stream so the shared pipeline is loaded before destroy.
+    }
+    fake.dispose.mockRejectedValue(disposalError)
+
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on("unhandledRejection", onUnhandled)
+    try {
+      model.destroy()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
+
+    expect(fake.dispose).toHaveBeenCalledOnce()
+    expect(unhandled).toEqual([])
+  })
+
+  it("memoizes a synchronous pipeline dispose throw", async () => {
+    const fake = fakeTransformers(["ok"])
+    const disposalError = new Error("synchronous disposal")
+    fake.dispose.mockImplementation(() => {
+      throw disposalError
+    })
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+    await collect(runtime.generate(request()))
+
+    await expect(runtime.dispose()).rejects.toBe(disposalError)
+    await expect(runtime.dispose()).rejects.toBe(disposalError)
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("memoizes concurrent late-open and runtime disposal", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers(["ok"])
+    const disposalError = new Error("concurrent disposal")
+    fake.dispose.mockImplementation(() => {
+      throw disposalError
+    })
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const reader = runtime.generate(request())[Symbol.asyncIterator]()
+    const next = reader.next()
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+
+    const disposal = runtime.dispose()
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      pipeline: fake.pipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await expect(next).rejects.toBe(disposalError)
+    await expect(disposal).rejects.toBe(disposalError)
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
   it("does not dispose the shared pipeline for one aborted run", async () => {
     const opening = deferred<unknown>()
     const fake = fakeTransformers()
@@ -253,6 +324,39 @@ describe("Gemma browser-generation runtime", () => {
     expect(fake.dispose).not.toHaveBeenCalled()
     await second.return?.("stop")
     await runtime.dispose()
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("disposes the shared pipeline after all active runs settle", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers()
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers,
+    })
+    const abort = new AbortController()
+    const first = runtime
+      .generate(request(abort.signal))
+      [Symbol.asyncIterator]()
+    const second = runtime.generate(request())[Symbol.asyncIterator]()
+    const firstNext = first.next()
+    const secondNext = second.next()
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+
+    // Both runs share a pending load. The first settles with its primary abort
+    // error; disposal must still wait for the second late acquisition.
+    abort.abort(new DOMException("Stopped", "AbortError"))
+    await expect(firstNext).rejects.toMatchObject({ name: "AbortError" })
+    const disposal = runtime.dispose()
+
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      pipeline: fake.pipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await expect(secondNext).rejects.toThrow("disposed")
+    await disposal
     expect(fake.dispose).toHaveBeenCalledOnce()
   })
 

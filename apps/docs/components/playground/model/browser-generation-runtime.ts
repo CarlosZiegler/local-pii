@@ -31,7 +31,6 @@ export function managedGeneration(
       let pendingErrorDelivered = false
       let upstream: AsyncIterator<string> | undefined
       let opening: Promise<AsyncIterator<string>> | undefined
-      let openingFinished = false
       let upstreamReturn: Promise<void> | undefined
       let cleanup: Promise<void> | undefined
       let pendingNext:
@@ -83,7 +82,7 @@ export function managedGeneration(
           try {
             await onSettled?.()
           } catch (error) {
-            cleanupError ??= error
+            if (!cleanupFailed) cleanupError = error
             cleanupFailed = true
           }
           // A generation error, including an explicit undefined rejection,
@@ -147,6 +146,7 @@ export function managedGeneration(
           const cleanupPromise = settle()
           return cleanupPromise.then(() => done())
         }
+        if (cleanup) return cleanup.then(() => done())
         return Promise.resolve(done())
       }
 
@@ -167,13 +167,11 @@ export function managedGeneration(
           .then(open)
           .then(
             (source) => {
-              openingFinished = true
               upstream = source
               if (closed) void beginUpstreamReturn()
               return source
             },
             (error) => {
-              openingFinished = true
               if (!closed) fail(error)
               throw error
             }
@@ -318,4 +316,15 @@ export function trackActiveGeneration(
       }
     },
   }
+}
+
+/** Await every run present at disposal start, then report the first failure. */
+export async function waitForActiveGenerations(
+  active: ReadonlySet<Promise<void>>
+): Promise<void> {
+  const outcomes = await Promise.allSettled([...active])
+  const failure = outcomes.find(
+    (outcome): outcome is PromiseRejectedResult => outcome.status === "rejected"
+  )
+  if (failure) throw failure.reason
 }
