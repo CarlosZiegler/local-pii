@@ -429,14 +429,26 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     return { history: fitted, evicted }
   }
 
-  private notifyContextOverflow(): void {
-    const contextEvent = new Event("contextoverflow")
-    this.dispatchEvent(contextEvent)
-    this.oncontextoverflow?.call(this, contextEvent)
+  private dispatchOverflowEvent(
+    type: "contextoverflow" | "quotaoverflow",
+    handler: ((this: LanguageModel, ev: Event) => unknown) | null
+  ): void {
+    const event = new Event(type)
+    try {
+      this.dispatchEvent(event)
+    } catch {
+      // EventTarget listeners do not make the generation operation fail.
+    }
+    try {
+      handler?.call(this, event)
+    } catch {
+      // IDL event-handler exceptions are reported independently of the call.
+    }
+  }
 
-    const quotaEvent = new Event("quotaoverflow")
-    this.dispatchEvent(quotaEvent)
-    this.onquotaoverflow?.call(this, quotaEvent)
+  private notifyContextOverflow(): void {
+    this.dispatchOverflowEvent("contextoverflow", this.oncontextoverflow)
+    this.dispatchOverflowEvent("quotaoverflow", this.onquotaoverflow)
   }
 
   private requestFor(input: LanguageModelPrompt): {
@@ -585,8 +597,8 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     options: LanguageModelAppendOptions = {}
   ): Promise<undefined> {
     this.ensureActive()
-    this.ensurePromptAvailable()
     options.signal?.throwIfAborted()
+    this.ensurePromptAvailable()
     const turns = promptTurns(input)
     const fitted = this.fitHistory(
       [...this.history, ...turns],

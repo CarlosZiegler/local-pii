@@ -319,6 +319,79 @@ describe("Gemma browser-generation runtime", () => {
     expect(fake.loadTransformers).not.toHaveBeenCalled()
   })
 
+  it("does not turn an append overflow-handler exception into an operation error", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const marker = new Error("context handler marker")
+    const contextEvent = vi.fn()
+    const quotaEvent = vi.fn()
+    const quotaHandler = vi.fn()
+    session.addEventListener("contextoverflow", contextEvent)
+    session.addEventListener("quotaoverflow", quotaEvent)
+    session.oncontextoverflow = () => {
+      throw marker
+    }
+    session.onquotaoverflow = quotaHandler
+
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await expect(
+      session.append([
+        { role: "user", content: turn },
+        { role: "assistant", content: answer },
+      ])
+    ).resolves.toBeUndefined()
+
+    expect(contextEvent).toHaveBeenCalledOnce()
+    expect(quotaEvent).toHaveBeenCalledOnce()
+    expect(quotaHandler).toHaveBeenCalledOnce()
+    expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
+  })
+
+  it("does not turn a prompt commit overflow-handler exception into an operation error", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers([answer])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const marker = new Error("context handler marker")
+    const contextEvent = vi.fn()
+    const quotaEvent = vi.fn()
+    const quotaHandler = vi.fn()
+    session.addEventListener("contextoverflow", contextEvent)
+    session.addEventListener("quotaoverflow", quotaEvent)
+    session.oncontextoverflow = () => {
+      throw marker
+    }
+    session.onquotaoverflow = quotaHandler
+
+    await session.prompt(turn)
+    await session.prompt(turn)
+    await expect(session.prompt(turn)).resolves.toBe(answer)
+
+    expect(contextEvent).toHaveBeenCalledOnce()
+    expect(quotaEvent).toHaveBeenCalledOnce()
+    expect(quotaHandler).toHaveBeenCalledOnce()
+    expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
+  })
+
   it("retains the completion of a user-ended initial anchor during eviction", async () => {
     const turn = "u".repeat(8_000 * 4)
     const answer = "a".repeat(8_000 * 4)
@@ -475,6 +548,32 @@ describe("Gemma browser-generation runtime", () => {
       { role: "assistant", content: "answer " },
       { role: "user", content: "After first" },
     ])
+  })
+
+  it("preserves an append abort reason over the busy-session error", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const first = session.promptStreaming("First question")
+    const firstReader = first.getReader()
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "answer ",
+    })
+    const abort = new AbortController()
+    const reason = new DOMException("Append stopped", "AbortError")
+    abort.abort(reason)
+    await expect(
+      session.append("Late append", { signal: abort.signal })
+    ).rejects.toBe(reason)
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
   })
 
   it("measures supplied turns without requiring room in anchored history", async () => {
