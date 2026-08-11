@@ -3703,6 +3703,311 @@ describe("piiConnection text streaming", () => {
     }
   )
 
+  it.each(["connect", "joinRun"] as const)(
+    "settles every concurrent %s delegated throw on abort",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const controller = new AbortController()
+      const abortReason = new Error(`${entrypoint} concurrent throw abort`)
+      const firstError = new Error(`${entrypoint} first throw`)
+      const secondError = new Error(`${entrypoint} second throw`)
+      const releases: Array<(result: IteratorResult<StreamChunk>) => void> = []
+      let throwCalls = 0
+      let returnValue: unknown
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "concurrent-throw-abort",
+                  delta: "before throw",
+                } satisfies StreamChunk,
+              }
+            },
+            throw() {
+              throwCalls += 1
+              return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                releases.push(resolve)
+              })
+            },
+            async return(value?: unknown) {
+              returnValue = value
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect(
+              [{ role: "user", content: "hello" }],
+              undefined,
+              controller.signal
+            )
+          : piiConnection(inner, { session }).joinRun!(
+              "run-1",
+              controller.signal
+            )
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+      const first = iterator.throw?.(firstError)
+      const second = iterator.throw?.(secondError)
+      for (let attempt = 0; throwCalls < 2 && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(throwCalls).toBe(2)
+      controller.abort(abortReason)
+
+      const timedOut = Symbol("timed out")
+      const settled = await Promise.race([
+        Promise.allSettled([first, second]),
+        new Promise<typeof timedOut>((resolve) =>
+          setTimeout(() => resolve(timedOut), 50)
+        ),
+      ])
+      expect(settled).not.toBe(timedOut)
+      expect(settled).toEqual([
+        { status: "rejected", reason: abortReason },
+        { status: "rejected", reason: abortReason },
+      ])
+      expect(returnValue).toBe(abortReason)
+
+      for (const release of releases)
+        release({
+          done: false,
+          value: {
+            type: EventType.TEXT_MESSAGE_CONTENT,
+            messageId: "concurrent-throw-abort",
+            delta: "late",
+          } satisfies StreamChunk,
+        })
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "settles every concurrent %s delegated throw on caller return",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const closeReason = `${entrypoint} concurrent throw return`
+      const firstError = new Error(`${entrypoint} first throw`)
+      const secondError = new Error(`${entrypoint} second throw`)
+      const releases: Array<(result: IteratorResult<StreamChunk>) => void> = []
+      let throwCalls = 0
+      let returnValue: unknown
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "concurrent-throw-return",
+                  delta: "before throw",
+                } satisfies StreamChunk,
+              }
+            },
+            throw() {
+              throwCalls += 1
+              return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                releases.push(resolve)
+              })
+            },
+            async return(value?: unknown) {
+              returnValue = value
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+      const first = iterator.throw?.(firstError)
+      const second = iterator.throw?.(secondError)
+      for (let attempt = 0; throwCalls < 2 && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(throwCalls).toBe(2)
+      await expect(iterator.return?.(closeReason)).resolves.toMatchObject({
+        done: true,
+        value: closeReason,
+      })
+
+      await expect(first).resolves.toMatchObject({
+        done: true,
+        value: closeReason,
+      })
+      await expect(second).resolves.toMatchObject({
+        done: true,
+        value: closeReason,
+      })
+      expect(returnValue).toBe(closeReason)
+      for (const release of releases)
+        release({ done: false, value: {} as StreamChunk })
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "awaits delegated %s restoration cleanup before rejecting",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const restoreError = new Error(`${entrypoint} restoration failure`)
+      vi.spyOn(session, "rehydrateJson").mockImplementation(() => {
+        throw restoreError
+      })
+      const primary = new Error(`${entrypoint} delegated throw`)
+      let releaseCleanup!: (result: IteratorResult<StreamChunk>) => void
+      let cleanupStarted = false
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "delayed-cleanup",
+                  delta: "before throw",
+                } satisfies StreamChunk,
+              }
+            },
+            async throw() {
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.CUSTOM,
+                  name: "structured-output.complete",
+                  value: { object: { email: "protected" } },
+                } as unknown as StreamChunk,
+              }
+            },
+            return() {
+              cleanupStarted = true
+              return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                releaseCleanup = resolve
+              })
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+      const thrown = iterator.throw?.(primary)
+      for (let attempt = 0; !cleanupStarted && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(cleanupStarted).toBe(true)
+      const timedOut = Symbol("timed out")
+      await expect(
+        Promise.race([
+          thrown?.then(
+            () => Symbol("settled"),
+            () => Symbol("settled")
+          ),
+          new Promise<typeof timedOut>((resolve) =>
+            setTimeout(() => resolve(timedOut), 20)
+          ),
+        ])
+      ).resolves.toBe(timedOut)
+      releaseCleanup({ done: true, value: undefined })
+      await expect(thrown).rejects.toBe(restoreError)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "preserves delegated %s restoration failure over cleanup failure",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const restoreError = new Error(`${entrypoint} restoration failure`)
+      const cleanupError = new Error(`${entrypoint} cleanup failure`)
+      vi.spyOn(session, "rehydrateJson").mockImplementation(() => {
+        throw restoreError
+      })
+      let rejectCleanup!: (error: unknown) => void
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "cleanup-precedence",
+                  delta: "before throw",
+                } satisfies StreamChunk,
+              }
+            },
+            async throw() {
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.CUSTOM,
+                  name: "structured-output.complete",
+                  value: { object: { email: "protected" } },
+                } as unknown as StreamChunk,
+              }
+            },
+            return() {
+              return new Promise<IteratorResult<StreamChunk>>((_, reject) => {
+                rejectCleanup = reject
+              })
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+      const thrown = iterator.throw?.(new Error(`${entrypoint} primary`))
+      for (let attempt = 0; !rejectCleanup && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(rejectCleanup).toBeTypeOf("function")
+      rejectCleanup(cleanupError)
+      await expect(thrown).rejects.toBe(restoreError)
+    }
+  )
+
   it("removes lazy abort listeners after completion and initialization failure", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const controller = new AbortController()

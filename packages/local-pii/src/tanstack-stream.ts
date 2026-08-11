@@ -298,25 +298,24 @@ export function restoreTanStackStream(
       }>()
       const queued: StreamChunk[] = []
 
-      let activeThrow:
-        | {
-            canceled: boolean
-            resolve: (result: IteratorResult<StreamChunk>) => void
-            reject: (error: unknown) => void
-          }
-        | undefined
+      const activeThrows = new Set<{
+        canceled: boolean
+        resolve: (result: IteratorResult<StreamChunk>) => void
+        reject: (error: unknown) => void
+      }>()
 
-      const settleDelegatedThrow = (
+      const settleDelegatedThrows = (
         kind: "return" | "abort" | "throw",
         value?: unknown
       ) => {
-        const gate = activeThrow
-        if (!gate) return
-        activeThrow = undefined
-        gate.canceled = true
-        if (kind === "return")
-          gate.resolve({ done: true, value: value as StreamChunk })
-        else gate.reject(value)
+        const gates = [...activeThrows]
+        activeThrows.clear()
+        for (const gate of gates) {
+          gate.canceled = true
+          if (kind === "return")
+            gate.resolve({ done: true, value: value as StreamChunk })
+          else gate.reject(value)
+        }
       }
 
       const settlePending = (
@@ -372,6 +371,17 @@ export function restoreTanStackStream(
         // cleanup observed so it cannot become an unhandled rejection.
         void pendingReturn.catch(() => undefined)
         return pendingReturn
+      }
+
+      const rejectAfterCleanup = (
+        error: unknown,
+        cleanup: Promise<IteratorResult<StreamChunk>> | undefined
+      ): Promise<never> => {
+        if (!cleanup) return Promise.reject(error)
+        return cleanup.then(
+          () => Promise.reject(error),
+          () => Promise.reject(error)
+        )
       }
 
       const stateFor = (messageId: string) => {
@@ -510,7 +520,7 @@ export function restoreTanStackStream(
             const pending = nextWithAbort(upstream, signal, () => {
               aborted = true
               closed = true
-              settleDelegatedThrow("abort", signal?.reason)
+              settleDelegatedThrows("abort", signal?.reason)
               settlePending("abort", signal?.reason)
               clear()
               beginReturn(signal?.reason)
@@ -542,7 +552,7 @@ export function restoreTanStackStream(
           if (signal?.aborted && !aborted) {
             aborted = true
             closed = true
-            settleDelegatedThrow("abort", signal.reason)
+            settleDelegatedThrows("abort", signal.reason)
             settlePending("abort", signal.reason)
             clear()
             beginReturn(signal.reason)
@@ -599,7 +609,7 @@ export function restoreTanStackStream(
           closed = true
           const aborting = signal?.aborted && signal.reason === value
           cancelPendingNext()
-          settleDelegatedThrow(aborting ? "abort" : "return", value)
+          settleDelegatedThrows(aborting ? "abort" : "return", value)
           settlePending(aborting ? "abort" : "return", value)
           const cleanup = beginReturn(value)
           const closing = generator.return?.(value)
@@ -628,13 +638,14 @@ export function restoreTanStackStream(
                 rejectGate = reject
               }
             )
-            activeThrow = gate
+            activeThrows.add(gate)
             let result: PromiseLike<IteratorResult<StreamChunk>>
             try {
               result = upstream.throw(error)
             } catch (throwError) {
-              if (activeThrow === gate) activeThrow = undefined
+              activeThrows.delete(gate)
               gate.canceled = true
+              settleDelegatedThrows("throw", throwError)
               clear()
               closed = true
               settlePending("throw", throwError)
@@ -642,18 +653,19 @@ export function restoreTanStackStream(
               void cleanup?.catch(() => undefined)
               const closing = generator.return?.(throwError)
               void Promise.resolve(closing).catch(() => undefined)
-              return Promise.reject(throwError)
+              return rejectAfterCleanup(throwError, cleanup)
             }
             const delegated = Promise.resolve(result).then(
               (thrown) => {
                 if (gate.canceled) return thrown
-                activeThrow = undefined
+                activeThrows.delete(gate)
                 try {
                   if (thrown.done) {
                     clear()
                     upstreamDone = true
                     upstreamClosed = true
                     closed = true
+                    settleDelegatedThrows("return", thrown.value)
                     settlePending("return")
                     const closing = generator.return?.(thrown.value)
                     void Promise.resolve(closing).catch(() => undefined)
@@ -666,6 +678,7 @@ export function restoreTanStackStream(
                     ? { done: false as const, value: first }
                     : { done: false as const, value: thrown.value }
                 } catch (restoreError) {
+                  settleDelegatedThrows("throw", restoreError)
                   clear()
                   closed = true
                   settlePending("throw", restoreError)
@@ -673,12 +686,13 @@ export function restoreTanStackStream(
                   void cleanup?.catch(() => undefined)
                   const closing = generator.return?.(restoreError)
                   void Promise.resolve(closing).catch(() => undefined)
-                  throw restoreError
+                  return rejectAfterCleanup(restoreError, cleanup)
                 }
               },
               (throwError) => {
                 if (gate.canceled) throw throwError
-                activeThrow = undefined
+                activeThrows.delete(gate)
+                settleDelegatedThrows("throw", throwError)
                 clear()
                 closed = true
                 settlePending("throw", throwError)
@@ -686,7 +700,7 @@ export function restoreTanStackStream(
                 void cleanup?.catch(() => undefined)
                 const closing = generator.return?.(throwError)
                 void Promise.resolve(closing).catch(() => undefined)
-                throw throwError
+                return rejectAfterCleanup(throwError, cleanup)
               }
             )
             void delegated.catch(() => undefined)
