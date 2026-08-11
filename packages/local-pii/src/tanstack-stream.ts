@@ -272,23 +272,37 @@ function restoreCustomChunk(
   return chunk
 }
 
+const RETIRED_TANSTACK_READ = Symbol("retired TanStack stream read")
+
+type TanStackReadOutcome =
+  IteratorResult<StreamChunk> | typeof RETIRED_TANSTACK_READ
+
 function nextWithAbort(
   iterator: AsyncIterator<StreamChunk>,
   signal: AbortSignal | undefined,
   onAbort: () => void
 ): {
-  promise: Promise<IteratorResult<StreamChunk>>
+  promise: Promise<TanStackReadOutcome>
   cancel: () => void
+  retire: () => void
 } {
-  if (!signal)
-    return {
-      promise: Promise.resolve(iterator.next()),
-      cancel: () => {},
-    }
-  signal.throwIfAborted()
+  if (signal) signal.throwIfAborted()
 
+  const next = signal
+    ? Promise.resolve().then(() => iterator.next())
+    : Promise.resolve(iterator.next())
+  // The race below may settle with the private retirement sentinel first. Keep
+  // observing the source promise after that point so a late rejection cannot
+  // become an unhandled rejection, without retaining the stream state.
+  void next.catch(() => undefined)
+
+  let retireRead = () => {}
+  const retired = new Promise<typeof RETIRED_TANSTACK_READ>((resolve) => {
+    retireRead = () => resolve(RETIRED_TANSTACK_READ)
+  })
   let removeAbortListener = () => {}
   const aborted = new Promise<never>((_, reject) => {
+    if (!signal) return
     const handleAbort = () => {
       onAbort()
       reject(signal.reason)
@@ -296,16 +310,22 @@ function nextWithAbort(
     removeAbortListener = () => signal.removeEventListener("abort", handleAbort)
     signal.addEventListener("abort", handleAbort, { once: true })
   })
-  const next = Promise.resolve().then(() => iterator.next())
   let canceled = false
   const cancel = () => {
     if (canceled) return
     canceled = true
     removeAbortListener()
   }
+  const promise = signal
+    ? Promise.race([next, aborted, retired]).finally(cancel)
+    : Promise.race([next, retired]).finally(cancel)
   return {
-    promise: Promise.race([next, aborted]).finally(cancel),
+    promise,
     cancel,
+    retire: () => {
+      retireRead()
+      cancel()
+    },
   }
 }
 
@@ -380,9 +400,11 @@ export function restoreTanStackStream(
         gate: ThrowGate
       }
       type ReadRecord = {
-        owner: NextOperation
+        owner: NextOperation | undefined
         settled: boolean
+        retired: boolean
         cancel: () => void
+        retire: () => void
       }
       type Operation = NextOperation | ThrowOperation
       const operations: Operation[] = []
@@ -391,6 +413,24 @@ export function restoreTanStackStream(
         | undefined
       const activeReads = new Set<ReadRecord>()
       const preemptedReads = new Set<ReadRecord>()
+      const retireRead = (read: ReadRecord) => {
+        if (read.retired) return
+        read.retired = true
+        activeReads.delete(read)
+        preemptedReads.delete(read)
+        read.cancel()
+        const owner = read.owner
+        if (owner) {
+          owner.waitingSource = false
+          if (owner.read === read) owner.read = undefined
+        }
+        read.owner = undefined
+        read.retire()
+        nextInFlight = activeReads.size > 0
+      }
+      const retireActiveReads = () => {
+        for (const read of activeReads) retireRead(read)
+      }
       let allowConcurrentThrow = false
       let errorCloseStarted = false
       let errorCleanup: Promise<IteratorResult<StreamChunk>> | undefined
@@ -626,6 +666,10 @@ export function restoreTanStackStream(
       ) => {
         const settle = (read: ReadRecord) => {
           const operation = read.owner
+          if (!operation) {
+            retireRead(read)
+            return
+          }
           if (operation.preemptedSettled) return
           preemptedReads.delete(read)
           operation.preemptedSettled = true
@@ -636,6 +680,7 @@ export function restoreTanStackStream(
               operation,
               recoverable ? recoverableTanStackNextError(value) : value
             )
+          retireRead(read)
         }
         if (target) {
           settle(target)
@@ -656,6 +701,7 @@ export function restoreTanStackStream(
         settlePreemptedNext("throw", error)
         settlePending("throw", error, false, skip)
         settleDelegatedThrows("throw", error, cleanup)
+        retireActiveReads()
         void cleanup?.catch(() => undefined)
         return cleanup
       }
@@ -668,6 +714,7 @@ export function restoreTanStackStream(
         settlePreemptedNext("return")
         settleDelegatedThrows("return", value)
         settlePending("return")
+        retireActiveReads()
       }
 
       const settleConcurrentThrow = (
@@ -793,10 +840,17 @@ export function restoreTanStackStream(
       const finishRead = (read: ReadRecord) => {
         if (read.settled) return
         read.settled = true
-        activeReads.delete(read)
-        read.cancel()
-        if (read.owner.read === read) read.owner.read = undefined
-        nextInFlight = activeReads.size > 0
+        const owner = read.owner
+        // A preempted read has finished its raw source call, but its public
+        // next still belongs to the pending throw/terminal outcome. Retain
+        // that ownership record until the outcome definitively settles it.
+        if (owner?.preempted && !owner.preemptedSettled) {
+          activeReads.delete(read)
+          read.cancel()
+          nextInFlight = activeReads.size > 0
+          return
+        }
+        retireRead(read)
       }
 
       const readOne = (operation: NextOperation) => {
@@ -814,6 +868,7 @@ export function restoreTanStackStream(
             clear()
             discardQueuedOperations()
             beginReturn(signal?.reason)
+            retireActiveReads()
           })
         } catch (error) {
           operation.waitingSource = false
@@ -826,14 +881,21 @@ export function restoreTanStackStream(
         const read: ReadRecord = {
           owner: operation,
           settled: false,
+          retired: false,
           cancel: pending.cancel,
+          retire: pending.retire,
         }
         operation.read = read
         activeReads.add(read)
         nextInFlight = true
+        if (closed) {
+          retireRead(read)
+          return
+        }
         void pending.promise.then(
           (next) => {
             finishRead(read)
+            if (next === RETIRED_TANSTACK_READ) return
             operation.waitingSource = false
             if (operation.preempted) {
               if (operation.preemptedSettled) return
@@ -1017,6 +1079,7 @@ export function restoreTanStackStream(
           settlePreemptedNext(aborting ? "abort" : "return", value)
           settlePending(aborting ? "abort" : "return", value)
           const cleanup = beginReturn(value)
+          retireActiveReads()
           return cleanup
             ? cleanup.then(() => done(value))
             : Promise.resolve(done(value))
@@ -1080,6 +1143,7 @@ export function restoreTanStackStream(
           discardQueuedOperations()
           settlePending("throw", error)
           const cleanup = beginReturn(error)
+          retireActiveReads()
           const rejectPrimary = () => Promise.reject(error)
           if (nextInFlight) return rejectPrimary()
           if (cleanup) return cleanup.then(rejectPrimary, rejectPrimary)

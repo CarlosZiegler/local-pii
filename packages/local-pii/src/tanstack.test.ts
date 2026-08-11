@@ -3057,15 +3057,20 @@ describe("piiConnection text streaming", () => {
         placeholders: token(),
       }).createSession()
       let nextCalled = false
+      let rejectNext!: (error: unknown) => void
+      let returnCalls = 0
       let returnValue: unknown
       const source: AsyncIterable<StreamChunk> = {
         [Symbol.asyncIterator]() {
           return {
             next() {
               nextCalled = true
-              return new Promise<IteratorResult<StreamChunk>>(() => {})
+              return new Promise<IteratorResult<StreamChunk>>((_, reject) => {
+                rejectNext = reject
+              })
             },
             async return(value?: unknown) {
+              returnCalls += 1
               returnValue = value
               return { done: true as const, value: undefined }
             },
@@ -3098,6 +3103,85 @@ describe("piiConnection text streaming", () => {
       ).resolves.toMatchObject({ done: true, value: "caller-close" })
       await expect(pending).resolves.toMatchObject({ done: true })
       expect(returnValue).toBe("caller-close")
+
+      // The retired raw read may reject after return. It must be observed and
+      // discarded without reopening the stream or invoking cleanup twice.
+      rejectNext(new Error(`${entrypoint} late source rejection`))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(returnCalls).toBe(1)
+      await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "retires a never-settling %s source read before observing its late rejection",
+    async (entrypoint) => {
+      const prepare = async () => {
+        const session = createAnonymizer({
+          placeholders: token(),
+        }).createSession()
+        let rejectLate!: (error: unknown) => void
+        const state = { returnCalls: 0 }
+        const source: AsyncIterable<StreamChunk> = {
+          [Symbol.asyncIterator]() {
+            return {
+              next() {
+                return new Promise<IteratorResult<StreamChunk>>((_, reject) => {
+                  rejectLate = reject
+                })
+              },
+              async return() {
+                state.returnCalls += 1
+                return { done: true as const, value: undefined }
+              },
+            }
+          },
+        }
+        const inner: ConnectConnectionAdapter = {
+          connect: () => source,
+          joinRun: () => source,
+        }
+        const stream =
+          entrypoint === "connect"
+            ? piiConnection(inner, { session }).connect([
+                { role: "user", content: "hello" },
+              ])
+            : piiConnection(inner, { session }).joinRun!("run-1")
+        const iterator = stream[Symbol.asyncIterator]()
+        const pending = iterator.next()
+        for (let attempt = 0; !rejectLate && attempt < 20; attempt += 1)
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(rejectLate).toBeDefined()
+        await expect(iterator.return?.("gc-close")).resolves.toMatchObject({
+          done: true,
+          value: "gc-close",
+        })
+        await expect(pending).resolves.toMatchObject({ done: true })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return {
+          weakSession: new WeakRef(session),
+          rejectLate,
+          state,
+        }
+      }
+
+      const { weakSession, rejectLate, state } = await prepare()
+      const runtime = (
+        globalThis as {
+          Bun?: { gc?: (force?: boolean) => void }
+        }
+      ).Bun
+      if (runtime?.gc) {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          runtime.gc(true)
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+        expect(weakSession.deref()).toBeUndefined()
+      }
+
+      rejectLate(new Error(`${entrypoint} retired late rejection`))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(state.returnCalls).toBe(1)
     }
   )
 
