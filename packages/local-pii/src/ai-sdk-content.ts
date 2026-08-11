@@ -291,15 +291,38 @@ async function protectToolResultOutput(
       ? { changed: false, value: output }
       : { changed: true, value: cloneAiSdkValue(output, { value }) }
   }
-  if (
-    (output.type === "json" || output.type === "error-json") &&
-    "value" in output
-  ) {
+  if (output.type === "json" || output.type === "error-json") {
     const restored = await protectAiSdkJson(session, output.value)
     return restored.changed
       ? {
           changed: true,
           value: cloneAiSdkValue(output, { value: restored.value }),
+        }
+      : { changed: false, value: output }
+  }
+  if (output.type === "content" && Array.isArray(output.value)) {
+    const overrides: Record<PropertyKey, unknown> = {}
+    let changed = false
+    for (let index = 0; index < output.value.length; index++) {
+      const part = output.value[index]
+      if (
+        !isRecord(part) ||
+        part.type !== "text" ||
+        typeof part.text !== "string"
+      )
+        continue
+      const text = await protectText(session, part.text)
+      if (text !== part.text) {
+        changed = true
+        overrides[index] = cloneAiSdkValue(part, { text })
+      }
+    }
+    return changed
+      ? {
+          changed: true,
+          value: cloneAiSdkValue(output, {
+            value: cloneAiSdkValue(output.value, overrides),
+          }),
         }
       : { changed: false, value: output }
   }
@@ -405,15 +428,38 @@ function restoreToolResultOutput(
       ? { changed: false, value: output }
       : { changed: true, value: cloneAiSdkValue(output, { value }) }
   }
-  if (
-    (output.type === "json" || output.type === "error-json") &&
-    "value" in output
-  ) {
+  if (output.type === "json" || output.type === "error-json") {
     const value = restoreAiSdkJson(session, output.value)
     return value.changed
       ? {
           changed: true,
           value: cloneAiSdkValue(output, { value: value.value }),
+        }
+      : { changed: false, value: output }
+  }
+  if (output.type === "content" && Array.isArray(output.value)) {
+    const overrides: Record<PropertyKey, unknown> = {}
+    let changed = false
+    for (let index = 0; index < output.value.length; index++) {
+      const part = output.value[index]
+      if (
+        !isRecord(part) ||
+        part.type !== "text" ||
+        typeof part.text !== "string"
+      )
+        continue
+      const text = restoreText(session, part.text)
+      if (text !== part.text) {
+        changed = true
+        overrides[index] = cloneAiSdkValue(part, { text })
+      }
+    }
+    return changed
+      ? {
+          changed: true,
+          value: cloneAiSdkValue(output, {
+            value: cloneAiSdkValue(output.value, overrides),
+          }),
         }
       : { changed: false, value: output }
   }
