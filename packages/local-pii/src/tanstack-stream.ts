@@ -19,15 +19,44 @@ interface ToolStreamState {
 }
 
 type UnknownRecord = Record<string, unknown>
-const RECOVERABLE_NEXT = Symbol.for("local-pii.tanstack.recoverable-next")
+const TRUSTED_REFLECT_APPLY = Reflect.apply
+const TRUSTED_ARRAY_PUSH = Array.prototype.push
+const TRUSTED_ARRAY_SHIFT = Array.prototype.shift
+const recoverableNextErrors = new WeakMap<object, unknown>()
 const concurrentThrowHandlers = new WeakMap<object, () => void>()
+
+function arrayPush<T>(items: T[], item: T) {
+  TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_PUSH, items, [item])
+}
+
+function arrayShift<T>(items: T[]) {
+  return TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_SHIFT, items, []) as
+    | T
+    | undefined
+}
+
+export function recoverableTanStackNextError(cause: unknown): object {
+  const marker = Object.create(null) as object
+  recoverableNextErrors.set(marker, cause)
+  return marker
+}
+
+export function unwrapRecoverableTanStackNext(error: unknown): {
+  recoverable: boolean
+  value: unknown
+} {
+  if (
+    (typeof error === "object" && error !== null) ||
+    typeof error === "function"
+  ) {
+    if (recoverableNextErrors.has(error))
+      return { recoverable: true, value: recoverableNextErrors.get(error) }
+  }
+  return { recoverable: false, value: error }
+}
 
 export function markTanStackThrowConcurrent(iterator: AsyncIterator<unknown>) {
   concurrentThrowHandlers.get(iterator as object)?.()
-}
-
-function recoverableNextError(cause: unknown): object {
-  return { [RECOVERABLE_NEXT]: true, cause }
 }
 
 function isRecord(value: unknown): value is UnknownRecord {
@@ -306,7 +335,7 @@ export function restoreTanStackStream(
         resolve: (result: IteratorResult<StreamChunk>) => void
         reject: (error: unknown) => void
       }>()
-      const queued: StreamChunk[] = []
+      const queued: IteratorResult<StreamChunk>[] = []
 
       type ThrowGate = {
         canceled: boolean
@@ -373,7 +402,10 @@ export function restoreTanStackStream(
           pending.settled = true
           if (kind === "return")
             pending.resolve({ done: true, value: undefined })
-          else pending.reject(recoverable ? recoverableNextError(value) : value)
+          else
+            pending.reject(
+              recoverable ? recoverableTanStackNextError(value) : value
+            )
         }
         pendingNext.clear()
       }
@@ -669,7 +701,7 @@ export function restoreTanStackStream(
         else
           rejectNext(
             operation,
-            recoverable ? recoverableNextError(value) : value
+            recoverable ? recoverableTanStackNextError(value) : value
           )
       }
 
@@ -715,6 +747,34 @@ export function restoreTanStackStream(
         result: IteratorResult<StreamChunk>
       ) => {
         if (operation.gate.canceled) return
+
+        // A concurrent throw may finish while an earlier recovery has queued
+        // output. The public operation order still owns that output: give the
+        // oldest item to this throw and retain this throw's result for the
+        // next public operation.
+        if (operation.concurrent && queued.length > 0) {
+          const first = arrayShift(queued) as IteratorResult<StreamChunk>
+          if (result.done) arrayPush(queued, result)
+          else {
+            try {
+              const restored = restoreChunk(result.value)
+              for (let index = 0; index < restored.length; index += 1)
+                arrayPush(queued, {
+                  done: false,
+                  value: restored[index] as StreamChunk,
+                })
+            } catch (restoreError) {
+              closeAfterError(restoreError)
+              return
+            }
+          }
+          activeThrows.delete(operation.gate)
+          settlePreemptedNext("throw", operation.error, true)
+          operation.gate.resolve(first)
+          if (first.done) closeAfterDone(first.value)
+          return
+        }
+
         if (result.done) {
           activeThrows.delete(operation.gate)
           closeAfterDone(result.value)
@@ -724,8 +784,12 @@ export function restoreTanStackStream(
 
         try {
           const restored = restoreChunk(result.value)
-          const [first, ...rest] = restored
-          queued.push(...rest)
+          const first = restored[0]
+          for (let index = 1; index < restored.length; index += 1)
+            arrayPush(queued, {
+              done: false,
+              value: restored[index] as StreamChunk,
+            })
           activeThrows.delete(operation.gate)
           settlePreemptedNext("throw", operation.error, true)
           operation.gate.resolve(
@@ -777,9 +841,9 @@ export function restoreTanStackStream(
 
         if (operation.kind === "next") {
           if (queued.length > 0) {
-            const value = queued.shift() as StreamChunk
+            const value = arrayShift(queued) as IteratorResult<StreamChunk>
             activeOperation = undefined
-            completeNext(operation, { done: false, value })
+            completeNext(operation, value)
             pump()
             return
           }
@@ -800,7 +864,7 @@ export function restoreTanStackStream(
               if (operation.preempted) {
                 if (operation.preemptedSettled) {
                   if (!operation.preemptedTerminal && !next.done)
-                    queued.push(next.value)
+                    arrayPush(queued, { done: false, value: next.value })
                   return
                 }
                 if (next.done) closeAfterDone(next.value)

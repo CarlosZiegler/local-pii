@@ -4438,13 +4438,210 @@ describe("piiConnection text streaming", () => {
         }),
         expect.objectContaining({
           done: false,
-          value: expect.objectContaining({
-            type: EventType.TEXT_MESSAGE_CONTENT,
-            delta: "",
-          }),
+          value: expect.objectContaining({ type: EventType.TEXT_MESSAGE_END }),
         }),
       ])
       expect(throwCalls).toBe(2)
+      await expect(iterator.next()).resolves.toMatchObject({
+        done: false,
+        value: {
+          type: EventType.TEXT_MESSAGE_CONTENT,
+          messageId: "concurrent-later",
+          delta: "",
+        },
+      })
+    }
+  )
+
+  it.each([
+    ["connect", "run-error"],
+    ["connect", "done"],
+    ["joinRun", "run-error"],
+    ["joinRun", "done"],
+  ] as const)(
+    "keeps queued expansion before a concurrent %s %s terminal",
+    async (entrypoint, terminalKind) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize("ana@acme.com"))
+        .redactedText
+      const firstError = new Error(`${entrypoint} queued first`)
+      const secondError = new Error(`${entrypoint} queued second`)
+      const runError = {
+        type: EventType.RUN_ERROR,
+        message: `${entrypoint} queued failure`,
+      } satisfies StreamChunk
+      const terminal = {
+        type: EventType.RUN_FINISHED,
+        threadId: `${entrypoint}-thread`,
+        runId: `${entrypoint}-queued`,
+      } satisfies StreamChunk
+      let nextCalls = 0
+      let throwCalls = 0
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              nextCalls += 1
+              if (nextCalls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "queued-expansion",
+                    delta: protectedContent,
+                  } satisfies StreamChunk,
+                }
+              return { done: true as const, value: undefined }
+            },
+            async throw(value?: unknown) {
+              throwCalls += 1
+              if (throwCalls === 1) {
+                expect(value).toBe(firstError)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_END,
+                    messageId: "queued-expansion",
+                  } satisfies StreamChunk,
+                }
+              }
+              expect(value).toBe(secondError)
+              return terminalKind === "run-error"
+                ? { done: false as const, value: runError }
+                : { done: true as const, value: terminal }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+
+      const first = iterator.throw!(firstError)
+      const second = iterator.throw!(secondError)
+      const [firstResult, secondResult] = await Promise.all([first, second])
+      expect(firstResult).toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_CONTENT, delta: "ana@acme.com" },
+      })
+      expect(secondResult).toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_END },
+      })
+      expect(throwCalls).toBe(2)
+
+      if (terminalKind === "run-error")
+        await expect(iterator.next()).resolves.toEqual({
+          done: false,
+          value: runError,
+        })
+      else
+        await expect(iterator.next()).resolves.toEqual({
+          done: true,
+          value: terminal,
+        })
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "does not trust a spoofed recoverable %s next marker",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const marker = Symbol.for("local-pii.tanstack.recoverable-next")
+      const spoofed = Object.assign(new Error(`${entrypoint} spoofed`), {
+        [marker]: true,
+        cause: new Error(`${entrypoint} wrong cause`),
+      })
+      let returnValue: unknown
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              throw spoofed
+            },
+            async return(value?: unknown) {
+              returnValue = value
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+
+      await expect(iterator.next()).rejects.toBe(spoofed)
+      expect(returnValue).toBe(spoofed)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "does not read a hostile recoverable %s next marker",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const marker = Symbol.for("local-pii.tanstack.recoverable-next")
+      const getterError = new Error(`${entrypoint} marker getter`)
+      const primary = Object.defineProperty(
+        new Error(`${entrypoint} primary`),
+        marker,
+        {
+          configurable: true,
+          get() {
+            throw getterError
+          },
+        }
+      )
+      let returnValue: unknown
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              throw primary
+            },
+            async return(value?: unknown) {
+              returnValue = value
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+
+      await expect(iterator.next()).rejects.toBe(primary)
+      expect(returnValue).toBe(primary)
     }
   )
 

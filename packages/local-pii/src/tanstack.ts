@@ -8,6 +8,8 @@ import {
 } from "./tanstack-content"
 import {
   markTanStackThrowConcurrent,
+  unwrapRecoverableTanStackNext,
+  recoverableTanStackNextError,
   restoreTanStackStream,
 } from "./tanstack-stream"
 
@@ -19,7 +21,6 @@ const TRUSTED_ARRAY_PUSH = Array.prototype.push
 const TRUSTED_ARRAY_SHIFT = Array.prototype.shift
 const TRUSTED_ARRAY_SOME = Array.prototype.some
 const TRUSTED_ARRAY_SPLICE = Array.prototype.splice
-const RECOVERABLE_NEXT = Symbol.for("local-pii.tanstack.recoverable-next")
 
 function arrayFindIndex<T>(items: T[], predicate: (item: T) => boolean) {
   return TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_FIND_INDEX, items, [predicate])
@@ -43,18 +44,6 @@ function arraySplice<T>(items: T[], start: number, deleteCount?: number) {
     items,
     deleteCount === undefined ? [start] : [start, deleteCount]
   ) as T[]
-}
-
-function unwrapRecoverableNext(error: unknown): {
-  recoverable: boolean
-  value: unknown
-} {
-  if (error !== null && typeof error === "object") {
-    const candidate = error as Record<PropertyKey, unknown>
-    if (candidate[RECOVERABLE_NEXT] === true)
-      return { recoverable: true, value: candidate.cause }
-  }
-  return { recoverable: false, value: error }
 }
 
 export interface PiiConnectionOptions {
@@ -132,12 +121,16 @@ function lazyStream<T>(
 
       const settlePending = (
         kind: "return" | "abort" | "throw",
-        value?: unknown
+        value?: unknown,
+        recoverable = false
       ) => {
         for (const pending of pendingNext) {
           pending.settled = true
           if (kind === "return") pending.resolve(completed<T>())
-          else pending.reject(value)
+          else
+            pending.reject(
+              recoverable ? recoverableTanStackNextError(value) : value
+            )
         }
         pendingNext.clear()
       }
@@ -290,7 +283,7 @@ function lazyStream<T>(
       }
 
       const failNext = (operation: NextOperation, error: unknown) => {
-        const control = unwrapRecoverableNext(error)
+        const control = unwrapRecoverableTanStackNext(error)
         if (control.recoverable) {
           rejectNext(operation, control.value)
           pump()
@@ -361,7 +354,7 @@ function lazyStream<T>(
             (error: unknown) => {
               operation.waitingSource = false
               if (operation.preempted) {
-                const control = unwrapRecoverableNext(error)
+                const control = unwrapRecoverableTanStackNext(error)
                 if (control.recoverable) rejectNext(operation, control.value)
                 else if (!operation.pending.settled) failNext(operation, error)
                 if (assisted) completeAssistedNext(operation)
