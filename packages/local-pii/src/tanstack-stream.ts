@@ -20,6 +20,11 @@ interface ToolStreamState {
 
 type UnknownRecord = Record<string, unknown>
 const RECOVERABLE_NEXT = Symbol.for("local-pii.tanstack.recoverable-next")
+const concurrentThrowHandlers = new WeakMap<object, () => void>()
+
+export function markTanStackThrowConcurrent(iterator: AsyncIterator<unknown>) {
+  concurrentThrowHandlers.get(iterator as object)?.()
+}
 
 function recoverableNextError(cause: unknown): object {
   return { [RECOVERABLE_NEXT]: true, cause }
@@ -313,6 +318,8 @@ export function restoreTanStackStream(
       type NextOperation = {
         kind: "next"
         preempted?: boolean
+        preemptedSettled?: boolean
+        preemptedTerminal?: boolean
         waitingSource?: boolean
         pending: {
           settled: boolean
@@ -324,6 +331,7 @@ export function restoreTanStackStream(
       type ThrowOperation = {
         kind: "throw"
         error: unknown
+        concurrent?: boolean
         gate: ThrowGate
       }
       type Operation = NextOperation | ThrowOperation
@@ -331,6 +339,9 @@ export function restoreTanStackStream(
       let activeOperation:
         | (Operation & { preempted?: boolean; waitingSource?: boolean })
         | undefined
+      let preemptedNext: NextOperation | undefined
+      let losingNext: NextOperation | undefined
+      let allowConcurrentThrow = false
       let pump = () => {}
 
       const settleDelegatedThrows = (
@@ -367,10 +378,14 @@ export function restoreTanStackStream(
         pendingNext.clear()
       }
 
-      const clear = () => {
+      const clearBuffers = () => {
         text.clear()
         tools.clear()
         pending.clear()
+      }
+
+      const clear = () => {
+        clearBuffers()
         queued.length = 0
       }
 
@@ -468,7 +483,7 @@ export function restoreTanStackStream(
           // Agent loops can emit a failed turn and then continue with a tool
           // result or a later answer. The failed turn's partial buffers are
           // never valid tails, but the source must drain.
-          clear()
+          clearBuffers()
           return [chunk]
         }
 
@@ -531,46 +546,64 @@ export function restoreTanStackStream(
           const upstream = source[Symbol.asyncIterator]()
           iterator = upstream
           while (true) {
-            signal?.throwIfAborted()
-            nextInFlight = true
-            let next: IteratorResult<StreamChunk>
-            const pending = nextWithAbort(upstream, signal, () => {
-              aborted = true
-              closed = true
-              settleDelegatedThrows("abort", signal?.reason)
-              settlePending("abort", signal?.reason)
-              clear()
-              discardQueuedOperations()
-              beginReturn(signal?.reason)
-            })
-            cancelPendingNext = pending.cancel
             try {
-              next = await pending.promise
-            } finally {
-              pending.cancel()
-              if (cancelPendingNext === pending.cancel)
-                cancelPendingNext = () => {}
-              nextInFlight = false
-            }
-            signal?.throwIfAborted()
-            if (closed) {
-              clear()
-              return
-            }
+              signal?.throwIfAborted()
+              nextInFlight = true
+              let next: IteratorResult<StreamChunk>
+              const pending = nextWithAbort(upstream, signal, () => {
+                aborted = true
+                closed = true
+                settleDelegatedThrows("abort", signal?.reason)
+                settlePreemptedNext("abort", signal?.reason)
+                settlePending("abort", signal?.reason)
+                clear()
+                discardQueuedOperations()
+                beginReturn(signal?.reason)
+              })
+              cancelPendingNext = pending.cancel
+              try {
+                next = await pending.promise
+              } finally {
+                pending.cancel()
+                if (cancelPendingNext === pending.cancel)
+                  cancelPendingNext = () => {}
+                nextInFlight = false
+              }
+              if (losingNext?.preemptedSettled) {
+                const terminal = losingNext.preemptedTerminal
+                losingNext = undefined
+                if (terminal) return
+                continue
+              }
+              signal?.throwIfAborted()
+              if (closed) {
+                clear()
+                return
+              }
 
-            if (next.done) {
-              upstreamDone = true
-              for (const chunk of flushAll({} as StreamChunk)) yield chunk
-              return
-            }
+              if (next.done) {
+                upstreamDone = true
+                for (const chunk of flushAll({} as StreamChunk)) yield chunk
+                return
+              }
 
-            for (const output of restoreChunk(next.value)) yield output
+              for (const output of restoreChunk(next.value)) yield output
+            } catch (error) {
+              if (losingNext?.preemptedSettled) {
+                const terminal = losingNext.preemptedTerminal
+                losingNext = undefined
+                if (terminal) return
+                continue
+              }
+              throw error
+            }
           }
         } catch (error) {
           if (signal?.aborted && !aborted) {
             aborted = true
             closed = true
             settleDelegatedThrows("abort", signal.reason)
+            settlePreemptedNext("abort", signal.reason)
             settlePending("abort", signal.reason)
             clear()
             discardQueuedOperations()
@@ -605,8 +638,6 @@ export function restoreTanStackStream(
         value,
       })
 
-      let preemptedNext: NextOperation | undefined
-
       const resolveNext = (
         operation: NextOperation,
         result: IteratorResult<StreamChunk>
@@ -632,6 +663,8 @@ export function restoreTanStackStream(
         const operation = preemptedNext
         preemptedNext = undefined
         if (!operation) return
+        operation.preemptedSettled = true
+        operation.preemptedTerminal = kind !== "throw" || !recoverable
         if (kind === "return") resolveNext(operation, done())
         else
           rejectNext(
@@ -723,7 +756,14 @@ export function restoreTanStackStream(
           const nextIndex = operations.findIndex(
             (operation) => operation.kind === "next"
           )
-          if (nextIndex < 0) return undefined
+          if (nextIndex < 0) {
+            // A throw started while another throw was still active is a
+            // concurrent control call. It must not wait for a future `next`
+            // merely because the earlier restoration expanded into multiple
+            // outputs. Sequential calls retain the normal output backpressure.
+            if (first.concurrent) return operations.shift()
+            return undefined
+          }
           return operations.splice(nextIndex, 1)[0]
         }
         return operations.shift()
@@ -758,6 +798,11 @@ export function restoreTanStackStream(
             (next) => {
               operation.waitingSource = false
               if (operation.preempted) {
+                if (operation.preemptedSettled) {
+                  if (!operation.preemptedTerminal && !next.done)
+                    queued.push(next.value)
+                  return
+                }
                 if (next.done) closeAfterDone(next.value)
                 return
               }
@@ -768,6 +813,7 @@ export function restoreTanStackStream(
             (error: unknown) => {
               operation.waitingSource = false
               if (operation.preempted) {
+                if (operation.preemptedSettled) return
                 closeAfterError(error)
                 return
               }
@@ -884,9 +930,19 @@ export function restoreTanStackStream(
             ) {
               activeOperation.preempted = true
               preemptedNext = activeOperation
+              losingNext = activeOperation
               activeOperation = undefined
             }
-            operations.push({ kind: "throw", error, gate })
+            operations.push({
+              kind: "throw",
+              error,
+              concurrent:
+                allowConcurrentThrow ||
+                activeOperation?.kind === "throw" ||
+                operations.some((operation) => operation.kind === "throw"),
+              gate,
+            })
+            allowConcurrentThrow = false
             pump()
             void closeGate.catch(() => undefined)
             return closeGate
@@ -908,6 +964,9 @@ export function restoreTanStackStream(
           return this
         },
       }
+      concurrentThrowHandlers.set(wrapped, () => {
+        allowConcurrentThrow = true
+      })
       return wrapped
     },
   }

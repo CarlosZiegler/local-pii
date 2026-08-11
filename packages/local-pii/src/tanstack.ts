@@ -6,12 +6,44 @@ import {
   protectTanStackMessages,
   UnsupportedTanStackSemanticContentError,
 } from "./tanstack-content"
-import { restoreTanStackStream } from "./tanstack-stream"
+import {
+  markTanStackThrowConcurrent,
+  restoreTanStackStream,
+} from "./tanstack-stream"
 
 export { UnsupportedTanStackSemanticContentError }
 
 const TRUSTED_REFLECT_APPLY = Reflect.apply
+const TRUSTED_ARRAY_FIND_INDEX = Array.prototype.findIndex
+const TRUSTED_ARRAY_PUSH = Array.prototype.push
+const TRUSTED_ARRAY_SHIFT = Array.prototype.shift
+const TRUSTED_ARRAY_SOME = Array.prototype.some
+const TRUSTED_ARRAY_SPLICE = Array.prototype.splice
 const RECOVERABLE_NEXT = Symbol.for("local-pii.tanstack.recoverable-next")
+
+function arrayFindIndex<T>(items: T[], predicate: (item: T) => boolean) {
+  return TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_FIND_INDEX, items, [predicate])
+}
+
+function arrayPush<T>(items: T[], item: T) {
+  TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_PUSH, items, [item])
+}
+
+function arrayShift<T>(items: T[]) {
+  return TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_SHIFT, items, []) as T | undefined
+}
+
+function arraySome<T>(items: T[], predicate: (item: T) => boolean) {
+  return TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_SOME, items, [predicate])
+}
+
+function arraySplice<T>(items: T[], start: number, deleteCount?: number) {
+  return TRUSTED_REFLECT_APPLY(
+    TRUSTED_ARRAY_SPLICE,
+    items,
+    deleteCount === undefined ? [start] : [start, deleteCount]
+  ) as T[]
+}
 
 function unwrapRecoverableNext(error: unknown): {
   recoverable: boolean
@@ -60,11 +92,37 @@ function lazyStream<T>(
       let closeReason: unknown
       let delegate: AsyncIterator<T> | undefined
       let initialization: Promise<AsyncIterator<T> | undefined> | undefined
-      let nextTail: Promise<unknown> = Promise.resolve()
       const pendingNext = new Set<{
+        settled: boolean
         resolve: (result: IteratorResult<T>) => void
         reject: (error: unknown) => void
       }>()
+      type NextOperation = {
+        kind: "next"
+        pending: {
+          settled: boolean
+          resolve: (result: IteratorResult<T>) => void
+          reject: (error: unknown) => void
+        }
+        value?: unknown
+        preempted?: boolean
+        waitingSource?: boolean
+      }
+      type ThrowOperation = {
+        kind: "throw"
+        error: unknown
+        canceled?: boolean
+        concurrent?: boolean
+        completed?: boolean
+        resolve: (result: IteratorResult<T>) => void
+        reject: (error: unknown) => void
+      }
+      type Operation = NextOperation | ThrowOperation
+      const operations: Operation[] = []
+      const activeThrows = new Set<ThrowOperation>()
+      let activeOperation: Operation | undefined
+      let activeAssistedNext: NextOperation | undefined
+      let pump = () => {}
       let removeAbortListener = () => {}
       const detachAbortListener = () => {
         const remove = removeAbortListener
@@ -77,25 +135,24 @@ function lazyStream<T>(
         value?: unknown
       ) => {
         for (const pending of pendingNext) {
+          pending.settled = true
           if (kind === "return") pending.resolve(completed<T>())
           else pending.reject(value)
         }
         pendingNext.clear()
       }
 
-      const exposeNext = (operation: Promise<IteratorResult<T>>) =>
-        new Promise<IteratorResult<T>>((resolve, reject) => {
-          const pending = { resolve, reject }
-          pendingNext.add(pending)
-          void operation.then(
-            (result) => {
-              if (pendingNext.delete(pending)) resolve(result)
-            },
-            (error: unknown) => {
-              if (pendingNext.delete(pending)) reject(error)
-            }
-          )
+      const settleThrows = (
+        kind: "return" | "abort" | "throw",
+        value?: unknown
+      ) => {
+        activeThrows.forEach((operation) => {
+          operation.canceled = true
+          if (kind === "return") operation.resolve(completed<T>(value))
+          else operation.reject(value)
         })
+        activeThrows.clear()
+      }
 
       const ensureDelegate = () => {
         if (!initialization) {
@@ -147,6 +204,10 @@ function lazyStream<T>(
         closed = true
         closeKind = "abort"
         closeReason = signal?.reason
+        arraySplice(operations, 0)
+        if (activeOperation?.kind === "next") activeOperation.preempted = true
+        activeOperation = undefined
+        settleThrows("abort", closeReason)
         settlePending("abort", closeReason)
         detachAbortListener()
         void close(closeReason, "abort").catch(() => undefined)
@@ -160,6 +221,218 @@ function lazyStream<T>(
         }
       }
 
+      const resolveNext = (
+        operation: NextOperation,
+        result: IteratorResult<T>
+      ) => {
+        if (operation.pending.settled) return
+        operation.pending.settled = true
+        pendingNext.delete(operation.pending)
+        operation.pending.resolve(result)
+      }
+
+      const rejectNext = (operation: NextOperation, error: unknown) => {
+        if (operation.pending.settled) return
+        operation.pending.settled = true
+        pendingNext.delete(operation.pending)
+        operation.pending.reject(error)
+      }
+
+      const closeAfterDone = (value: unknown) => {
+        closed = true
+        closeKind = "return"
+        closeReason = value
+        arraySplice(operations, 0)
+        settleThrows("return", value)
+        settlePending("return")
+        detachAbortListener()
+      }
+
+      const closeAfterError = (error: unknown) => {
+        closed = true
+        closeKind = "throw"
+        closeReason = error
+        arraySplice(operations, 0)
+        settleThrows("throw", error)
+        settlePending("throw", error)
+        detachAbortListener()
+      }
+
+      const failThrow = (operation: ThrowOperation, error: unknown) => {
+        if (operation.canceled) return
+        activeThrows.delete(operation)
+        closeAfterError(error)
+        operation.reject(error)
+      }
+
+      const completeThrow = (
+        operation: ThrowOperation,
+        result: IteratorResult<T>
+      ) => {
+        if (operation.canceled) return
+        activeThrows.delete(operation)
+        if (result.done) {
+          closeAfterDone(result.value)
+          operation.resolve(result)
+          return
+        }
+        operation.resolve(result)
+      }
+
+      const completeAssistedNext = (operation: NextOperation) => {
+        if (activeAssistedNext !== operation) return
+        activeAssistedNext = undefined
+        const active = activeOperation
+        if (active?.kind === "throw" && active.completed) {
+          activeOperation = undefined
+          pump()
+        }
+      }
+
+      const failNext = (operation: NextOperation, error: unknown) => {
+        const control = unwrapRecoverableNext(error)
+        if (control.recoverable) {
+          rejectNext(operation, control.value)
+          pump()
+          return
+        }
+        if (operation.pending.settled) return
+        closeAfterError(error)
+        rejectNext(operation, error)
+      }
+
+      const completeNext = (
+        operation: NextOperation,
+        result: IteratorResult<T>
+      ) => {
+        if (operation.preempted || operation.pending.settled) return
+        if (result.done) {
+          resolveNext(operation, result)
+          closeAfterDone(result.value)
+          return
+        }
+        resolveNext(operation, result)
+      }
+
+      const selectOperation = (): Operation | undefined => arrayShift(operations)
+
+      const startNext = (operation: NextOperation, assisted: boolean) => {
+        const delegated = Promise.resolve()
+          .then(async () => {
+            if (closed) {
+              if (closeKind === "abort" || closeKind === "throw")
+                throw closeReason
+              return completed<T>()
+            }
+            const current = await ensureDelegate()
+            if (closed) {
+              if (closeKind === "abort" || closeKind === "throw")
+                throw closeReason
+              return completed<T>()
+            }
+            if (!current) return completed<T>()
+            const result = current.next(operation.value)
+            operation.waitingSource = true
+            if (
+              !assisted &&
+              activeOperation === operation &&
+              arraySome(operations, (queued) => queued.kind === "throw")
+            ) {
+              operation.preempted = true
+              activeOperation = undefined
+              pump()
+            }
+            return result
+          })
+          .then(
+            (result) => {
+              operation.waitingSource = false
+              if (operation.preempted) {
+                if (assisted) completeAssistedNext(operation)
+                return result
+              }
+              if (!assisted && activeOperation === operation)
+                activeOperation = undefined
+              completeNext(operation, result)
+              if (assisted) completeAssistedNext(operation)
+              else pump()
+              return result
+            },
+            (error: unknown) => {
+              operation.waitingSource = false
+              if (operation.preempted) {
+                const control = unwrapRecoverableNext(error)
+                if (control.recoverable) rejectNext(operation, control.value)
+                else if (!operation.pending.settled) failNext(operation, error)
+                if (assisted) completeAssistedNext(operation)
+                return Promise.reject(error)
+              }
+              if (!assisted && activeOperation === operation)
+                activeOperation = undefined
+              failNext(operation, error)
+              if (assisted) completeAssistedNext(operation)
+              else pump()
+              return Promise.reject(error)
+            }
+          )
+        void delegated.catch(() => undefined)
+      }
+
+      pump = () => {
+        if (closed) return
+        if (activeOperation?.kind === "throw" && !activeAssistedNext) {
+          const nextIndex = arrayFindIndex(
+            operations,
+            (operation) => operation.kind === "next"
+          )
+          if (nextIndex >= 0) {
+            const candidate = arraySplice(operations, nextIndex, 1)[0]
+            if (candidate?.kind === "next") {
+              activeAssistedNext = candidate
+              startNext(candidate, true)
+            }
+          }
+          return
+        }
+        if (activeOperation) return
+        const operation = selectOperation()
+        if (!operation) return
+        activeOperation = operation
+
+        if (operation.kind === "next") {
+          startNext(operation, false)
+          return
+        }
+
+        const delegated = Promise.resolve()
+          .then(async () => {
+            if (closed) throw closeReason
+            const current = delegate ?? (await ensureDelegate())
+            if (!current?.throw) throw operation.error
+            if (operation.concurrent) markTanStackThrowConcurrent(current)
+            return current.throw(operation.error)
+          })
+          .then(
+            (result) => {
+              operation.completed = true
+              if (activeOperation === operation && !activeAssistedNext)
+                activeOperation = undefined
+              completeThrow(operation, result)
+              if (!activeAssistedNext) pump()
+              return result
+            },
+            (error: unknown) => {
+              operation.completed = true
+              if (activeOperation === operation && !activeAssistedNext)
+                activeOperation = undefined
+              failThrow(operation, error)
+              if (!activeAssistedNext) pump()
+              return Promise.reject(error)
+            }
+          )
+        void delegated.catch(() => undefined)
+      }
+
       const iterator: AsyncIterator<T> & AsyncIterable<T> = {
         next(value?: unknown) {
           if (closed) {
@@ -167,112 +440,74 @@ function lazyStream<T>(
               return Promise.reject(closeReason)
             return Promise.resolve(completed<T>())
           }
-          const operation = nextTail
-            .then(async () => {
-              if (closed) {
-                if (closeKind === "abort" || closeKind === "throw")
-                  throw closeReason
-                return completed<T>()
-              }
-              const current = await ensureDelegate()
-              if (closed) {
-                if (closeKind === "abort" || closeKind === "throw")
-                  throw closeReason
-                return completed<T>()
-              }
-              if (!current) return completed<T>()
-              return current.next(value)
-            })
-            .then(
-              (result) => {
-                if (result.done) detachAbortListener()
-                return result
-              },
-              (error) => {
-                const control = unwrapRecoverableNext(error)
-                if (control.recoverable) throw control.value
-                detachAbortListener()
-                throw error
-              }
-            )
-          nextTail = operation.then(
-            () => undefined,
-            () => undefined
+          let resolve!: (result: IteratorResult<T>) => void
+          let reject!: (error: unknown) => void
+          const pending = {
+            settled: false,
+            resolve: (result: IteratorResult<T>) => resolve(result),
+            reject: (error: unknown) => reject(error),
+          }
+          const operation: NextOperation = {
+            kind: "next",
+            pending,
+            value,
+          }
+          const result = new Promise<IteratorResult<T>>(
+            (resolveResult, rejectResult) => {
+              resolve = resolveResult
+              reject = rejectResult
+            }
           )
-          return exposeNext(operation)
+          pendingNext.add(pending)
+          arrayPush(operations, operation)
+          pump()
+          return result
         },
         return(value?: unknown) {
           if (closed) return Promise.resolve(completed<T>(value))
           closed = true
           closeKind = "return"
           closeReason = value
+          arraySplice(operations, 0)
+          if (activeOperation?.kind === "next") activeOperation.preempted = true
+          activeOperation = undefined
+          settleThrows("return", value)
           settlePending("return")
           detachAbortListener()
           return close(value)
         },
         throw(error?: unknown) {
           if (closed) return Promise.reject(error)
-          const current = delegate
-          if (current?.throw) {
-            let result: PromiseLike<IteratorResult<T>>
-            try {
-              result = current.throw(error)
-            } catch (throwError) {
-              closed = true
-              closeKind = "throw"
-              closeReason = throwError
-              settlePending("throw", throwError)
-              detachAbortListener()
-              return Promise.reject(throwError)
+          let resolve!: (result: IteratorResult<T>) => void
+          let reject!: (throwError: unknown) => void
+          const operation: ThrowOperation = {
+            kind: "throw",
+            error,
+            concurrent:
+              activeOperation?.kind === "throw" ||
+              arraySome(operations, (queued) => queued.kind === "throw"),
+            resolve: (result: IteratorResult<T>) => resolve(result),
+            reject: (throwError: unknown) => reject(throwError),
+          }
+          const result = new Promise<IteratorResult<T>>(
+            (resolveResult, rejectResult) => {
+              resolve = resolveResult
+              reject = rejectResult
             }
-            const throwing = Promise.resolve(result).then(
-              (thrown) => {
-                if (thrown.done) {
-                  closed = true
-                  closeKind = "return"
-                  closeReason = thrown.value
-                  settlePending("return")
-                  detachAbortListener()
-                }
-                return thrown
-              },
-              (throwError) => {
-                closed = true
-                closeKind = "throw"
-                closeReason = throwError
-                settlePending("throw", throwError)
-                detachAbortListener()
-                throw throwError
-              }
-            )
-            void throwing.catch(() => undefined)
-            return throwing
+          )
+          activeThrows.add(operation)
+          if (
+            activeOperation?.kind === "next" &&
+            activeOperation.waitingSource &&
+            !activeOperation.preempted
+          ) {
+            activeOperation.preempted = true
+            activeOperation = undefined
           }
-
-          closed = true
-          closeKind = "throw"
-          closeReason = error
-          settlePending("throw", error)
-          detachAbortListener()
-          if (current?.return) {
-            let cleanup: PromiseLike<IteratorResult<T>>
-            try {
-              cleanup = current.return(error)
-            } catch {
-              return Promise.reject(error)
-            }
-            return Promise.resolve(cleanup).then(
-              () => Promise.reject(error),
-              () => Promise.reject(error)
-            )
-          }
-
-          if (initialization) {
-            void initialization
-              .then((initialized) => initialized?.throw?.(error))
-              .catch(() => undefined)
-          }
-          return Promise.reject(error)
+          arrayPush(operations, operation)
+          pump()
+          void result.catch(() => undefined)
+          return result
         },
         [Symbol.asyncIterator]() {
           return this

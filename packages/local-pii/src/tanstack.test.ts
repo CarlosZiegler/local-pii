@@ -283,6 +283,7 @@ describe("piiConnection message protection", () => {
     const chainMutation = {
       toJSON: () => ({ leaked: "ana@acme.com" }),
     }
+    let settledBeforeRestore = false
     vi.spyOn(session, "anonymize").mockImplementation(async (text) => {
       const result = await originalAnonymize(text)
       Object.defineProperty(arrayPrototype, "toJSON", {
@@ -322,6 +323,7 @@ describe("piiConnection message protection", () => {
         )
       } catch (error) {
         caught = error
+        settledBeforeRestore = true
       }
     } finally {
       if (toJsonDescriptor)
@@ -344,6 +346,7 @@ describe("piiConnection message protection", () => {
       Object.setPrototypeOf(Array.prototype, arrayPrototypeParent)
     }
     expect(innerConnect).not.toHaveBeenCalled()
+    expect(settledBeforeRestore).toBe(true)
     expect(caught).toMatchObject({ path: [], discriminant: "<invalid>" })
   })
 
@@ -4367,6 +4370,85 @@ describe("piiConnection text streaming", () => {
   )
 
   it.each(["connect", "joinRun"] as const)(
+    "settles concurrent %s throws after an expanded recovery without a next",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize("ana@acme.com"))
+        .redactedText
+      let throwCalls = 0
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "concurrent-expansion",
+                  delta: protectedContent,
+                } satisfies StreamChunk,
+              }
+            },
+            async throw() {
+              throwCalls += 1
+              if (throwCalls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_END,
+                    messageId: "concurrent-expansion",
+                  } satisfies StreamChunk,
+                }
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "concurrent-later",
+                  delta: "later",
+                } satisfies StreamChunk,
+              }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+
+      const first = iterator.throw?.(new Error(`${entrypoint} first`))
+      const second = iterator.throw?.(new Error(`${entrypoint} second`))
+      await expect(Promise.all([first, second])).resolves.toEqual([
+        expect.objectContaining({
+          done: false,
+          value: expect.objectContaining({
+            type: EventType.TEXT_MESSAGE_CONTENT,
+            delta: "ana@acme.com",
+          }),
+        }),
+        expect.objectContaining({
+          done: false,
+          value: expect.objectContaining({
+            type: EventType.TEXT_MESSAGE_CONTENT,
+            delta: "",
+          }),
+        }),
+      ])
+      expect(throwCalls).toBe(2)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
     "serializes %s throw-next-throw recovery across split output",
     async (entrypoint) => {
       const session = createAnonymizer({
@@ -4570,6 +4652,342 @@ describe("piiConnection text streaming", () => {
       await expect(next).rejects.toBe(primary)
       await expect(throwing).rejects.toBe(primary)
       expect(returnValue).toBe(primary)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "ignores a late loser rejection after recoverable %s throw",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const firstError = new Error(`${entrypoint} recoverable throw`)
+      const lateError = new Error(`${entrypoint} late next`)
+      let nextCalls = 0
+      let nextStarted = false
+      let rejectFirst!: (error: unknown) => void
+      let returnCalls = 0
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              nextCalls += 1
+              if (nextCalls === 1) {
+                nextStarted = true
+                return new Promise<IteratorResult<StreamChunk>>((_, reject) => {
+                  rejectFirst = reject
+                })
+              }
+              if (nextCalls === 2)
+                return Promise.resolve({
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "after-loser",
+                    delta: "continues",
+                  } satisfies StreamChunk,
+                })
+              return Promise.resolve({ done: true as const, value: undefined })
+            },
+            async throw(value?: unknown) {
+              expect(value).toBe(firstError)
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "after-loser",
+                  delta: "recovered",
+                } satisfies StreamChunk,
+              }
+            },
+            async return() {
+              returnCalls += 1
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      const pending = iterator.next()
+      for (let attempt = 0; !nextStarted && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      const recovered = iterator.throw?.(firstError)
+      await expect(recovered).resolves.toMatchObject({
+        done: false,
+        value: { delta: "recovered" },
+      })
+      await expect(pending).rejects.toBe(firstError)
+
+      rejectFirst(lateError)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await expect(iterator.next()).resolves.toMatchObject({
+        done: false,
+        value: { delta: "continues" },
+      })
+      expect(returnCalls).toBe(0)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "ignores a late loser completion after recoverable %s throw",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const firstError = new Error(`${entrypoint} recoverable throw`)
+      let nextCalls = 0
+      let nextStarted = false
+      let finishFirst!: (result: IteratorResult<StreamChunk>) => void
+      let returnCalls = 0
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              nextCalls += 1
+              if (nextCalls === 1) {
+                nextStarted = true
+                return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                  finishFirst = resolve
+                })
+              }
+              if (nextCalls === 2)
+                return Promise.resolve({
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "after-loser-completion",
+                    delta: "continues",
+                  } satisfies StreamChunk,
+                })
+              return Promise.resolve({ done: true as const, value: undefined })
+            },
+            async throw(value?: unknown) {
+              expect(value).toBe(firstError)
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "after-loser-completion",
+                  delta: "recovered",
+                } satisfies StreamChunk,
+              }
+            },
+            async return() {
+              returnCalls += 1
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      const pending = iterator.next()
+      for (let attempt = 0; !nextStarted && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      await expect(iterator.throw?.(firstError)).resolves.toMatchObject({
+        done: false,
+        value: { delta: "recovered" },
+      })
+      await expect(pending).rejects.toBe(firstError)
+
+      finishFirst({ done: true, value: undefined })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      await expect(iterator.next()).resolves.toMatchObject({
+        done: false,
+        value: { delta: "continues" },
+      })
+      expect(returnCalls).toBe(0)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "serializes outer %s throw-next-throw calls in public order",
+    async (entrypoint) => {
+      const original = "order@example.com"
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize(original)).redactedText
+      const split = Math.floor(protectedContent.length / 2)
+      const prefixError = new Error(`${entrypoint} prefix`)
+      const suffixError = new Error(`${entrypoint} suffix`)
+      const calls: string[] = []
+      let nextCalls = 0
+      let throwCalls = 0
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              nextCalls += 1
+              calls.push(`next${nextCalls}`)
+              if (nextCalls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "outer-order",
+                    delta: "",
+                  } satisfies StreamChunk,
+                }
+              if (nextCalls === 2)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "outer-order",
+                    delta: "",
+                  } satisfies StreamChunk,
+                }
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_END,
+                  messageId: "outer-order",
+                } satisfies StreamChunk,
+              }
+            },
+            async throw(value?: unknown) {
+              throwCalls += 1
+              if (throwCalls === 1) {
+                expect(value).toBe(prefixError)
+                calls.push("throw1")
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "outer-order",
+                    delta: protectedContent.slice(0, split),
+                  } satisfies StreamChunk,
+                }
+              }
+              expect(value).toBe(suffixError)
+              calls.push("throw2")
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "outer-order",
+                  delta: protectedContent.slice(split),
+                } satisfies StreamChunk,
+              }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+      const prefix = iterator.throw!(prefixError)
+      const middle = iterator.next()
+      const suffix = iterator.throw!(suffixError)
+      const end = iterator.next()
+      const results = await Promise.all([prefix, middle, suffix, end])
+      expect(calls).toEqual(["next1", "throw1", "next2", "throw2", "next3"])
+      const restored = results
+        .filter(
+          (result): result is IteratorResult<StreamChunk> =>
+            result !== undefined && !result.done
+        )
+        .map((result) => {
+          const chunk = result.value as Extract<
+            StreamChunk,
+            { type: "TEXT_MESSAGE_CONTENT" }
+          >
+          return chunk.type === EventType.TEXT_MESSAGE_CONTENT
+            ? chunk.delta
+            : ""
+        })
+        .join("")
+      expect(restored).toContain(original)
+      expect(restored).not.toContain(protectedContent)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "preserves %s next-before-throw invocation order",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const reason = new Error(`${entrypoint} same-turn throw`)
+      const calls: string[] = []
+      let releaseNext!: (result: IteratorResult<StreamChunk>) => void
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              calls.push("next")
+              return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                releaseNext = resolve
+              })
+            },
+            async throw(value?: unknown) {
+              calls.push("throw")
+              expect(value).toBe(reason)
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "same-turn",
+                  delta: "recovered",
+                } satisfies StreamChunk,
+              }
+            },
+            async return() {
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      const pending = iterator.next()
+      const recovered = iterator.throw?.(reason)
+      await expect(recovered).resolves.toMatchObject({
+        done: false,
+        value: { delta: "recovered" },
+      })
+      await expect(pending).rejects.toBe(reason)
+      expect(calls).toEqual(["next", "throw"])
+      releaseNext({ done: true, value: undefined })
+      await iterator.return?.()
     }
   )
 
