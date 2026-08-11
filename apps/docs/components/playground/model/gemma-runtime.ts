@@ -376,6 +376,15 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     }
   }
 
+  private ensurePromptAvailable(): void {
+    if (this.promptActive) {
+      throw new DOMException(
+        "The compatibility session already has an active prompt",
+        "InvalidStateError"
+      )
+    }
+  }
+
   private fitHistory(candidate: ProtectedBrowserTurn[]): {
     history: ProtectedBrowserTurn[]
     evicted: boolean
@@ -467,12 +476,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     this.ensureActive()
     options.signal?.throwIfAborted()
     const { history, current, incoming } = this.requestFor(input)
-    if (this.promptActive) {
-      throw new DOMException(
-        "The compatibility session already has an active prompt",
-        "InvalidStateError"
-      )
-    }
+    this.ensurePromptAvailable()
     this.promptActive = true
     const composed = composeAbortSignals(
       this.sessionAbort.signal,
@@ -569,6 +573,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     options: LanguageModelAppendOptions = {}
   ): Promise<undefined> {
     this.ensureActive()
+    this.ensurePromptAvailable()
     options.signal?.throwIfAborted()
     const turns = promptTurns(input)
     const fitted = this.fitHistory([...this.history, ...turns])

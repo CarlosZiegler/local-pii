@@ -380,6 +380,35 @@ describe("Gemma browser-generation runtime", () => {
     await expect(session.prompt("After first")).resolves.toBe("answer ")
   })
 
+  it("rejects append while a prompt is active without mutating history", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const first = session.promptStreaming("First question")
+    const firstReader = first.getReader()
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "answer ",
+    })
+    await expect(session.append("Late append")).rejects.toMatchObject({
+      name: "InvalidStateError",
+    })
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+    await expect(session.prompt("After first")).resolves.toBe("answer ")
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "answer " },
+      { role: "user", content: "After first" },
+    ])
+  })
+
   it("measures supplied turns without requiring room in anchored history", async () => {
     const fake = fakeTransformers()
     const factory = await createGemmaLanguageModelFactory({
