@@ -763,7 +763,7 @@ export interface RuntimeDisclosure {
 }
 
 export interface ProtectedBrowserTurn {
-  readonly role: "user" | "assistant"
+  readonly role: "system" | "user" | "assistant"
   readonly protectedContent: string
 }
 
@@ -779,7 +779,7 @@ export interface BrowserGenerationRuntime {
 }
 ```
 
-Because a structural string cannot prove that it crossed a public adapter, keep a private `WeakSet<object>` in `protected-request.ts`. Only `createProtectedBrowserRequest(...)` marks a request; `assertProtectedBrowserRequest(...)` rejects a hand-built/unprotected object before a runtime factory/session is called. Validate roles while minting and never expose this guard from `local-pii`.
+Because a structural string cannot prove that it crossed a public adapter, keep a private `WeakSet<object>` in `protected-request.ts`. Only `createProtectedBrowserRequest(...)` marks a request; `assertProtectedBrowserRequest(...)` rejects a hand-built/unprotected object before a runtime factory/session is called. Validate roles while minting, allow at most one leading `system` turn, and never expose this guard from `local-pii`.
 
 - [ ] **Step 3: Write the shared iterator lifecycle tests**
 
@@ -828,12 +828,12 @@ Refactor Gemma to `createGemmaBrowserRuntime()`: lazy-import Transformers.js onl
 ```ts
 artifacts: {
   kind: "explicit-download",
-  approximateBytes: 446_693_376,
-  origins: ["https://huggingface.co", "https://cdn-lfs.hf.co"],
+  approximateBytes: 293_284_073,
+  origins: ["https://huggingface.co", "https://*.cdn.hf.co"],
 }
 ```
 
-Keep `onnx-community/gemma-3-270m-it-ONNX`, WebGPU, `q4f16`, deterministic sampling, and 512 output tokens. Do not call Gemma or Gemini a Detection model.
+Keep `onnx-community/gemma-3-270m-it-ONNX` pinned to revision `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0`, WebGPU, `q4f16`, deterministic sampling, and 512 output tokens. Validate its one-leading-system and alternating user/assistant template rules before model acquisition. The byte estimate covers the six files resolved by Transformers.js 4.2.0 at that revision; Hugging Face may redirect large artifacts to regional `*.cdn.hf.co` hosts. Do not call Gemma or Gemini a Detection model. See `docs/research/2026-08-11-browser-generation-primary-sources.md` for the primary-source evidence.
 
 - [ ] **Step 8: Implement the direct AI SDK v4 model**
 
@@ -1448,14 +1448,13 @@ Configure `webServer.command` as `bun run build && bunx http-server out -p 4173 
 In `playground.spec.ts`, use `page.addInitScript` to install a deterministic browser-managed `window.LanguageModel` whose availability is `available`, whose `promptStreaming` echoes its protected input in split chunks, and whose `destroy` is observable. Capture every request and allow only:
 
 ```ts
-const allowedOrigins = new Set([
-  new URL(page.url()).origin,
-  "https://huggingface.co",
-  "https://cdn-lfs.hf.co",
-])
+const sameOrigin = new URL(page.url()).origin
+const allowedArtifactOrigin = (url: URL) =>
+  url.origin === "https://huggingface.co" ||
+  (url.protocol === "https:" && url.hostname.endsWith(".cdn.hf.co"))
 ```
 
-External requests must be `GET` and match a disclosed artifact origin; fail on `/api`, server-action headers, POST/PUT/PATCH/DELETE, or any undisclosed origin. In the injected native path, expect no external request at all.
+External requests must be `GET` and match `sameOrigin` or the disclosed Hugging Face artifact/CDN family; fail on `/api`, server-action headers, POST/PUT/PATCH/DELETE, or any undisclosed origin. In the injected native path, expect no external request at all.
 
 - [ ] **Step 8: Exercise both chats, keyboard, and status UI in the static build**
 
