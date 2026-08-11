@@ -452,6 +452,33 @@ describe("Gemma browser-generation runtime", () => {
     expect(secondQuotaHandler).toHaveBeenCalledOnce()
   })
 
+  it("preserves IDL handler registration order across replacement and re-add", async () => {
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fakeTransformers().loadTransformers,
+    })
+    const session = await factory.create()
+    const order: string[] = []
+    const oldHandler = () => order.push("old")
+    const replacementHandler = () => order.push("replacement")
+    const externalListener = () => order.push("listener")
+
+    session.oncontextoverflow = oldHandler
+    session.addEventListener("contextoverflow", externalListener)
+    session.oncontextoverflow = replacementHandler
+    session.dispatchEvent(new Event("contextoverflow"))
+    expect(order).toEqual(["replacement", "listener"])
+
+    order.length = 0
+    session.oncontextoverflow = null
+    session.dispatchEvent(new Event("contextoverflow"))
+    expect(order).toEqual(["listener"])
+
+    order.length = 0
+    session.oncontextoverflow = replacementHandler
+    session.dispatchEvent(new Event("contextoverflow"))
+    expect(order).toEqual(["listener", "replacement"])
+  })
+
   it("retains the completion of a user-ended initial anchor during eviction", async () => {
     const turn = "u".repeat(8_000 * 4)
     const answer = "a".repeat(8_000 * 4)

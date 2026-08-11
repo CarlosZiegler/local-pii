@@ -349,14 +349,21 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   set oncontextoverflow(
     handler: ((this: LanguageModel, ev: Event) => unknown) | null
   ) {
-    if (this.contextOverflowListener) {
-      this.removeEventListener("contextoverflow", this.contextOverflowListener)
+    if (handler === null) {
+      if (this.contextOverflowListener) {
+        this.removeEventListener(
+          "contextoverflow",
+          this.contextOverflowListener
+        )
+      }
+      this.contextOverflowHandler = null
+      this.contextOverflowListener = null
+      return
     }
     this.contextOverflowHandler = handler
-    this.contextOverflowListener = null
-    if (handler) {
+    if (this.contextOverflowListener === null) {
       const listener: EventListener = (event) => {
-        handler.call(this, event)
+        this.contextOverflowHandler?.call(this, event)
       }
       this.contextOverflowListener = listener
       this.addEventListener("contextoverflow", listener)
@@ -370,14 +377,18 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   set onquotaoverflow(
     handler: ((this: LanguageModel, ev: Event) => unknown) | null
   ) {
-    if (this.quotaOverflowListener) {
-      this.removeEventListener("quotaoverflow", this.quotaOverflowListener)
+    if (handler === null) {
+      if (this.quotaOverflowListener) {
+        this.removeEventListener("quotaoverflow", this.quotaOverflowListener)
+      }
+      this.quotaOverflowHandler = null
+      this.quotaOverflowListener = null
+      return
     }
     this.quotaOverflowHandler = handler
-    this.quotaOverflowListener = null
-    if (handler) {
+    if (this.quotaOverflowListener === null) {
       const listener: EventListener = (event) => {
-        handler.call(this, event)
+        this.quotaOverflowHandler?.call(this, event)
       }
       this.quotaOverflowListener = listener
       this.addEventListener("quotaoverflow", listener)
