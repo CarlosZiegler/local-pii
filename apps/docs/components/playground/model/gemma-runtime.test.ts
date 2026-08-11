@@ -234,11 +234,164 @@ describe("Gemma browser-generation runtime", () => {
 
     await expect(
       factory.create({ initialPrompts: [{ role: "user", content: oversized }] })
-    ).rejects.toThrow("32768")
+    ).rejects.toMatchObject({ name: "QuotaExceededError" })
 
     const session = await factory.create()
-    expect(() => session.promptStreaming(oversized)).toThrow("32768")
-    await expect(session.append(oversized)).rejects.toThrow("32768")
+    expect(() => session.promptStreaming(oversized)).toThrow(
+      expect.objectContaining({ name: "QuotaExceededError" })
+    )
+    await expect(session.append(oversized)).rejects.toMatchObject({
+      name: "QuotaExceededError",
+    })
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("evicts oldest post-initial pairs and dispatches both overflow events", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers([answer])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const contextOverflow = vi.fn()
+    const quotaOverflow = vi.fn()
+    const contextEvent = vi.fn()
+    const quotaEvent = vi.fn()
+    session.oncontextoverflow = contextOverflow
+    session.onquotaoverflow = quotaOverflow
+    session.addEventListener("contextoverflow", contextEvent)
+    session.addEventListener("quotaoverflow", quotaEvent)
+
+    await session.prompt(turn)
+    await session.prompt(turn)
+    await session.prompt(turn)
+
+    expect(contextOverflow).toHaveBeenCalledOnce()
+    expect(quotaOverflow).toHaveBeenCalledOnce()
+    expect(contextEvent).toHaveBeenCalledOnce()
+    expect(quotaEvent).toHaveBeenCalledOnce()
+    expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
+    expect(fake.promptMessages.map(({ role }) => role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "user",
+    ])
+    expect(fake.promptMessages[1]?.content).toBe(turn)
+    expect(fake.promptMessages[2]?.content).toBe(answer)
+    expect(fake.promptMessages[3]?.content).toBe(turn)
+  })
+
+  it("evicts oldest post-initial pairs from append without acquiring the model", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const contextOverflow = vi.fn()
+    const quotaOverflow = vi.fn()
+    session.oncontextoverflow = contextOverflow
+    session.onquotaoverflow = quotaOverflow
+
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+
+    expect(contextOverflow).toHaveBeenCalledOnce()
+    expect(quotaOverflow).toHaveBeenCalledOnce()
+    expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("rejects an overlapping prompt before acquisition and preserves causal history", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const first = session.promptStreaming("First question")
+    const firstReader = first.getReader()
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "answer ",
+    })
+    expect(() => session.promptStreaming("Overlapping question")).toThrow(
+      "active"
+    )
+    expect(fake.promptMessages).toHaveLength(1)
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+
+    const third = session.promptStreaming("After first")
+    const thirdReader = third.getReader()
+    while (!(await thirdReader.read()).done) {
+      // Drain the post-settlement prompt.
+    }
+
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "answer " },
+      { role: "user", content: "After first" },
+    ])
+  })
+
+  it("rejects prompt overlap while promptStreaming is active", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const first = session.promptStreaming("First question")
+    const firstReader = first.getReader()
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "answer ",
+    })
+    await expect(session.prompt("Overlapping question")).rejects.toMatchObject({
+      name: "InvalidStateError",
+    })
+    expect(fake.promptMessages).toHaveLength(1)
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+    await expect(session.prompt("After first")).resolves.toBe("answer ")
+  })
+
+  it("measures supplied turns without requiring room in anchored history", async () => {
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [
+        { role: "system", content: "x".repeat((32_768 - 8) * 4) },
+      ],
+    })
+
+    await expect(session.measureContextUsage("12345678")).resolves.toBe(2)
     expect(fake.loadTransformers).not.toHaveBeenCalled()
   })
 
@@ -521,7 +674,12 @@ describe("Gemma browser-generation runtime", () => {
     })
     const session = await factory.create()
 
-    expect(session.promptStreaming("Current")).toBeInstanceOf(ReadableStream)
+    const initialStream = session.promptStreaming("Current")
+    expect(initialStream).toBeInstanceOf(ReadableStream)
+    const initialReader = initialStream.getReader()
+    while (!(await initialReader.read()).done) {
+      // Drain the shape-check prompt before starting another prompt.
+    }
     await expect(session.prompt("Current")).resolves.toBe("ok")
     await expect(
       session.measureContextUsage("Current")

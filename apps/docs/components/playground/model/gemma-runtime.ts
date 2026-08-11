@@ -272,6 +272,13 @@ function ensureContextWithinWindow(
   }
 }
 
+function quotaExceeded(): DOMException {
+  return new DOMException(
+    `The Gemma compatibility context exceeds its ${CONTEXT_WINDOW}-token window`,
+    "QuotaExceededError"
+  )
+}
+
 function composeAbortSignals(
   sessionSignal: AbortSignal,
   callerSignal?: AbortSignal
@@ -337,15 +344,27 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   )
   private readonly activeIterators = new Set<AsyncIterator<string>>()
   private readonly activeReleases = new Map<AsyncIterator<string>, () => void>()
+  private readonly initialHistory: ProtectedBrowserTurn[]
+  private readonly history: ProtectedBrowserTurn[]
+  private promptActive = false
   private destroyed = false
 
   constructor(
     private readonly runtime: BrowserGenerationRuntime,
-    private readonly history: ProtectedBrowserTurn[]
+    history: ProtectedBrowserTurn[],
+    initialHistory: ProtectedBrowserTurn[] = history
   ) {
     super()
+    validateHistory(initialHistory)
     validateHistory(history)
-    ensureContextWithinWindow(history)
+    if (estimateUsage(initialHistory) > CONTEXT_WINDOW) {
+      throw quotaExceeded()
+    }
+    if (estimateUsage(history) > CONTEXT_WINDOW) {
+      throw quotaExceeded()
+    }
+    this.history = [...history]
+    this.initialHistory = [...initialHistory]
   }
 
   private ensureActive(): void {
@@ -355,6 +374,48 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
         "InvalidStateError"
       )
     }
+  }
+
+  private fitHistory(candidate: ProtectedBrowserTurn[]): {
+    history: ProtectedBrowserTurn[]
+    evicted: boolean
+  } {
+    validateHistory(candidate)
+    if (estimateUsage(candidate) <= CONTEXT_WINDOW) {
+      return { history: candidate, evicted: false }
+    }
+
+    const fitted = [...candidate]
+    let evicted = false
+    const firstEvictable = this.initialHistory.length
+    while (
+      estimateUsage(fitted) > CONTEXT_WINDOW &&
+      fitted.length >= firstEvictable + 2
+    ) {
+      const removed = fitted.splice(firstEvictable, 2)
+      try {
+        validateHistory(fitted)
+      } catch {
+        fitted.splice(firstEvictable, 0, ...removed)
+        break
+      }
+      evicted = true
+    }
+
+    if (estimateUsage(fitted) > CONTEXT_WINDOW) {
+      throw quotaExceeded()
+    }
+    return { history: fitted, evicted }
+  }
+
+  private notifyContextOverflow(): void {
+    const contextEvent = new Event("contextoverflow")
+    this.dispatchEvent(contextEvent)
+    this.oncontextoverflow?.call(this, contextEvent)
+
+    const quotaEvent = new Event("quotaoverflow")
+    this.dispatchEvent(quotaEvent)
+    this.onquotaoverflow?.call(this, quotaEvent)
   }
 
   private requestFor(input: LanguageModelPrompt): {
@@ -375,9 +436,13 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     }
     const history = [...this.history, ...turns.slice(0, -1)]
     validateConversation(history)
-    validateHistory([...history, final])
-    ensureContextWithinWindow([...history, final])
-    return { history, current: final.protectedContent, incoming: turns }
+    const fitted = this.fitHistory([...history, final])
+    const current = fitted.history.at(-1)!
+    return {
+      history: fitted.history.slice(0, -1),
+      current: current.protectedContent,
+      incoming: turns,
+    }
   }
 
   private commitPrompt(
@@ -390,9 +455,9 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
       ...incoming,
       { role: "assistant", protectedContent: output },
     ]
-    validateHistory(nextHistory)
-    ensureContextWithinWindow(nextHistory)
-    this.history.splice(0, this.history.length, ...nextHistory)
+    const fitted = this.fitHistory(nextHistory)
+    this.history.splice(0, this.history.length, ...fitted.history)
+    if (fitted.evicted) this.notifyContextOverflow()
   }
 
   promptStreaming(
@@ -402,6 +467,13 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     this.ensureActive()
     options.signal?.throwIfAborted()
     const { history, current, incoming } = this.requestFor(input)
+    if (this.promptActive) {
+      throw new DOMException(
+        "The compatibility session already has an active prompt",
+        "InvalidStateError"
+      )
+    }
+    this.promptActive = true
     const composed = composeAbortSignals(
       this.sessionAbort.signal,
       options.signal
@@ -416,22 +488,24 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
       iterator = this.runtime.generate(request)[Symbol.asyncIterator]()
       this.activeIterators.add(iterator)
     } catch (error) {
+      this.promptActive = false
       composed.cleanup()
       throw error
     }
 
+    const session = this
     let released = false
     let output = ""
     let cancelled = false
     const release = () => {
       if (released) return
       released = true
+      session.promptActive = false
       composed.cleanup()
       this.activeIterators.delete(iterator)
       this.activeReleases.delete(iterator)
     }
     this.activeReleases.set(iterator, release)
-    const session = this
     return new ReadableStream<string>({
       async pull(controller) {
         try {
@@ -456,9 +530,11 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
         } catch (error) {
           // The primary generation/abort error must reach the reader even when
           // an upstream generator ignores interruption forever.
-          void Promise.resolve()
-            .then(() => iterator.return?.())
-            .catch(() => undefined)
+          try {
+            void Promise.resolve(iterator.return?.()).catch(() => undefined)
+          } catch {
+            // The primary stream error remains authoritative.
+          }
           release()
           controller.error(error)
         }
@@ -495,10 +571,9 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     this.ensureActive()
     options.signal?.throwIfAborted()
     const turns = promptTurns(input)
-    const nextHistory = [...this.history, ...turns]
-    validateHistory(nextHistory)
-    ensureContextWithinWindow(nextHistory)
-    this.history.push(...turns)
+    const fitted = this.fitHistory([...this.history, ...turns])
+    this.history.splice(0, this.history.length, ...fitted.history)
+    if (fitted.evicted) this.notifyContextOverflow()
     return undefined
   }
 
@@ -508,8 +583,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   ): Promise<number> {
     this.ensureActive()
     options.signal?.throwIfAborted()
-    const { incoming } = this.requestFor(input)
-    return estimateUsage(incoming)
+    return estimateUsage(promptTurns(input))
   }
 
   async measureInputUsage(
@@ -522,12 +596,17 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   async clone(options: LanguageModelCloneOptions = {}): Promise<LanguageModel> {
     this.ensureActive()
     options.signal?.throwIfAborted()
-    return new GemmaCompatibilitySession(this.runtime, [...this.history])
+    return new GemmaCompatibilitySession(
+      this.runtime,
+      [...this.history],
+      [...this.initialHistory]
+    )
   }
 
   destroy(): undefined {
     if (this.destroyed) return undefined
     this.destroyed = true
+    this.promptActive = false
     this.sessionAbort.abort(this.sessionAbortReason)
     for (const iterator of this.activeIterators) {
       this.activeReleases.get(iterator)?.()
