@@ -11,6 +11,19 @@ import { restoreTanStackStream } from "./tanstack-stream"
 export { UnsupportedTanStackSemanticContentError }
 
 const TRUSTED_REFLECT_APPLY = Reflect.apply
+const RECOVERABLE_NEXT = Symbol.for("local-pii.tanstack.recoverable-next")
+
+function unwrapRecoverableNext(error: unknown): {
+  recoverable: boolean
+  value: unknown
+} {
+  if (error !== null && typeof error === "object") {
+    const candidate = error as Record<PropertyKey, unknown>
+    if (candidate[RECOVERABLE_NEXT] === true)
+      return { recoverable: true, value: candidate.cause }
+  }
+  return { recoverable: false, value: error }
+}
 
 export interface PiiConnectionOptions {
   /** One caller-owned session per conversation or thread. */
@@ -176,6 +189,8 @@ function lazyStream<T>(
                 return result
               },
               (error) => {
+                const control = unwrapRecoverableNext(error)
+                if (control.recoverable) throw control.value
                 detachAbortListener()
                 throw error
               }
