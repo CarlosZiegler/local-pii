@@ -385,7 +385,10 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     }
   }
 
-  private fitHistory(candidate: ProtectedBrowserTurn[]): {
+  private fitHistory(
+    candidate: ProtectedBrowserTurn[],
+    protectedStart = candidate.length
+  ): {
     history: ProtectedBrowserTurn[]
     evicted: boolean
   } {
@@ -396,16 +399,25 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
 
     const fitted = [...candidate]
     let evicted = false
-    const firstEvictable = this.initialHistory.length
+    let firstEvictable = this.initialHistory.length
+    if (
+      this.initialHistory.at(-1)?.role === "user" &&
+      fitted[firstEvictable]?.role === "assistant"
+    ) {
+      firstEvictable += 1
+    }
+    let evictableEnd = Math.min(protectedStart, fitted.length)
     while (
       estimateUsage(fitted) > CONTEXT_WINDOW &&
-      fitted.length >= firstEvictable + 2
+      firstEvictable + 2 <= evictableEnd
     ) {
       const removed = fitted.splice(firstEvictable, 2)
+      evictableEnd -= 2
       try {
         validateHistory(fitted)
       } catch {
         fitted.splice(firstEvictable, 0, ...removed)
+        evictableEnd += 2
         break
       }
       evicted = true
@@ -445,7 +457,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     }
     const history = [...this.history, ...turns.slice(0, -1)]
     validateConversation(history)
-    const fitted = this.fitHistory([...history, final])
+    const fitted = this.fitHistory([...history, final], this.history.length)
     const current = fitted.history.at(-1)!
     return {
       history: fitted.history.slice(0, -1),
@@ -464,7 +476,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
       ...incoming,
       { role: "assistant", protectedContent: output },
     ]
-    const fitted = this.fitHistory(nextHistory)
+    const fitted = this.fitHistory(nextHistory, this.history.length)
     this.history.splice(0, this.history.length, ...fitted.history)
     if (fitted.evicted) this.notifyContextOverflow()
   }
@@ -576,7 +588,10 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     this.ensurePromptAvailable()
     options.signal?.throwIfAborted()
     const turns = promptTurns(input)
-    const fitted = this.fitHistory([...this.history, ...turns])
+    const fitted = this.fitHistory(
+      [...this.history, ...turns],
+      this.history.length
+    )
     this.history.splice(0, this.history.length, ...fitted.history)
     if (fitted.evicted) this.notifyContextOverflow()
     return undefined

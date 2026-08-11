@@ -319,6 +319,74 @@ describe("Gemma browser-generation runtime", () => {
     expect(fake.loadTransformers).not.toHaveBeenCalled()
   })
 
+  it("retains the completion of a user-ended initial anchor during eviction", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers(["done"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "user", content: "Initial user" }],
+    })
+    const contextOverflow = vi.fn()
+    session.oncontextoverflow = contextOverflow
+
+    await session.append([{ role: "assistant", content: "Initial answer" }])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+
+    await expect(session.prompt("Current")).resolves.toBe("done")
+    expect(contextOverflow).toHaveBeenCalledOnce()
+    expect(fake.promptMessages.map(({ role }) => role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+    ])
+    expect(fake.promptMessages[0]?.content).toBe("Initial user")
+    expect(fake.promptMessages[1]?.content).toBe("Initial answer")
+    expect(fake.promptMessages[2]?.content).toBe(turn)
+    expect(fake.promptMessages[3]?.content).toBe(answer)
+  })
+
+  it("rejects an oversized new pair without evicting or mutating it", async () => {
+    const oversized = "x".repeat(32_768 * 4 + 1)
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const contextOverflow = vi.fn()
+    session.oncontextoverflow = contextOverflow
+
+    await expect(
+      session.append([
+        { role: "user", content: oversized },
+        { role: "assistant", content: oversized },
+      ])
+    ).rejects.toMatchObject({ name: "QuotaExceededError" })
+    expect(() => session.promptStreaming(oversized)).toThrow(
+      expect.objectContaining({ name: "QuotaExceededError" })
+    )
+    expect(session.contextUsage).toBe(0)
+    expect(contextOverflow).not.toHaveBeenCalled()
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
   it("rejects an overlapping prompt before acquisition and preserves causal history", async () => {
     const fake = fakeTransformers(["answer "])
     const factory = await createGemmaLanguageModelFactory({
