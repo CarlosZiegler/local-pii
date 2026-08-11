@@ -125,10 +125,23 @@ interface Captured {
   readonly prototype: object | null
   readonly array: boolean
   readonly descriptors: readonly DescriptorEntry[]
+  readonly lookup: ReadonlyMap<PropertyKey, PropertyDescriptor>
 }
 
 function objectLike(value: unknown): value is object {
   return value !== null && typeof value === "object"
+}
+
+function hasToJSON(prototype: object | null): boolean {
+  const seen = new WeakSet<object>()
+  let current = prototype
+  while (current !== null) {
+    if (seen.has(current)) return true
+    seen.add(current)
+    if (Object.getOwnPropertyDescriptor(current, "toJSON")) return true
+    current = Object.getPrototypeOf(current)
+  }
+  return false
 }
 
 function capture(value: unknown, path: Path): Captured {
@@ -143,12 +156,22 @@ function capture(value: unknown, path: Path): Captured {
       if (!descriptor) return fail(path, "<invalid>")
       descriptors.push([key, Object.freeze({ ...descriptor })])
     }
+    if (
+      Object.prototype.hasOwnProperty.call(raw, "toJSON") ||
+      hasToJSON(prototype)
+    )
+      return fail(path, "<unsupported>")
+    const lookup = new Map<PropertyKey, PropertyDescriptor>()
+    for (const [key, descriptor] of descriptors)
+      lookup.set(keyOf(key), descriptor)
     return Object.freeze({
       prototype,
       array: Array.isArray(value),
       descriptors: Object.freeze(descriptors),
+      lookup,
     })
-  } catch {
+  } catch (error) {
+    if (error instanceof UnsupportedTanStackSemanticContentError) throw error
     return fail(path, "<invalid>")
   }
 }
@@ -162,7 +185,7 @@ function descriptor(
   key: PropertyKey
 ): PropertyDescriptor | undefined {
   const wanted = keyOf(key)
-  return record.descriptors.find(([candidate]) => candidate === wanted)?.[1]
+  return record.lookup.get(wanted)
 }
 
 type Field =
@@ -193,8 +216,8 @@ function cloneRecord(
   path: Path
 ): object {
   try {
-    const target = record.array ? [] : Object.create(record.prototype)
-    if (record.array) Object.setPrototypeOf(target, record.prototype)
+    const target = record.array ? [] : Object.create(null)
+    if (record.array) Object.setPrototypeOf(target, Array.prototype)
     const define = (key: PropertyKey, original: PropertyDescriptor) => {
       const normalized = keyOf(key)
       const replacement = overrides.has(normalized)
@@ -375,7 +398,6 @@ type PreparedPart =
       readonly template: Captured
       readonly json: PreparedJson
     }
-  | { readonly kind: "tool-call-incomplete"; readonly template: Captured }
   | {
       readonly kind: "tool-call"
       readonly template: Captured
@@ -480,23 +502,20 @@ function preparePart(
     if (!validState) return fail([...path, "state"], "<invalid>")
     const input = optional(template, "input", [...path, "input"])
     const output = optional(template, "output", [...path, "output"])
-    const incomplete = state === "awaiting-input" || state === "input-streaming"
-    if (
-      incomplete &&
-      (output.kind === "missing" ||
-        (output.kind === "data" && output.value === undefined))
-    )
-      return { kind: "tool-call-incomplete", template }
+    const preparedInput =
+      input.kind === "data" && input.value !== undefined
+        ? captureJson(input.value, [...path, "input"])
+        : undefined
+    const preparedOutput =
+      output.kind === "data" && output.value !== undefined
+        ? captureJson(output.value, [...path, "output"])
+        : undefined
     return {
       kind,
       template,
       args: strictJson(argumentsValue, [...path, "arguments"]),
-      ...(input.kind === "data"
-        ? { input: captureJson(input.value, [...path, "input"]) }
-        : {}),
-      ...(output.kind === "data"
-        ? { output: captureJson(output.value, [...path, "output"]) }
-        : {}),
+      ...(preparedInput !== undefined ? { input: preparedInput } : {}),
+      ...(preparedOutput !== undefined ? { output: preparedOutput } : {}),
     }
   }
   const content = required(template, "content", [...path, "content"])
@@ -588,7 +607,7 @@ function shape(record: Captured): { ui: boolean; model: boolean } {
   const id = descriptor(record, "id")
   const parts = descriptor(record, "parts")
   const content = descriptor(record, "content")
-  const ui = !!id && "value" in id && !!parts && "value" in parts
+  const ui = !!id && !!parts
   const model =
     !!content &&
     (("value" in content &&
@@ -601,20 +620,23 @@ function shape(record: Captured): { ui: boolean; model: boolean } {
 
 function classify(records: readonly Captured[]): Family {
   let candidate: Family | undefined
-  let ambiguous = false
+  let ambiguousIndex: number | undefined
+  // A record that matches both structural families wins neither: reject it
+  // after scanning so a later unambiguous record cannot reinterpret it.
   records.forEach((record, index) => {
     const current = shape(record)
     const family =
       current.ui === current.model ? undefined : current.ui ? "ui" : "model"
     if (!family) {
-      ambiguous = true
+      ambiguousIndex ??= index
       return
     }
     if (candidate && candidate !== family) return fail([index], "<unsupported>")
     candidate = family
   })
+  if (ambiguousIndex !== undefined) return fail([ambiguousIndex], "<ambiguous>")
   if (candidate) return candidate
-  return fail([], ambiguous ? "<ambiguous>" : "<unsupported>")
+  return fail([], "<unsupported>")
 }
 
 function prepareMessage(
@@ -667,6 +689,8 @@ function prepareMessage(
 function captureMessages(messages: TanStackMessages): PreparedMessages {
   const root = captureArray(messages, [])
   const records = root.values.map((value, index) => capture(value, [index]))
+  if (records.length === 0)
+    return Object.freeze({ template: root.record, items: Object.freeze([]) })
   const family = classify(records)
   return Object.freeze({
     template: root.record,
@@ -692,9 +716,8 @@ async function protectPreparedJson(
   if (typeof value === "string") return protectText(session, value)
   if (Array.isArray(value)) {
     const output: PreparedJson[] = []
-    for (const item of value)
-      output.push(await protectPreparedJson(session, item))
-    Object.setPrototypeOf(output, null)
+    for (let index = 0; index < value.length; index += 1)
+      output.push(await protectPreparedJson(session, value[index]!))
     return Object.freeze(output) as JsonArray
   }
   const output = Object.create(null) as JsonObject
@@ -741,8 +764,7 @@ async function renderPart(
   plan: PreparedPart,
   path: Path
 ): Promise<object> {
-  if (plan.kind === "opaque" || plan.kind === "tool-call-incomplete")
-    return cloneRecord(plan.template, new Map(), path)
+  if (plan.kind === "opaque") return cloneRecord(plan.template, new Map(), path)
   if (plan.kind === "text")
     return cloneRecord(
       plan.template,
