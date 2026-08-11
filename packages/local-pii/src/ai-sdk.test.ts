@@ -952,6 +952,166 @@ describe("withPii (AI SDK middleware, tool loop)", () => {
     expect(recovered).toEqual(["[EMAIL_2]"])
   })
 
+  it("serializes protection across separately constructed wrappers sharing a session", async () => {
+    const mapping: Record<string, string> = {}
+    const calls: string[] = []
+    let failA = false
+    const sharedFailure = new Error("shared protection failed")
+    let releaseA!: () => void
+    let releaseB!: () => void
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    const gateB = new Promise<void>((resolve) => {
+      releaseB = resolve
+    })
+    const session: PiiSession = {
+      mapping,
+      async anonymize(text) {
+        calls.push(text)
+        if (text === "A-fail" && failA) throw sharedFailure
+        if (text === "A") await gateA
+        if (text === "B") await gateB
+        const token = `[EMAIL_${Object.keys(mapping).length + 1}]`
+        mapping[token] = text
+        return {
+          redactedText: token,
+          entities: [],
+          mapping: { [token]: text },
+        }
+      },
+      async anonymizeJson(value) {
+        return value
+      },
+      rehydrate(value) {
+        return mapping[value] ?? value
+      },
+      rehydrateJson(value) {
+        return value
+      },
+      clear() {
+        for (const key of Object.keys(mapping)) delete mapping[key]
+      },
+    }
+    const seen: string[] = []
+    const model = testModel({
+      async doGenerate(options): Promise<LanguageModelV4GenerateResult> {
+        const system = at(options.prompt, 0)
+        if (system.role !== "system") throw new Error("expected system")
+        seen.push(system.content)
+        return resultEnvelope([])
+      },
+    })
+    const firstWrapper = withPii(model, { session })
+    const secondWrapper = withPii(model, { session })
+    const first = firstWrapper.doGenerate({
+      prompt: [{ role: "system", content: "A" }],
+    })
+    await Promise.resolve()
+    const second = secondWrapper.doGenerate({
+      prompt: [{ role: "system", content: "B" }],
+    })
+    await Promise.resolve()
+    expect(calls[0]).toBe("A")
+    releaseB()
+    releaseA()
+    await Promise.all([first, second])
+    expect(Object.entries(mapping)).toEqual([
+      ["[EMAIL_1]", "A"],
+      ["[EMAIL_2]", "B"],
+    ])
+    expect(seen).toEqual(["[EMAIL_1]", "[EMAIL_2]"])
+
+    failA = true
+    await expect(
+      firstWrapper.doGenerate({
+        prompt: [{ role: "system", content: "A-fail" }],
+      })
+    ).rejects.toBe(sharedFailure)
+    failA = false
+    await secondWrapper.doGenerate({
+      prompt: [{ role: "system", content: "B-recovered" }],
+    })
+    expect(seen).toEqual(["[EMAIL_1]", "[EMAIL_2]", "[EMAIL_3]"])
+  })
+
+  it("does not block distinct privacy sessions during protection", async () => {
+    let releaseA!: () => void
+    const gateA = new Promise<void>((resolve) => {
+      releaseA = resolve
+    })
+    let sessionAStarted!: () => void
+    const sessionAReady = new Promise<void>((resolve) => {
+      sessionAStarted = resolve
+    })
+    const mappingA: Record<string, string> = {}
+    const sessionA: PiiSession = {
+      mapping: mappingA,
+      async anonymize(text) {
+        sessionAStarted()
+        await gateA
+        mappingA["[A]"] = text
+        return { redactedText: "[A]", entities: [], mapping: { "[A]": text } }
+      },
+      async anonymizeJson(value) {
+        return value
+      },
+      rehydrate(value) {
+        return mappingA[value] ?? value
+      },
+      rehydrateJson(value) {
+        return value
+      },
+      clear() {
+        for (const key of Object.keys(mappingA)) delete mappingA[key]
+      },
+    }
+    let sessionBCalls = 0
+    const mappingB: Record<string, string> = {}
+    const sessionB: PiiSession = {
+      mapping: mappingB,
+      async anonymize(text) {
+        sessionBCalls++
+        mappingB["[B]"] = text
+        return { redactedText: "[B]", entities: [], mapping: { "[B]": text } }
+      },
+      async anonymizeJson(value) {
+        return value
+      },
+      rehydrate(value) {
+        return mappingB[value] ?? value
+      },
+      rehydrateJson(value) {
+        return value
+      },
+      clear() {
+        for (const key of Object.keys(mappingB)) delete mappingB[key]
+      },
+    }
+    const seen: string[] = []
+    const model = testModel({
+      async doGenerate(options): Promise<LanguageModelV4GenerateResult> {
+        const system = at(options.prompt, 0)
+        if (system.role !== "system") throw new Error("expected system")
+        seen.push(system.content)
+        return resultEnvelope([])
+      },
+    })
+    const first = withPii(model, { session: sessionA }).doGenerate({
+      prompt: [{ role: "system", content: "A" }],
+    })
+    await sessionAReady
+    const second = withPii(model, { session: sessionB }).doGenerate({
+      prompt: [{ role: "system", content: "B" }],
+    })
+    await Promise.resolve()
+    expect(sessionBCalls).toBe(1)
+    releaseA()
+    await first
+    await second
+    expect(seen).toEqual(["[B]", "[A]"])
+  })
+
   it("flushes safe tails on bare close without sharing concurrent channels", async () => {
     const session = createAnonymizer({
       detectors: "none",

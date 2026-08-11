@@ -35,6 +35,8 @@ function throwIfAborted(signal?: AbortSignal): void {
   if (signal?.aborted) throw abortReason(signal)
 }
 
+const protectionQueues = new WeakMap<PiiSession, Promise<void>>()
+
 /**
  * Vercel AI SDK middleware that protects only LanguageModelV4 semantic prompt
  * fields and restores generated text/tool values on the way back.
@@ -43,16 +45,17 @@ export function piiMiddleware(
   opts: PiiMiddlewareOptions = {}
 ): LanguageModelMiddleware {
   const session = resolveSession(opts)
-  let protectionQueue = Promise.resolve()
 
   return {
     async transformParams({ params }) {
       throwIfAborted(params.abortSignal)
-      const previousProtection = protectionQueue
+      const previousProtection =
+        protectionQueues.get(session) ?? Promise.resolve()
       let releaseProtection!: () => void
-      protectionQueue = new Promise<void>((resolve) => {
+      const currentProtection = new Promise<void>((resolve) => {
         releaseProtection = resolve
       })
+      protectionQueues.set(session, currentProtection)
       try {
         await previousProtection
         throwIfAborted(params.abortSignal)
@@ -65,6 +68,8 @@ export function piiMiddleware(
           : cloneAiSdkValue(params, { prompt })
       } finally {
         releaseProtection()
+        if (protectionQueues.get(session) === currentProtection)
+          protectionQueues.delete(session)
       }
     },
 
