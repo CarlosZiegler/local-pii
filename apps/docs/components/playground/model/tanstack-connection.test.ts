@@ -1,11 +1,12 @@
+import { EventType, type ModelMessage } from "@tanstack/ai/client"
+import { createAnonymizer } from "local-pii"
+import { piiConnection } from "local-pii/tanstack"
+import { describe, expect, it } from "vitest"
+import { createFakeBrowserRuntime } from "./fake-runtime"
 import {
-  EventType,
-  type ModelMessage,
-  type StreamChunk,
-} from "@tanstack/ai/client"
-import { describe, expect, it, vi } from "vitest"
-import type { BrowserModelRuntime } from "./types"
-import { createPromptConnection } from "./tanstack-connection"
+  createBrowserConnection,
+  UnsupportedPromptMessageError,
+} from "./tanstack-connection"
 
 async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
   const values: T[] = []
@@ -13,64 +14,30 @@ async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
   return values
 }
 
-function fakeRuntime(chunks = ["Hello ", "there"]): {
-  runtime: BrowserModelRuntime
-  create: ReturnType<typeof vi.fn>
-  promptStreaming: ReturnType<typeof vi.fn>
-  destroy: ReturnType<typeof vi.fn>
-} {
-  const destroy = vi.fn()
-  const promptStreaming = vi.fn(
-    (_prompt: LanguageModelPrompt, _options?: LanguageModelPromptOptions) =>
-      new ReadableStream<string>({
-        start(controller) {
-          for (const chunk of chunks) controller.enqueue(chunk)
-          controller.close()
-        },
-      })
-  )
-  const create = vi.fn(
-    async () => ({ destroy, promptStreaming }) as unknown as LanguageModel
-  )
-  const availability = vi.fn(async () => "available" as const)
-  return {
-    create,
-    destroy,
-    promptStreaming,
-    runtime: { availability, kind: "gemini-nano", create },
-  }
-}
-
-describe("createPromptConnection", () => {
-  it("converts history and emits a complete AG-UI text lifecycle", async () => {
-    const fake = fakeRuntime()
-    const messages: Array<ModelMessage> = [
+describe("createBrowserConnection", () => {
+  it("mints one protected request and emits a complete AG-UI lifecycle", async () => {
+    const runtime = createFakeBrowserRuntime({ chunks: ["Hello ", "there"] })
+    const messages: ModelMessage[] = [
       { role: "user", content: "First question" },
       { role: "assistant", content: "First answer" },
       { role: "user", content: "Latest question" },
     ]
 
     const chunks = await collect(
-      createPromptConnection(fake.runtime).connect(
-        messages,
-        undefined,
-        undefined,
-        { threadId: "thread-1", runId: "run-1" }
-      )
-    )
-
-    expect(fake.create).toHaveBeenCalledWith(
-      expect.objectContaining({
-        initialPrompts: [
-          { role: "user", content: "First question" },
-          { role: "assistant", content: "First answer" },
-        ],
+      createBrowserConnection(runtime).connect(messages, undefined, undefined, {
+        threadId: "thread-1",
+        runId: "run-1",
       })
     )
-    expect(fake.promptStreaming).toHaveBeenCalledWith(
-      "Latest question",
-      expect.objectContaining({ signal: undefined })
-    )
+
+    expect(runtime.requests).toHaveLength(1)
+    expect(runtime.requests[0]).toMatchObject({
+      protectedHistory: [
+        { role: "user", protectedContent: "First question" },
+        { role: "assistant", protectedContent: "First answer" },
+      ],
+      protectedContent: "Latest question",
+    })
     expect(chunks.map((chunk) => chunk.type)).toEqual([
       EventType.RUN_STARTED,
       EventType.TEXT_MESSAGE_START,
@@ -90,59 +57,13 @@ describe("createPromptConnection", () => {
       threadId: "thread-1",
       runId: "run-1",
     })
-    expect(fake.destroy).toHaveBeenCalledOnce()
+    expect(runtime.acquired).toBe(1)
+    expect(runtime.released).toBe(1)
   })
 
-  it("forwards abort and destroys the browser session", async () => {
-    const controller = new AbortController()
-    const destroy = vi.fn()
-    const promptStreaming = vi.fn(
-      (_prompt: LanguageModelPrompt, options?: LanguageModelPromptOptions) =>
-        new ReadableStream<string>({
-          start(stream) {
-            options?.signal?.addEventListener("abort", () => {
-              stream.error(options.signal?.reason)
-            })
-          },
-        })
-    )
-    const create = vi.fn(
-      async () => ({ destroy, promptStreaming }) as unknown as LanguageModel
-    )
-    const runtime: BrowserModelRuntime = {
-      availability: vi.fn(async () => "available" as const),
-      kind: "gemini-nano",
-      create,
-    }
-    const iterator = createPromptConnection(runtime)
-      .connect(
-        [{ role: "user", content: "Wait" }],
-        undefined,
-        controller.signal
-      )
-      [Symbol.asyncIterator]()
-
-    expect((await iterator.next()).value).toMatchObject({
-      type: EventType.RUN_STARTED,
-    })
-    expect((await iterator.next()).value).toMatchObject({
-      type: EventType.TEXT_MESSAGE_START,
-    })
-    const pending = iterator.next()
-    controller.abort(new Error("stop"))
-    expect(await pending).toMatchObject({
-      value: { type: EventType.RUN_ERROR, message: "stop" },
-    })
-    expect(await iterator.next()).toMatchObject({ done: true })
-    expect(create).toHaveBeenCalledWith(
-      expect.objectContaining({ signal: controller.signal })
-    )
-    expect(destroy).toHaveBeenCalledOnce()
-  })
-
-  it("rejects unsupported or missing final user text before model creation", async () => {
-    const fake = fakeRuntime()
-    const connection = createPromptConnection(fake.runtime)
+  it("rejects unsupported or missing final user text before acquisition", async () => {
+    const runtime = createFakeBrowserRuntime()
+    const connection = createBrowserConnection(runtime)
 
     await expect(
       collect(
@@ -150,7 +71,30 @@ describe("createPromptConnection", () => {
           { role: "assistant", content: "No final user prompt" },
         ])
       )
-    ).rejects.toThrow("final message")
-    expect(fake.create).not.toHaveBeenCalled()
+    ).rejects.toThrow(UnsupportedPromptMessageError)
+    expect(runtime.acquired).toBe(0)
+  })
+
+  it("protects TanStack messages before minting the browser request", async () => {
+    const runtime = createFakeBrowserRuntime({ chunks: ["ok"] })
+    const session = createAnonymizer({
+      detectors: "none",
+      dictionary: [{ type: "EMAIL", value: "ana@example.com" }],
+    }).createSession()
+    const messages: ModelMessage[] = [
+      { role: "user", content: "Email ana@example.com" },
+      { role: "user", content: "Current" },
+    ]
+    const source = piiConnection(createBrowserConnection(runtime), { session })
+
+    await collect(source.connect(messages))
+
+    expect(runtime.requests[0]?.protectedHistory[0]?.protectedContent).not.toBe(
+      "Email ana@example.com"
+    )
+    expect(messages[0]).toEqual({
+      role: "user",
+      content: "Email ana@example.com",
+    })
   })
 })

@@ -1,6 +1,17 @@
 import type { LanguageModelFactory } from "./prompt-runtime"
+import { managedGeneration } from "./browser-generation-runtime"
+import {
+  assertProtectedBrowserRequest,
+  createProtectedBrowserRequest,
+} from "./protected-request"
+import type {
+  BrowserGenerationRuntime,
+  ProtectedBrowserTurn,
+  RuntimeDisclosure,
+} from "./types"
 
 const MODEL_ID = "onnx-community/gemma-3-270m-it-ONNX"
+const MODEL_REVISION = "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
 
 interface InterruptableCriteria {
   interrupt(): void
@@ -14,7 +25,7 @@ interface TextGenerator {
     options: {
       add_special_tokens: false
       do_sample: false
-      max_new_tokens: number
+      max_new_tokens: 512
       return_full_text: false
       stopping_criteria: InterruptableCriteria[]
       streamer: TextStreamerInstance
@@ -24,7 +35,7 @@ interface TextGenerator {
     apply_chat_template(
       messages: Array<{ role: string; content: string }>,
       options: {
-        add_generation_prompt: boolean
+        add_generation_prompt: true
         tokenize: false
       }
     ): string
@@ -32,7 +43,7 @@ interface TextGenerator {
 }
 
 interface TransformersRuntime {
-  env: { experimental_useCrossOriginStorage?: boolean }
+  env?: { experimental_useCrossOriginStorage?: boolean }
   InterruptableStoppingCriteria: new () => InterruptableCriteria
   pipeline(
     task: "text-generation",
@@ -40,6 +51,7 @@ interface TransformersRuntime {
     options: {
       device: "webgpu"
       dtype: "q4f16"
+      revision: string
       progress_callback(event: { progress?: number; status?: string }): void
     }
   ): Promise<TextGenerator>
@@ -54,244 +66,364 @@ interface TransformersRuntime {
 }
 
 export interface GemmaRuntimeDependencies {
+  /** Injected by tests; production uses the lazy Transformers.js import. */
   loadTransformers?: () => Promise<unknown>
+  onProgress?: (progress: number) => void
 }
 
-function textContent(content: LanguageModelMessageContent[] | string): string {
-  if (typeof content === "string") return content
-  return content
-    .map((part) => {
-      if (part.type !== "text" || typeof part.value !== "string") {
-        throw new DOMException(
-          "The Gemma fallback supports text content only",
-          "NotSupportedError"
+export const GEMMA_RUNTIME_DISCLOSURE: RuntimeDisclosure = {
+  label: "Gemma 3 270M IT",
+  model: MODEL_ID,
+  source: "Transformers.js browser runtime",
+  artifacts: {
+    kind: "explicit-download",
+    approximateBytes: 293_284_073,
+    origins: ["https://huggingface.co", "https://*.cdn.hf.co"],
+  },
+}
+
+function createTextIterator(
+  generator: TextGenerator,
+  transformers: TransformersRuntime,
+  messages: Array<{ role: string; content: string }>,
+  signal?: AbortSignal
+): AsyncIterator<string> {
+  const criteria = new transformers.InterruptableStoppingCriteria()
+  let finished = false
+  let returned = false
+  let failed = false
+  let failure: unknown
+  const queue: string[] = []
+  let waiter:
+    | {
+        resolve: (result: IteratorResult<string>) => void
+        reject: (reason: unknown) => void
+      }
+    | undefined
+
+  const finish = () => {
+    finished = true
+    if (failed) waiter?.reject(failure)
+    else waiter?.resolve({ done: true, value: undefined })
+    waiter = undefined
+  }
+
+  const push = (value: string) => {
+    if (returned || signal?.aborted) return
+    if (waiter) {
+      waiter.resolve({ done: false, value })
+      waiter = undefined
+    } else {
+      queue.push(value)
+    }
+  }
+
+  const formatted = generator.tokenizer.apply_chat_template(messages, {
+    add_generation_prompt: true,
+    tokenize: false,
+  })
+  const streamer = new transformers.TextStreamer(generator.tokenizer, {
+    callback_function: push,
+    skip_prompt: true,
+    skip_special_tokens: true,
+  })
+  const generation = generator(formatted, {
+    add_special_tokens: false,
+    do_sample: false,
+    max_new_tokens: 512,
+    return_full_text: false,
+    stopping_criteria: [criteria],
+    streamer,
+  }).catch((error) => {
+    if (!returned) {
+      failed = true
+      failure = error
+    }
+  })
+  void generation.then(finish)
+
+  return {
+    async next() {
+      if (queue.length > 0) return { done: false, value: queue.shift()! }
+      if (failed) throw failure
+      if (finished || returned) return { done: true, value: undefined }
+      return new Promise<IteratorResult<string>>((resolve, reject) => {
+        waiter = { resolve, reject }
+      })
+    },
+    async return() {
+      returned = true
+      criteria.interrupt()
+      waiter?.resolve({ done: true, value: undefined })
+      waiter = undefined
+      await generation
+      return { done: true, value: undefined }
+    },
+  }
+}
+
+function protectedMessages(
+  history: readonly ProtectedBrowserTurn[],
+  current: string
+): Array<{ role: string; content: string }> {
+  return [
+    ...history.map(({ role, protectedContent }) => ({
+      role,
+      content: protectedContent,
+    })),
+    { role: "user", content: current },
+  ]
+}
+
+function validateConversation(history: readonly ProtectedBrowserTurn[]): void {
+  let expected: "system" | "user" | "assistant" =
+    history[0]?.role === "system" ? "system" : "user"
+  let sawSystem = false
+  for (const turn of history) {
+    if (turn.role === "system") {
+      if (sawSystem || turn !== history[0]) {
+        throw new TypeError(
+          "Gemma generation accepts at most one leading system turn"
         )
       }
-      return part.value
-    })
-    .join("")
-}
-
-function promptMessages(
-  prompt: LanguageModelPrompt
-): Array<{ role: string; content: string }> {
-  if (typeof prompt === "string") return [{ role: "user", content: prompt }]
-  return prompt.map((message) => ({
-    role: message.role,
-    content: textContent(message.content),
-  }))
-}
-
-function progressValue(event: { progress?: number; status?: string }) {
-  if (event.status === "ready") return 1
-  if (event.status === "progress_total" && event.progress !== undefined) {
-    return event.progress / 100
-  }
-  return undefined
-}
-
-class GemmaLanguageModelSession extends EventTarget {
-  readonly contextWindow = 4_096
-  readonly inputQuota = this.contextWindow
-  readonly temperature = 0
-  readonly topK = 1
-  contextUsage = 0
-  inputUsage = 0
-  oncontextoverflow: ((this: LanguageModel, event: Event) => unknown) | null =
-    null
-  onquotaoverflow: ((this: LanguageModel, event: Event) => unknown) | null =
-    null
-
-  private active = new Set<InterruptableCriteria>()
-  private destroyed = false
-
-  constructor(
-    private readonly generator: TextGenerator,
-    private readonly runtime: TransformersRuntime,
-    private readonly history: Array<{ role: string; content: string }>
-  ) {
-    super()
-  }
-
-  promptStreaming(
-    input: LanguageModelPrompt,
-    options: LanguageModelPromptOptions = {}
-  ): ReadableStream<string> {
-    const incoming = promptMessages(input)
-    const messages = [...this.history, ...incoming]
-    const session = this
-    let criteria: InterruptableCriteria | undefined
-    let cancelled = false
-
-    return new ReadableStream<string>({
-      async start(controller) {
-        if (session.destroyed) {
-          controller.error(
-            new DOMException(
-              "The model session was destroyed",
-              "InvalidStateError"
-            )
-          )
-          return
-        }
-        if (options.signal?.aborted) {
-          controller.error(options.signal.reason)
-          return
-        }
-
-        criteria = new session.runtime.InterruptableStoppingCriteria()
-        session.active.add(criteria)
-        let response = ""
-        const stop = () => criteria?.interrupt()
-        options.signal?.addEventListener("abort", stop, { once: true })
-
-        try {
-          const streamer = new session.runtime.TextStreamer(
-            session.generator.tokenizer,
-            {
-              callback_function(value) {
-                if (cancelled || options.signal?.aborted) return
-                response += value
-                controller.enqueue(value)
-              },
-              skip_prompt: true,
-              skip_special_tokens: true,
-            }
-          )
-          const formatted = session.generator.tokenizer.apply_chat_template(
-            messages,
-            { add_generation_prompt: true, tokenize: false }
-          )
-          await session.generator(formatted, {
-            add_special_tokens: false,
-            do_sample: false,
-            max_new_tokens: 512,
-            return_full_text: false,
-            stopping_criteria: [criteria],
-            streamer,
-          })
-
-          if (cancelled) return
-          if (options.signal?.aborted) {
-            controller.error(options.signal.reason)
-            return
-          }
-          session.history.push(...incoming, {
-            role: "assistant",
-            content: response,
-          })
-          controller.close()
-        } catch (error) {
-          if (!cancelled) controller.error(error)
-        } finally {
-          options.signal?.removeEventListener("abort", stop)
-          if (criteria) session.active.delete(criteria)
-        }
-      },
-      cancel() {
-        cancelled = true
-        criteria?.interrupt()
-      },
-    })
-  }
-
-  async prompt(
-    input: LanguageModelPrompt,
-    options?: LanguageModelPromptOptions
-  ): Promise<string> {
-    let response = ""
-    const reader = this.promptStreaming(input, options).getReader()
-    while (true) {
-      const next = await reader.read()
-      if (next.done) break
-      response += next.value
+      sawSystem = true
+      expected = "user"
+      continue
     }
-    return response
+    if (turn.role !== expected) {
+      throw new TypeError(
+        "Gemma generation requires alternating user and assistant turns"
+      )
+    }
+    expected = turn.role === "user" ? "assistant" : "user"
   }
-
-  async append(
-    input: LanguageModelPrompt,
-    options: LanguageModelAppendOptions = {}
-  ): Promise<undefined> {
-    options.signal?.throwIfAborted()
-    this.history.push(...promptMessages(input))
-    return undefined
-  }
-
-  async clone(options: LanguageModelCloneOptions = {}): Promise<LanguageModel> {
-    options.signal?.throwIfAborted()
-    return new GemmaLanguageModelSession(this.generator, this.runtime, [
-      ...this.history,
-    ]) as unknown as LanguageModel
-  }
-
-  async measureContextUsage(): Promise<number> {
-    return this.contextUsage
-  }
-
-  async measureInputUsage(): Promise<number> {
-    return this.inputUsage
-  }
-
-  destroy(): undefined {
-    this.destroyed = true
-    for (const criteria of this.active) criteria.interrupt()
-    this.active.clear()
-    this.history.length = 0
-    return undefined
+  // The current protected content is always a user turn.
+  if (expected !== "user") {
+    throw new TypeError(
+      "Gemma generation requires the current turn after an assistant turn"
+    )
   }
 }
 
-export async function createGemmaLanguageModelFactory(
+/**
+ * Explicitly activated Gemma browser runtime. Transformers.js is not loaded
+ * by construction; the first generation performs the lazy import and caches
+ * one reusable q4f16 WebGPU generator for subsequent runs.
+ */
+export function createGemmaBrowserRuntime(
   dependencies: GemmaRuntimeDependencies = {}
-): Promise<LanguageModelFactory> {
+): BrowserGenerationRuntime {
   const loadTransformers =
     dependencies.loadTransformers ??
     (async () =>
       (await import("@huggingface/transformers")) as unknown as TransformersRuntime)
-  const runtime = (await loadTransformers()) as TransformersRuntime
-  // Keep cache inspection and artifact loading on the same observable backend.
-  runtime.env.experimental_useCrossOriginStorage = false
-  let generatorPromise: Promise<TextGenerator> | undefined
+  let generatorPromise:
+    | Promise<{
+        generator: TextGenerator
+        transformers: TransformersRuntime
+      }>
+    | undefined
+  let disposed = false
+  const active = new Set<Promise<void>>()
 
-  const loadGenerator = (monitor?: CreateMonitor) => {
-    generatorPromise ??= runtime.pipeline("text-generation", MODEL_ID, {
-      device: "webgpu",
-      dtype: "q4f16",
-      progress_callback(event) {
-        const loaded = progressValue(event)
-        if (loaded === undefined) return
-        monitor?.dispatchEvent(
-          Object.assign(new Event("downloadprogress"), {
-            lengthComputable: true,
-            loaded,
-            total: 1,
-          })
+  const loadGenerator = () => {
+    generatorPromise ??= loadTransformers()
+      .then(async (loaded) => {
+        const transformers = loaded as TransformersRuntime
+        if (transformers.env) {
+          transformers.env.experimental_useCrossOriginStorage = false
+        }
+        const generator = await transformers.pipeline(
+          "text-generation",
+          MODEL_ID,
+          {
+            device: "webgpu",
+            dtype: "q4f16",
+            revision: MODEL_REVISION,
+            progress_callback(event) {
+              if (event.status === "ready") dependencies.onProgress?.(1)
+              else if (
+                event.status === "progress_total" &&
+                event.progress !== undefined
+              ) {
+                dependencies.onProgress?.(event.progress / 100)
+              }
+            },
+          }
         )
-      },
-    })
+        return { generator, transformers }
+      })
+      .catch((error) => {
+        generatorPromise = undefined
+        throw error
+      })
     return generatorPromise
   }
 
+  return {
+    id: "gemma-3-270m",
+    disclosure: GEMMA_RUNTIME_DISCLOSURE,
+    generate(input) {
+      if (disposed) throw new Error("The Gemma browser runtime is disposed")
+      const request = input
+      // Runtime callers must cross the same private marker as every other
+      // browser adapter. This is intentionally a runtime assertion, not a
+      // cast: an unprotected object must fail before model loading.
+      assertProtectedBrowserRequest(request)
+      validateConversation(request.protectedHistory)
+
+      let settle!: () => void
+      const settled = new Promise<void>((resolve) => {
+        settle = resolve
+      })
+      let started = false
+      const generation = managedGeneration(
+        async () => {
+          request.signal?.throwIfAborted()
+          const { generator, transformers } = await loadGenerator()
+          request.signal?.throwIfAborted()
+          return createTextIterator(
+            generator,
+            transformers,
+            protectedMessages(
+              request.protectedHistory,
+              request.protectedContent
+            ),
+            request.signal
+          )
+        },
+        request.signal,
+        () => {
+          settle()
+          active.delete(settled)
+        }
+      )
+      return {
+        [Symbol.asyncIterator]() {
+          const iterator = generation[Symbol.asyncIterator]()
+          return {
+            [Symbol.asyncIterator]() {
+              return this
+            },
+            next(...args: [] | [undefined]) {
+              if (!started) {
+                started = true
+                active.add(settled)
+              }
+              return iterator.next(...args)
+            },
+            return(reason?: unknown) {
+              return (
+                iterator.return?.(reason) ??
+                Promise.resolve({ done: true, value: undefined })
+              )
+            },
+            throw(error?: unknown) {
+              return (
+                iterator.throw?.(error) ??
+                Promise.reject(
+                  error ?? new Error("The generation cannot throw")
+                )
+              )
+            },
+          }
+        },
+      }
+    },
+    async dispose() {
+      disposed = true
+      await Promise.all([...active])
+      // The pipeline object is reusable until runtime disposal. Dropping the
+      // promise releases our reference while allowing Transformers.js to own
+      // its cache according to its documented storage policy.
+      generatorPromise = undefined
+    },
+  }
+}
+
+/**
+ * Compatibility factory for the pre-seam controller. It delegates generation
+ * to the same runtime and never mutates the Prompt API global. New code should
+ * use createGemmaBrowserRuntime directly.
+ */
+export async function createGemmaLanguageModelFactory(
+  dependencies: GemmaRuntimeDependencies = {}
+): Promise<LanguageModelFactory> {
+  const runtime = createGemmaBrowserRuntime(dependencies)
   return {
     async availability() {
       return "available"
     },
     async create(options = {}) {
       options.signal?.throwIfAborted()
-      const monitor = new EventTarget() as CreateMonitor
-      options.monitor?.(monitor)
-      const generator = await loadGenerator(monitor)
-      options.signal?.throwIfAborted()
       const history = (options.initialPrompts ?? []).map((message) => ({
-        role: message.role,
-        content: textContent(message.content),
-      }))
-      return new GemmaLanguageModelSession(
-        generator,
-        runtime,
-        history
-      ) as unknown as LanguageModel
+        role: message.role === "assistant" ? "assistant" : "user",
+        protectedContent:
+          typeof message.content === "string"
+            ? message.content
+            : message.content
+                .map((part) => {
+                  if (part.type !== "text")
+                    throw new DOMException(
+                      "The Gemma fallback supports text content only",
+                      "NotSupportedError"
+                    )
+                  return part.value
+                })
+                .join(""),
+      })) as ProtectedBrowserTurn[]
+      const session = {
+        async promptStreaming(
+          input: LanguageModelPrompt,
+          promptOptions: LanguageModelPromptOptions = {}
+        ) {
+          const content =
+            typeof input === "string"
+              ? input
+              : (input
+                  .map((message) => ({
+                    role: message.role === "assistant" ? "assistant" : "user",
+                    content:
+                      typeof message.content === "string"
+                        ? message.content
+                        : message.content
+                            .map((part) => {
+                              if (part.type !== "text")
+                                throw new DOMException(
+                                  "The Gemma fallback supports text content only",
+                                  "NotSupportedError"
+                                )
+                              return part.value
+                            })
+                            .join(""),
+                  }))
+                  .at(-1)?.content ?? "")
+          const request = createProtectedBrowserRequest({
+            protectedHistory: history,
+            protectedContent: content,
+            signal: promptOptions.signal,
+          })
+          const iterator = runtime.generate(request)[Symbol.asyncIterator]()
+          return new ReadableStream<string>({
+            async pull(controller) {
+              try {
+                const next = await iterator.next()
+                if (next.done) controller.close()
+                else controller.enqueue(next.value)
+              } catch (error) {
+                controller.error(error)
+              }
+            },
+            async cancel(reason) {
+              await iterator.return?.(reason)
+            },
+          })
+        },
+        destroy() {
+          void runtime.dispose()
+        },
+      }
+      return session as unknown as LanguageModel
     },
   }
 }

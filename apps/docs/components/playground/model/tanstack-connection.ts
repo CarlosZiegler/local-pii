@@ -5,7 +5,8 @@ import {
   type UIMessage,
 } from "@tanstack/ai/client"
 import type { ConnectConnectionAdapter } from "@tanstack/ai-client"
-import type { BrowserModelRuntime } from "./types"
+import { createProtectedBrowserRequest } from "./protected-request"
+import type { BrowserGenerationRuntime, ProtectedBrowserTurn } from "./types"
 
 export class UnsupportedPromptMessageError extends Error {
   override name = "UnsupportedPromptMessageError"
@@ -26,7 +27,7 @@ function messageText(message: UIMessage | ModelMessage): string {
 
   if (message.role === "tool") {
     throw new UnsupportedPromptMessageError(
-      "The local playground does not send tool messages to the Prompt API"
+      "The local playground does not send tool messages to the browser runtime"
     )
   }
   if (typeof message.content === "string") return message.content
@@ -42,16 +43,6 @@ function messageText(message: UIMessage | ModelMessage): string {
     .join("")
 }
 
-function promptMessage(
-  message: UIMessage | ModelMessage
-): LanguageModelMessage | LanguageModelSystemMessage {
-  return {
-    role: message.role as
-      LanguageModelMessageRole | LanguageModelSystemMessageRole,
-    content: messageText(message),
-  } as LanguageModelMessage | LanguageModelSystemMessage
-}
-
 function fallbackId(prefix: string): string {
   const suffix =
     globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`
@@ -62,9 +53,23 @@ function errorMessage(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause)
 }
 
-/** A direct, in-browser Prompt API connection. No fetch or server transport. */
-export function createPromptConnection(
-  runtime: BrowserModelRuntime
+function protectedHistory(
+  messages: readonly (UIMessage | ModelMessage)[]
+): ProtectedBrowserTurn[] {
+  return messages.map((message) => ({
+    role:
+      message.role === "system"
+        ? "system"
+        : message.role === "assistant"
+          ? "assistant"
+          : "user",
+    protectedContent: messageText(message),
+  }))
+}
+
+/** A direct browser-generation connection. No fetch or server transport. */
+export function createBrowserConnection(
+  runtime: BrowserGenerationRuntime
 ): ConnectConnectionAdapter {
   return {
     connect(messages, _data, signal, runContext) {
@@ -84,14 +89,15 @@ export function createPromptConnection(
             "The final message must be a non-empty user prompt"
           )
         }
-
-        const initialPrompts = messages
-          .slice(0, -1)
-          .map(promptMessage) as LanguageModelCreateOptions["initialPrompts"]
         signal?.throwIfAborted()
 
-        let model: LanguageModel | undefined
-        let reader: ReadableStreamDefaultReader<string> | undefined
+        const request = createProtectedBrowserRequest({
+          protectedHistory: protectedHistory(messages.slice(0, -1)),
+          protectedContent: prompt,
+          signal,
+        })
+        const generation = runtime.generate(request)
+        const iterator = generation[Symbol.asyncIterator]()
         let completed = false
         let started = false
         const threadId = runContext?.threadId ?? fallbackId("thread")
@@ -99,65 +105,66 @@ export function createPromptConnection(
         const messageId = fallbackId("message")
 
         try {
-          model = await runtime.create({ initialPrompts, signal })
-          signal?.throwIfAborted()
           started = true
           yield {
             type: EventType.RUN_STARTED,
             threadId,
             runId,
-            model: runtime.kind,
+            model: runtime.id,
           } satisfies StreamChunk
           yield {
             type: EventType.TEXT_MESSAGE_START,
             messageId,
             role: "assistant",
-            model: runtime.kind,
+            model: runtime.id,
           } satisfies StreamChunk
 
-          reader = model.promptStreaming(prompt, { signal }).getReader()
           while (true) {
-            const next = await reader.read()
+            const next = await iterator.next()
             if (next.done) break
             signal?.throwIfAborted()
             yield {
               type: EventType.TEXT_MESSAGE_CONTENT,
               messageId,
               delta: next.value,
-              model: runtime.kind,
+              model: runtime.id,
             } satisfies StreamChunk
           }
           completed = true
           yield {
             type: EventType.TEXT_MESSAGE_END,
             messageId,
-            model: runtime.kind,
+            model: runtime.id,
           } satisfies StreamChunk
           yield {
             type: EventType.RUN_FINISHED,
             threadId,
             runId,
             finishReason: "stop",
-            model: runtime.kind,
+            model: runtime.id,
           } satisfies StreamChunk
         } catch (cause) {
           if (!started) throw cause
           yield {
             type: EventType.RUN_ERROR,
             message: errorMessage(cause),
-            model: runtime.kind,
+            model: runtime.id,
           } satisfies StreamChunk
         } finally {
           if (!completed) {
             try {
-              await reader?.cancel()
+              await iterator.return?.(
+                signal?.aborted ? signal.reason : undefined
+              )
             } catch {
-              // The source may already be errored or aborted.
+              // A source error/abort remains the primary AG-UI outcome.
             }
           }
-          model?.destroy()
         }
       })()
     },
   }
 }
+
+/** Backwards-compatible docs-local name while callers migrate to the seam. */
+export const createPromptConnection = createBrowserConnection

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
-import { createGemmaLanguageModelFactory } from "./gemma-runtime"
+import { createGemmaBrowserRuntime } from "./gemma-runtime"
+import { createProtectedBrowserRequest } from "./protected-request"
 
 class FakeStoppingCriteria {
   interrupted = false
@@ -20,11 +21,10 @@ class FakeTextStreamer {
   }
 }
 
-function fakeTransformers(tokens = ["one ", "two ", "three"]) {
+function fakeTransformers(tokens = ["one ", "two ", "three"] as const) {
   const env: { experimental_useCrossOriginStorage?: boolean } = {}
-  let generated = 0
-  let promptMessages: Array<{ role: string; content: string }> = []
-  const progress = vi.fn()
+  const promptMessages: Array<{ role: string; content: string }> = []
+  const criteria: FakeStoppingCriteria[] = []
   const generator = Object.assign(
     vi.fn(
       async (
@@ -34,13 +34,12 @@ function fakeTransformers(tokens = ["one ", "two ", "three"]) {
           streamer: FakeTextStreamer
         }
       ) => {
+        criteria.push(options.stopping_criteria[0]!)
         for (const value of tokens) {
           await new Promise((resolve) => setTimeout(resolve, 0))
           if (options.stopping_criteria[0]?.interrupted) break
-          generated += 1
           options.streamer.emit(value)
         }
-        return [{ generated_text: tokens.join("") }]
       }
     ),
     {
@@ -48,109 +47,130 @@ function fakeTransformers(tokens = ["one ", "two ", "three"]) {
         apply_chat_template(
           messages: Array<{ role: string; content: string }>
         ) {
-          promptMessages = messages
+          promptMessages.splice(0, promptMessages.length, ...messages)
           return "formatted prompt"
         },
       },
     }
   )
-  const pipeline = vi.fn(
-    async (
-      _task: string,
-      _model: string,
-      options: { progress_callback(event: unknown): void }
-    ) => {
-      options.progress_callback({ progress: 50, status: "progress_total" })
-      options.progress_callback({ status: "ready" })
-      progress()
-      return generator
-    }
-  )
-
-  return {
-    generated: () => generated,
-    loadTransformers: vi.fn(async () => ({
-      env,
-      InterruptableStoppingCriteria: FakeStoppingCriteria,
-      pipeline,
-      TextStreamer: FakeTextStreamer,
-    })),
+  const pipeline = vi.fn(async () => generator)
+  const loadTransformers = vi.fn(async () => ({
     env,
+    InterruptableStoppingCriteria: FakeStoppingCriteria,
     pipeline,
-    progress,
-    promptMessages: () => promptMessages,
+    TextStreamer: FakeTextStreamer,
+  }))
+  return {
+    criteria,
+    env,
+    generator,
+    loadTransformers,
+    pipeline,
+    promptMessages,
   }
 }
 
-async function collect(stream: ReadableStream<string>): Promise<string> {
-  let result = ""
-  const reader = stream.getReader()
-  while (true) {
-    const next = await reader.read()
-    if (next.done) break
-    result += next.value
-  }
-  return result
+function request(signal?: AbortSignal) {
+  return createProtectedBrowserRequest({
+    protectedHistory: [
+      { role: "user", protectedContent: "Earlier" },
+      { role: "assistant", protectedContent: "Answer" },
+    ],
+    protectedContent: "Current",
+    signal,
+  })
 }
 
-describe("Gemma browser runtime", () => {
-  it("loads once, reports progress, and formats the complete conversation", async () => {
+async function collect(source: AsyncIterable<string>): Promise<string> {
+  let output = ""
+  for await (const chunk of source) output += chunk
+  return output
+}
+
+describe("Gemma browser-generation runtime", () => {
+  it("loads lazily once and formats supplied protected history per run", async () => {
     const fake = fakeTransformers()
-    const factory = await createGemmaLanguageModelFactory({
+    const runtime = createGemmaBrowserRuntime({
       loadTransformers: fake.loadTransformers,
     })
-    const loaded: number[] = []
-    const model = await factory.create({
-      initialPrompts: [{ role: "user", content: "Earlier" }],
-      monitor(monitor) {
-        monitor.addEventListener("downloadprogress", (event) => {
-          loaded.push(event.loaded)
-        })
-      },
-    })
 
-    await expect(collect(model.promptStreaming("Now"))).resolves.toBe(
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+    await expect(collect(runtime.generate(request()))).resolves.toBe(
       "one two three"
     )
-    await factory.create()
+    await collect(runtime.generate(request()))
 
-    expect(loaded).toEqual([0.5, 1])
-    expect(fake.env.experimental_useCrossOriginStorage).toBe(false)
+    expect(fake.loadTransformers).toHaveBeenCalledOnce()
     expect(fake.pipeline).toHaveBeenCalledOnce()
-    expect(fake.promptMessages()).toEqual([
+    expect(fake.pipeline).toHaveBeenCalledWith(
+      "text-generation",
+      "onnx-community/gemma-3-270m-it-ONNX",
+      expect.objectContaining({
+        device: "webgpu",
+        dtype: "q4f16",
+        revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0",
+      })
+    )
+    expect(fake.env.experimental_useCrossOriginStorage).toBe(false)
+    expect(fake.promptMessages).toEqual([
       { role: "user", content: "Earlier" },
-      { role: "user", content: "Now" },
+      { role: "assistant", content: "Answer" },
+      { role: "user", content: "Current" },
     ])
+    expect(runtime.disclosure).toEqual({
+      label: "Gemma 3 270M IT",
+      model: "onnx-community/gemma-3-270m-it-ONNX",
+      source: "Transformers.js browser runtime",
+      artifacts: {
+        kind: "explicit-download",
+        approximateBytes: 293_284_073,
+        origins: ["https://huggingface.co", "https://*.cdn.hf.co"],
+      },
+    })
   })
 
-  it("interrupts Transformers generation when the Prompt API signal aborts", async () => {
+  it("interrupts one criterion when its generation signal aborts", async () => {
     const fake = fakeTransformers()
-    const factory = await createGemmaLanguageModelFactory({
+    const runtime = createGemmaBrowserRuntime({
       loadTransformers: fake.loadTransformers,
     })
-    const model = await factory.create()
     const abort = new AbortController()
-    const reader = model
-      .promptStreaming("Generate", { signal: abort.signal })
-      .getReader()
+    const reader = runtime
+      .generate(request(abort.signal))
+      [Symbol.asyncIterator]()
 
-    await expect(reader.read()).resolves.toEqual({ done: false, value: "one " })
+    await expect(reader.next()).resolves.toEqual({ done: false, value: "one " })
     abort.abort(new DOMException("Stopped", "AbortError"))
-    await expect(reader.read()).rejects.toMatchObject({ name: "AbortError" })
-    await vi.waitFor(() => expect(fake.generated()).toBe(1))
+    await expect(reader.next()).rejects.toMatchObject({ name: "AbortError" })
+    await vi.waitFor(() => expect(fake.criteria[0]?.interrupted).toBe(true))
   })
 
-  it("interrupts Transformers generation when its stream is cancelled", async () => {
+  it("interrupts generation when its iterator is returned", async () => {
     const fake = fakeTransformers()
-    const factory = await createGemmaLanguageModelFactory({
+    const runtime = createGemmaBrowserRuntime({
       loadTransformers: fake.loadTransformers,
     })
-    const model = await factory.create()
-    const reader = model.promptStreaming("Generate").getReader()
+    const reader = runtime.generate(request())[Symbol.asyncIterator]()
 
-    await expect(reader.read()).resolves.toEqual({ done: false, value: "one " })
-    await reader.cancel("stop")
+    await expect(reader.next()).resolves.toEqual({ done: false, value: "one " })
+    await reader.return?.("stop")
+    expect(fake.criteria[0]?.interrupted).toBe(true)
+  })
 
-    await vi.waitFor(() => expect(fake.generated()).toBe(1))
+  it("rejects non-alternating protected history before loading artifacts", () => {
+    const fake = fakeTransformers()
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+    const malformed = createProtectedBrowserRequest({
+      protectedHistory: [
+        { role: "user", protectedContent: "first" },
+        { role: "user", protectedContent: "second" },
+      ],
+      protectedContent: "current",
+    })
+
+    expect(() => runtime.generate(malformed)).toThrow("alternating")
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
   })
 })
