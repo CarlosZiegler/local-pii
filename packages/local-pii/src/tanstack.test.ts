@@ -3108,8 +3108,11 @@ describe("piiConnection text streaming", () => {
         placeholders: token(),
       }).createSession()
       const primary = new Error(`${entrypoint} caller throw`)
+      let iteratorCreated = 0
+      const returnValues: unknown[] = []
       const source: AsyncIterable<StreamChunk> = {
         [Symbol.asyncIterator]() {
+          iteratorCreated += 1
           let yielded = false
           return {
             async next() {
@@ -3124,7 +3127,8 @@ describe("piiConnection text streaming", () => {
                 } satisfies StreamChunk,
               }
             },
-            async return() {
+            async return(value?: unknown) {
+              returnValues.push(value)
               return { done: true as const, value: undefined }
             },
           }
@@ -3142,6 +3146,8 @@ describe("piiConnection text streaming", () => {
       await expect(
         before[Symbol.asyncIterator]().throw?.(primary)
       ).rejects.toBe(primary)
+      expect(iteratorCreated).toBe(1)
+      expect(returnValues).toEqual([primary])
 
       const after =
         entrypoint === "connect"
@@ -3150,6 +3156,8 @@ describe("piiConnection text streaming", () => {
       const iterator = after[Symbol.asyncIterator]()
       await expect(iterator.next()).resolves.toMatchObject({ done: false })
       await expect(iterator.throw?.(primary)).rejects.toBe(primary)
+      expect(iteratorCreated).toBe(2)
+      expect(returnValues).toEqual([primary, primary])
     }
   )
 
@@ -5414,12 +5422,18 @@ describe("piiConnection text streaming", () => {
                 return new Promise<IteratorResult<StreamChunk>>(
                   (resolve, reject) => releases.push({ resolve, reject })
                 )
+              const delta =
+                nextCalls === 3
+                  ? "continues-3"
+                  : nextCalls === 4
+                    ? "continues-4"
+                    : "continues-5"
               return Promise.resolve({
                 done: false as const,
                 value: {
                   type: EventType.TEXT_MESSAGE_CONTENT,
                   messageId: "repeated-after-loser",
-                  delta: "continues",
+                  delta,
                 } satisfies StreamChunk,
               })
             },
@@ -5467,6 +5481,9 @@ describe("piiConnection text streaming", () => {
       await expect(next1).rejects.toBe(firstError)
 
       const next2 = iterator.next()
+      for (let attempt = 0; nextCalls < 2 && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(nextCalls).toBe(2)
       const recovered2 = iterator.throw!(secondError)
       await expect(recovered2).resolves.toMatchObject({
         done: false,
@@ -5483,9 +5500,21 @@ describe("piiConnection text streaming", () => {
       if (secondLateKind === "reject") releases[1]!.reject(lateSecondError)
       else releases[1]!.resolve({ done: true, value: undefined })
 
-      await expect(iterator.next()).resolves.toMatchObject({
+      const next3 = iterator.next()
+      for (let attempt = 0; nextCalls < 3 && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(nextCalls).toBe(3)
+      await expect(next3).resolves.toMatchObject({
         done: false,
-        value: { delta: "continues" },
+        value: { delta: "continues-3" },
+      })
+      const next4 = iterator.next()
+      for (let attempt = 0; nextCalls < 4 && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(nextCalls).toBe(4)
+      await expect(next4).resolves.toMatchObject({
+        done: false,
+        value: { delta: "continues-4" },
       })
       expect(returnCalls).toBe(0)
     }

@@ -322,13 +322,12 @@ export function restoreTanStackStream(
       const tools = new Map<string, ToolStreamState>()
       const pending = new Map<string, { id: string; kind: "text" | "tool" }>()
       let upstreamDone = false
-      let upstreamClosed = false
       let returnStarted = false
       let aborted = false
-      let failed = false
       let pendingReturn: Promise<IteratorResult<StreamChunk>> | undefined
       let closed = false
       let nextInFlight = false
+      let hasRead = false
       let cancelPendingNext = () => {}
       type PendingNext = {
         settled: boolean
@@ -365,6 +364,7 @@ export function restoreTanStackStream(
         preemptedSettled?: boolean
         preemptedTerminal?: boolean
         waitingSource?: boolean
+        read?: ReadRecord
         pending: {
           settled: boolean
           resolve: (result: IteratorResult<StreamChunk>) => void
@@ -376,16 +376,21 @@ export function restoreTanStackStream(
         kind: "throw"
         error: unknown
         concurrent?: boolean
-        preemptedNext?: NextOperation
+        preemptedRead?: ReadRecord
         gate: ThrowGate
+      }
+      type ReadRecord = {
+        owner: NextOperation
+        settled: boolean
+        cancel: () => void
       }
       type Operation = NextOperation | ThrowOperation
       const operations: Operation[] = []
       let activeOperation:
         | (Operation & { preempted?: boolean; waitingSource?: boolean })
         | undefined
-      const preemptedNext = new Set<NextOperation>()
-      const losingNext = new Set<NextOperation>()
+      const activeReads = new Set<ReadRecord>()
+      const preemptedReads = new Set<ReadRecord>()
       let allowConcurrentThrow = false
       let errorCloseStarted = false
       let errorCleanup: Promise<IteratorResult<StreamChunk>> | undefined
@@ -450,7 +455,6 @@ export function restoreTanStackStream(
       ): Promise<IteratorResult<StreamChunk>> | undefined => {
         if (returnStarted || upstreamDone) return pendingReturn
         returnStarted = true
-        upstreamClosed = true
         let result: PromiseLike<IteratorResult<StreamChunk>> | undefined
         try {
           result = iterator?.return?.(reason)
@@ -460,7 +464,7 @@ export function restoreTanStackStream(
         pendingReturn = Promise.resolve(
           result ?? { done: true, value: undefined }
         )
-        // Abort deliberately does not await a native generator's queued
+        // Abort deliberately does not await a native iterator's queued
         // return while its current next() is suspended. Keep the eventual
         // cleanup observed so it cannot become an unhandled rejection.
         void pendingReturn.catch(() => undefined)
@@ -592,105 +596,6 @@ export function restoreTanStackStream(
         return [chunk]
       }
 
-      const run = async function* (): AsyncGenerator<StreamChunk> {
-        let failure: unknown
-        try {
-          const upstream = source[Symbol.asyncIterator]()
-          iterator = upstream
-          while (true) {
-            try {
-              signal?.throwIfAborted()
-              nextInFlight = true
-              let next: IteratorResult<StreamChunk>
-              const pending = nextWithAbort(upstream, signal, () => {
-                aborted = true
-                closed = true
-                settleDelegatedThrows("abort", signal?.reason)
-                settlePreemptedNext("abort", signal?.reason)
-                settlePending("abort", signal?.reason)
-                clear()
-                discardQueuedOperations()
-                beginReturn(signal?.reason)
-              })
-              cancelPendingNext = pending.cancel
-              try {
-                next = await pending.promise
-              } finally {
-                pending.cancel()
-                if (cancelPendingNext === pending.cancel)
-                  cancelPendingNext = () => {}
-                nextInFlight = false
-              }
-              const losing = losingNext.values().next().value as
-                | NextOperation
-                | undefined
-              if (losing?.preemptedSettled) {
-                const terminal = losing.preemptedTerminal
-                losingNext.delete(losing)
-                if (terminal) return
-                continue
-              }
-              signal?.throwIfAborted()
-              if (closed) {
-                clear()
-                return
-              }
-
-              if (next.done) {
-                upstreamDone = true
-                for (const chunk of flushAll({} as StreamChunk)) yield chunk
-                return
-              }
-
-              for (const output of restoreChunk(next.value)) yield output
-            } catch (error) {
-              const losing = losingNext.values().next().value as
-                | NextOperation
-                | undefined
-              if (losing?.preemptedSettled) {
-                const terminal = losing.preemptedTerminal
-                losingNext.delete(losing)
-                if (terminal) return
-                continue
-              }
-              throw error
-            }
-          }
-        } catch (error) {
-          if (signal?.aborted && !aborted) {
-            aborted = true
-            closed = true
-            settleDelegatedThrows("abort", signal.reason)
-            settlePreemptedNext("abort", signal.reason)
-            settlePending("abort", signal.reason)
-            clear()
-            discardQueuedOperations()
-            beginReturn(signal.reason)
-          }
-          failed = true
-          failure = error
-          clear()
-          throw error
-        } finally {
-          if (!upstreamDone && !upstreamClosed) {
-            const cleanup = beginReturn(failure)
-            if (cleanup && !aborted) {
-              try {
-                await cleanup
-              } catch (cleanupError) {
-                if (!failed) {
-                  // Cleanup is the primary failure only when stream processing
-                  // itself succeeded.
-                  // eslint-disable-next-line no-unsafe-finally -- preserve the cleanup error contract
-                  throw cleanupError
-                }
-              }
-            }
-          }
-        }
-      }
-
-      const generator = run()
       const done = (value?: unknown): IteratorResult<StreamChunk> => ({
         done: true,
         value,
@@ -717,10 +622,12 @@ export function restoreTanStackStream(
         kind: "return" | "abort" | "throw",
         value?: unknown,
         recoverable = false,
-        target?: NextOperation
+        target?: ReadRecord
       ) => {
-        const settle = (operation: NextOperation) => {
+        const settle = (read: ReadRecord) => {
+          const operation = read.owner
           if (operation.preemptedSettled) return
+          preemptedReads.delete(read)
           operation.preemptedSettled = true
           operation.preemptedTerminal = kind !== "throw" || !recoverable
           if (kind === "return") resolveNext(operation, done())
@@ -731,12 +638,11 @@ export function restoreTanStackStream(
             )
         }
         if (target) {
-          preemptedNext.delete(target)
           settle(target)
           return
         }
-        for (const operation of preemptedNext) settle(operation)
-        preemptedNext.clear()
+        for (const read of preemptedReads) settle(read)
+        preemptedReads.clear()
       }
 
       const closeAfterError = (error: unknown, skip?: PendingNext) => {
@@ -751,8 +657,6 @@ export function restoreTanStackStream(
         settlePending("throw", error, false, skip)
         settleDelegatedThrows("throw", error, cleanup)
         void cleanup?.catch(() => undefined)
-        const closing = generator.return?.(error)
-        void Promise.resolve(closing).catch(() => undefined)
         return cleanup
       }
 
@@ -760,13 +664,10 @@ export function restoreTanStackStream(
         clear()
         discardQueuedOperations()
         upstreamDone = true
-        upstreamClosed = true
         closed = true
         settlePreemptedNext("return")
         settleDelegatedThrows("return", value)
         settlePending("return")
-        const closing = generator.return?.(value)
-        void Promise.resolve(closing).catch(() => undefined)
       }
 
       const settleConcurrentThrow = (
@@ -785,7 +686,7 @@ export function restoreTanStackStream(
           "throw",
           operation.error,
           true,
-          operation.preemptedNext
+          operation.preemptedRead
         )
         operation.gate.resolve(outcome.result)
         if (outcome.result.done) closeAfterDone(outcome.result.value)
@@ -855,7 +756,7 @@ export function restoreTanStackStream(
             "throw",
             operation.error,
             true,
-            operation.preemptedNext
+            operation.preemptedRead
           )
           operation.gate.resolve(
             first
@@ -878,6 +779,129 @@ export function restoreTanStackStream(
       const failThrow = (operation: ThrowOperation, error: unknown) => {
         if (operation.gate.canceled) return
         closeAfterError(error)
+      }
+
+      const ensureIterator = () => {
+        if (!iterator) iterator = source[Symbol.asyncIterator]()
+        return iterator
+      }
+
+      cancelPendingNext = () => {
+        for (const read of activeReads) read.cancel()
+      }
+
+      const finishRead = (read: ReadRecord) => {
+        if (read.settled) return
+        read.settled = true
+        activeReads.delete(read)
+        read.cancel()
+        if (read.owner.read === read) read.owner.read = undefined
+        nextInFlight = activeReads.size > 0
+      }
+
+      const readOne = (operation: NextOperation) => {
+        let pending: ReturnType<typeof nextWithAbort>
+        try {
+          signal?.throwIfAborted()
+          const upstream = ensureIterator()
+          hasRead = true
+          pending = nextWithAbort(upstream, signal, () => {
+            aborted = true
+            closed = true
+            settleDelegatedThrows("abort", signal?.reason)
+            settlePreemptedNext("abort", signal?.reason)
+            settlePending("abort", signal?.reason)
+            clear()
+            discardQueuedOperations()
+            beginReturn(signal?.reason)
+          })
+        } catch (error) {
+          operation.waitingSource = false
+          if (activeOperation === operation) activeOperation = undefined
+          failNext(operation, error)
+          pump()
+          return
+        }
+
+        const read: ReadRecord = {
+          owner: operation,
+          settled: false,
+          cancel: pending.cancel,
+        }
+        operation.read = read
+        activeReads.add(read)
+        nextInFlight = true
+        void pending.promise.then(
+          (next) => {
+            finishRead(read)
+            operation.waitingSource = false
+            if (operation.preempted) {
+              if (operation.preemptedSettled) return
+              if (next.done) closeAfterDone(next.value)
+              return
+            }
+            if (closed) return
+            if (next.done) {
+              upstreamDone = true
+              if (activeOperation === operation) activeOperation = undefined
+              let flushed: StreamChunk[]
+              try {
+                flushed = flushAll({} as StreamChunk)
+              } catch (error) {
+                failNext(operation, error)
+                pump()
+                return
+              }
+              if (flushed.length === 0) {
+                completeNext(operation, done())
+              } else {
+                resolveNext(operation, {
+                  done: false,
+                  value: flushed[0] as StreamChunk,
+                })
+                for (let index = 1; index < flushed.length; index += 1)
+                  queueValue(flushed[index] as StreamChunk)
+                queueResult(done())
+              }
+              pump()
+              return
+            }
+
+            let restored: StreamChunk[]
+            try {
+              restored = restoreChunk(next.value)
+            } catch (error) {
+              if (activeOperation === operation) activeOperation = undefined
+              failNext(operation, error)
+              pump()
+              return
+            }
+            if (restored.length === 0) {
+              readOne(operation)
+              return
+            }
+            if (activeOperation === operation) activeOperation = undefined
+            resolveNext(operation, {
+              done: false,
+              value: restored[0] as StreamChunk,
+            })
+            for (let index = 1; index < restored.length; index += 1)
+              queueValue(restored[index] as StreamChunk)
+            pump()
+          },
+          (error: unknown) => {
+            finishRead(read)
+            operation.waitingSource = false
+            if (operation.preempted) {
+              if (operation.preemptedSettled) return
+              closeAfterError(error)
+              return
+            }
+            if (activeOperation === operation) activeOperation = undefined
+            failNext(operation, error)
+            pump()
+          }
+        )
       }
 
       const selectOperation = (): Operation | undefined => {
@@ -916,44 +940,7 @@ export function restoreTanStackStream(
             return
           }
           operation.waitingSource = true
-          let result: PromiseLike<IteratorResult<StreamChunk>>
-          try {
-            result = generator.next(operation.value)
-          } catch (error) {
-            operation.waitingSource = false
-            activeOperation = undefined
-            failNext(operation, error)
-            pump()
-            return
-          }
-          void Promise.resolve(result).then(
-            (next) => {
-              operation.waitingSource = false
-              if (operation.preempted) {
-                if (operation.preemptedSettled) {
-                  if (!operation.preemptedTerminal && !next.done)
-                    queueValue(next.value)
-                  return
-                }
-                if (next.done) closeAfterDone(next.value)
-                return
-              }
-              if (activeOperation === operation) activeOperation = undefined
-              completeNext(operation, next)
-              pump()
-            },
-            (error: unknown) => {
-              operation.waitingSource = false
-              if (operation.preempted) {
-                if (operation.preemptedSettled) return
-                closeAfterError(error)
-                return
-              }
-              if (activeOperation === operation) activeOperation = undefined
-              failNext(operation, error)
-              pump()
-            }
-          )
+          readOne(operation)
           return
         }
 
@@ -1023,14 +1010,13 @@ export function restoreTanStackStream(
           cancelPendingNext()
           if (activeOperation?.kind === "next") {
             activeOperation.preempted = true
+            if (activeOperation.read) preemptedReads.add(activeOperation.read)
             activeOperation = undefined
           }
           settleDelegatedThrows(aborting ? "abort" : "return", value)
           settlePreemptedNext(aborting ? "abort" : "return", value)
           settlePending(aborting ? "abort" : "return", value)
           const cleanup = beginReturn(value)
-          const closing = generator.return?.(value)
-          void Promise.resolve(closing).catch(() => undefined)
           return cleanup
             ? cleanup.then(() => done(value))
             : Promise.resolve(done(value))
@@ -1038,8 +1024,15 @@ export function restoreTanStackStream(
         throw(error?: unknown) {
           if (closed) return Promise.reject(error)
           cancelPendingNext()
-          const upstream = iterator
-          if (upstream?.throw) {
+          let upstream = iterator
+          if (!upstream) {
+            try {
+              upstream = ensureIterator()
+            } catch {
+              upstream = undefined
+            }
+          }
+          if (upstream?.throw && hasRead) {
             let resolveGate!: (result: IteratorResult<StreamChunk>) => void
             let rejectGate!: (error: unknown) => void
             const closeGate = new Promise<IteratorResult<StreamChunk>>(
@@ -1055,22 +1048,21 @@ export function restoreTanStackStream(
               reject: (throwError: unknown) => rejectGate(throwError),
             }
             activeThrows.add(gate)
-            let preempted: NextOperation | undefined
+            let preemptedRead: ReadRecord | undefined
             if (
               activeOperation?.kind === "next" &&
               activeOperation.waitingSource &&
               !activeOperation.preempted
             ) {
-              preempted = activeOperation
-              preempted.preempted = true
-              preemptedNext.add(preempted)
-              losingNext.add(preempted)
+              activeOperation.preempted = true
+              preemptedRead = activeOperation.read
+              if (preemptedRead) preemptedReads.add(preemptedRead)
               activeOperation = undefined
             }
             operations.push({
               kind: "throw",
               error,
-              preemptedNext: preempted,
+              preemptedRead,
               concurrent:
                 allowConcurrentThrow ||
                 activeOperation?.kind === "throw" ||
@@ -1088,8 +1080,6 @@ export function restoreTanStackStream(
           discardQueuedOperations()
           settlePending("throw", error)
           const cleanup = beginReturn(error)
-          const throwing = generator.throw?.(error)
-          void Promise.resolve(throwing).catch(() => undefined)
           const rejectPrimary = () => Promise.reject(error)
           if (nextInFlight) return rejectPrimary()
           if (cleanup) return cleanup.then(rejectPrimary, rejectPrimary)
