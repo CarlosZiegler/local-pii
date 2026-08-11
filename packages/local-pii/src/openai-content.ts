@@ -13,13 +13,20 @@ function isRecord(value: unknown): value is OpenAIRecord {
 }
 
 /** Clone one changed path without dropping SDK metadata or descriptors. */
-export function cloneOpenAIValue<T extends object>(
-  source: T,
-  overrides: Record<string, unknown>
-): T {
+function createOpenAICloneShell<T extends object>(source: T): T {
   const clone = Array.isArray(source)
     ? []
     : Object.create(Object.getPrototypeOf(source))
+  if (Array.isArray(source))
+    Object.setPrototypeOf(clone, Object.getPrototypeOf(source))
+  return clone as T
+}
+
+function populateOpenAIClone<T extends object>(
+  clone: T,
+  source: T,
+  overrides: Record<string, unknown>
+): T {
   const descriptors = Object.getOwnPropertyDescriptors(source) as Record<
     string,
     PropertyDescriptor
@@ -39,6 +46,13 @@ export function cloneOpenAIValue<T extends object>(
   }
   Object.defineProperties(clone, descriptors)
   return clone as T
+}
+
+export function cloneOpenAIValue<T extends object>(
+  source: T,
+  overrides: Record<string, unknown>
+): T {
+  return populateOpenAIClone(createOpenAICloneShell(source), source, overrides)
 }
 
 async function protectText(
@@ -319,6 +333,19 @@ interface RestoredSemanticValue {
   value: unknown
 }
 
+interface SemanticEntry {
+  child?: SemanticNode
+  key: string
+  restored?: unknown
+}
+
+interface SemanticNode {
+  changed: boolean
+  directChanged: boolean
+  entries: SemanticEntry[]
+  source: object
+}
+
 function restoreSemanticValue(
   session: PiiSession,
   value: unknown
@@ -327,31 +354,82 @@ function restoreSemanticValue(
     const restored = session.rehydrate(value, { lenient: true })
     return { changed: restored !== value, value: restored }
   }
-  if (Array.isArray(value)) {
-    const restored = value.map((item) => restoreSemanticValue(session, item))
-    if (!restored.some((item) => item.changed)) return { changed: false, value }
-    const overrides: Record<string, unknown> = {}
-    for (let index = 0; index < restored.length; index++)
-      overrides[index] = restored[index]!.value
-    return {
-      changed: true,
-      value: cloneOpenAIValue(value, overrides),
-    }
-  }
+
   if (!isRecord(value)) return { changed: false, value }
-  const overrides: Record<string, unknown> = {}
-  let changed = false
-  for (const [key, item] of Object.entries(value)) {
-    const restored = restoreSemanticValue(session, item)
-    if (restored.changed) {
-      changed = true
-      overrides[key] = restored.value
+
+  const nodes: SemanticNode[] = []
+  const memo = new Map<object, SemanticNode>()
+  const visit = (source: object): SemanticNode => {
+    const existing = memo.get(source)
+    if (existing) return existing
+
+    const node: SemanticNode = {
+      changed: false,
+      directChanged: false,
+      entries: [],
+      source,
+    }
+    memo.set(source, node)
+    nodes.push(node)
+
+    for (const key of Object.keys(source)) {
+      const original = (source as OpenAIRecord)[key]
+      if (typeof original === "string") {
+        const restored = session.rehydrate(original, { lenient: true })
+        if (restored !== original) {
+          node.directChanged = true
+          node.entries.push({ key, restored })
+        } else {
+          node.entries.push({ key })
+        }
+        continue
+      }
+      if (isRecord(original)) {
+        node.entries.push({ key, child: visit(original) })
+      } else {
+        node.entries.push({ key })
+      }
+    }
+
+    return node
+  }
+
+  const root = visit(value)
+  for (const node of nodes) node.changed = node.directChanged
+  let propagated = true
+  while (propagated) {
+    propagated = false
+    for (const node of nodes) {
+      if (
+        !node.changed &&
+        node.entries.some((entry) => entry.child?.changed === true)
+      ) {
+        node.changed = true
+        propagated = true
+      }
     }
   }
-  return {
-    changed,
-    value: changed ? cloneOpenAIValue(value, overrides) : value,
+
+  if (!root.changed) return { changed: false, value }
+
+  const shells = new Map<SemanticNode, object>()
+  for (const node of nodes) {
+    if (node.changed) shells.set(node, createOpenAICloneShell(node.source))
   }
+  for (const node of nodes) {
+    if (!node.changed) continue
+    const overrides: Record<string, unknown> = {}
+    for (const entry of node.entries) {
+      if (entry.child?.changed) {
+        overrides[entry.key] = shells.get(entry.child)
+      } else if ("restored" in entry) {
+        overrides[entry.key] = entry.restored
+      }
+    }
+    populateOpenAIClone(shells.get(node)!, node.source, overrides)
+  }
+
+  return { changed: true, value: shells.get(root) }
 }
 
 /** Restore parse-only structured fields in addition to ordinary messages. */

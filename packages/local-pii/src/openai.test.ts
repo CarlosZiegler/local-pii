@@ -475,6 +475,44 @@ describe("withPiiOpenAI client surface compatibility", () => {
     expect(rawPromise).toBeDefined()
   })
 
+  it("keeps response parsing lazy while exposing an eager raw handle", async () => {
+    const response = new Response("lazy one-shot body")
+    const parseFailure = new Error("lazy parse failure")
+    let providerCalls = 0
+    let thenCalls = 0
+    const client = {
+      chat: {
+        completions: {
+          create: (params: Record<string, unknown>) => {
+            providerCalls++
+            void params
+            return {
+              then(
+                _resolve: (value: unknown) => void,
+                reject: (reason: unknown) => void
+              ) {
+                thenCalls++
+                void response.text().then(() => reject(parseFailure))
+              },
+              asResponse: async () => response,
+            }
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const result = wrapped.chat.completions.create({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    }) as Promise<unknown> & { asResponse(): Promise<Response> }
+    expect(result).toBeInstanceOf(Promise)
+    const rawResponse = await result.asResponse()
+    expect(providerCalls).toBe(1)
+    expect(thenCalls).toBe(0)
+    expect(rawResponse.bodyUsed).toBe(false)
+    expect(await rawResponse.text()).toBe("lazy one-shot body")
+  })
+
   it("fails closed for unknown APIPromise helpers", async () => {
     const client = {
       chat: {
@@ -495,6 +533,89 @@ describe("withPiiOpenAI client surface compatibility", () => {
     }
     expect(() => result.collect()).toThrow(PiiOpenAIHelperError)
     await result
+  })
+
+  it("preserves shared and cyclic parse semantic graphs", async () => {
+    let rawParsed: Record<string, unknown> | undefined
+    const client = {
+      chat: {
+        completions: {
+          create: (params: Record<string, unknown>) => {
+            void params
+            return testApiPromise({ choices: [] }, {})
+          },
+          parse: (body: Record<string, unknown>) => {
+            const placeholder = (
+              (body.messages as ChatMessage[])[0]!.content as string
+            ).match(TOKEN)![0]
+            const shared: Record<string, unknown> = { email: placeholder }
+            rawParsed = { left: shared, right: shared }
+            rawParsed.self = rawParsed
+            return testApiPromise(
+              {
+                choices: [
+                  {
+                    message: {
+                      role: "assistant",
+                      content: placeholder,
+                      parsed: rawParsed,
+                    },
+                  },
+                ],
+              },
+              {}
+            )
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const restored = (await wrapped.chat.completions.parse({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    })) as {
+      choices: Array<{
+        message: ChatMessage & { parsed: Record<string, unknown> }
+      }>
+    }
+    const parsed = restored.choices[0]!.message.parsed
+    expect(parsed.left).toBe(parsed.right)
+    expect(parsed.self).toBe(parsed)
+    expect((parsed.left as { email: string }).email).toBe("ana@acme.com")
+    expect((rawParsed!.left as { email: string }).email).toMatch(TOKEN)
+    expect(rawParsed!.self).toBe(rawParsed)
+  })
+
+  it("preserves Array subclass behavior on changed completion choices", async () => {
+    class Choices extends Array<{ message: ChatMessage }> {
+      marker() {
+        return "choices-marker"
+      }
+    }
+    const choices = new Choices({
+      message: { role: "assistant", content: "ana@acme.com" },
+    })
+    const client = {
+      chat: {
+        completions: {
+          create: (params: Record<string, unknown>) => {
+            const placeholder = (
+              (params.messages as ChatMessage[])[0]!.content as string
+            ).match(TOKEN)![0]
+            choices[0]!.message.content = placeholder
+            return { choices }
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const restored = (await wrapped.chat.completions.create({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    })) as { choices: Choices }
+    expect(restored.choices).toBeInstanceOf(Choices)
+    expect(restored.choices.marker()).toBe("choices-marker")
+    expect(restored.choices[0]!.message.content).toBe("ana@acme.com")
   })
 
   it("preserves stream surfaces while wrapping tee and readable-stream output", async () => {

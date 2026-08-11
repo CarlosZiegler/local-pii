@@ -149,12 +149,20 @@ const OBJECT_FUNCTIONS = new Set([
 ])
 
 function deferredApiPromise<T>(
-  operation: Promise<T>,
   handleReady: Promise<{ value: unknown }>,
   restore: (value: unknown) => T
 ): ApiInvocation<T> {
-  void operation.catch(() => undefined)
   void handleReady.catch(() => undefined)
+  let operation: Promise<T> | undefined
+  const getOperation = (): Promise<T> => {
+    if (!operation) {
+      operation = handleReady
+        .then(({ value }) => value)
+        .then((value) => restore(value))
+      void operation.catch(() => undefined)
+    }
+    return operation
+  }
   const helper =
     (name: "asResponse" | "withResponse") =>
     (...args: unknown[]): Promise<unknown> =>
@@ -163,7 +171,7 @@ function deferredApiPromise<T>(
         const method = raw?.[name]
         if (typeof method !== "function") {
           if (name === "withResponse")
-            return operation.then((restored) => ({ data: restored }))
+            return getOperation().then((restored) => ({ data: restored }))
           throw new TypeError(`OpenAI APIPromise does not support ${name}()`)
         }
         const envelope = await method.apply(raw, args)
@@ -177,10 +185,19 @@ function deferredApiPromise<T>(
           : { data: restore(undefined), envelope }
       })
 
-  return new Proxy(operation as ApiInvocation<T>, {
+  const target = Promise.resolve(undefined) as ApiInvocation<T>
+  return new Proxy(target, {
     get(target, property) {
-      if (property === "then" || property === "catch" || property === "finally")
-        return Reflect.get(target, property, target).bind(target)
+      if (
+        property === "then" ||
+        property === "catch" ||
+        property === "finally"
+      ) {
+        const operationTarget = getOperation()
+        return Reflect.get(operationTarget, property, operationTarget).bind(
+          operationTarget
+        )
+      }
       if (property === "asResponse" || property === "withResponse")
         return helper(property)
       const value = Reflect.get(target, property, target)
@@ -205,7 +222,7 @@ function protectedInvocation<T>(
     resolveHandle = resolve
     rejectHandle = reject
   })
-  const operation = (async () => {
+  void (async () => {
     try {
       const signal = requestSignal(body, options)
       // Check before protection and before invoking the provider.
@@ -218,13 +235,11 @@ function protectedInvocation<T>(
           ? invoke({ ...body, messages })
           : invoke({ ...body, messages }, options)
       resolveHandle({ value: rawResult })
-      return restore(await rawResult)
     } catch (error) {
       rejectHandle(error)
-      throw error
     }
   })()
-  return deferredApiPromise(operation, handleReady, restore)
+  return deferredApiPromise(handleReady, restore)
 }
 
 /**
