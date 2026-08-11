@@ -53,5 +53,6 @@ describe("local-pii/inline public subpath", () => {
     expect(declarations).toContain("runInlineTextStream")
     expect(declarations).toContain("runInlineJson")
     expect(declarations).toContain("runInline")
+    expect(declarations).toContain("anonymizer?: Anonymizer")
   })
 })

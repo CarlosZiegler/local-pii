@@ -10,6 +10,8 @@ import {
 } from "./inline"
 import { token } from "./placeholder/strategies"
 import type { PiiSession } from "./session"
+import type { Anonymizer } from "./anonymizer"
+import type { DetectionModel, Entity } from "./types"
 
 const TOKEN = /PII[0-9A-HJKMNP-TV-Z]+/
 
@@ -52,6 +54,50 @@ function partition(text: string, lengths: readonly number[]): string[] {
     index += 1
   }
   return chunks
+}
+
+function joaoDetectionModel(): DetectionModel {
+  return {
+    name: "mock-joao",
+    load: vi.fn(async () => {}),
+    detect: vi.fn(async (text): Promise<Entity[]> => {
+      const start = text.indexOf("João")
+      if (start < 0) return []
+      return [
+        {
+          start,
+          end: start + "João".length,
+          text: "João",
+          type: "GIVEN_NAME",
+          source: "ner",
+          confidence: 1,
+        },
+      ]
+    }),
+    dispose: vi.fn(async () => {}),
+  }
+}
+
+function callerAnonymizer(): Anonymizer {
+  return createAnonymizer({
+    detectors: "none",
+    detection: joaoDetectionModel(),
+    placeholders: token(),
+  })
+}
+
+function instrumentSessionCreation(anonymizer: Anonymizer) {
+  const createSession = anonymizer.createSession
+  const created: PiiSession[] = []
+  const createSessionSpy = vi
+    .spyOn(anonymizer, "createSession")
+    .mockImplementation(() => {
+      const session = createSession()
+      created.push(session)
+      vi.spyOn(session, "clear")
+      return session
+    })
+  return { created, createSessionSpy }
 }
 
 beforeEach(() => {
@@ -111,6 +157,53 @@ describe("runInlineText", () => {
 
     expect(clear).toHaveBeenCalledOnce()
     expect(owned?.mapping).toEqual({})
+  })
+
+  it("derives a temporary session from the caller anonymizer", async () => {
+    const anonymizer = callerAnonymizer()
+    const { created, createSessionSpy } = instrumentSessionCreation(anonymizer)
+    let wire = ""
+
+    const output = await runInlineText({
+      input: "Olá João",
+      anonymizer,
+      call: async (protectedText) => {
+        wire = protectedText
+        return `Confirmado: ${protectedText}`
+      },
+    })
+
+    expect(createSessionSpy).toHaveBeenCalledOnce()
+    expect(wire).not.toContain("João")
+    expect(wire).toMatch(TOKEN)
+    expect(output).toBe("Confirmado: Olá João")
+    expect(created[0]?.clear).toHaveBeenCalledOnce()
+    expect(created[0]?.mapping).toEqual({})
+  })
+
+  it("prefers a supplied session over the caller anonymizer", async () => {
+    const anonymizer = callerAnonymizer()
+    const session = anonymizer.createSession()
+    const clear = vi.spyOn(session, "clear")
+    const createSessionSpy = vi.spyOn(anonymizer, "createSession")
+    let wire = ""
+
+    const output = await runInlineText({
+      input: "Olá João",
+      session,
+      anonymizer,
+      call: async (protectedText) => {
+        wire = protectedText
+        return protectedText
+      },
+    })
+
+    expect(createSessionSpy).not.toHaveBeenCalled()
+    expect(wire).not.toContain("João")
+    expect(wire).toMatch(TOKEN)
+    expect(output).toBe("Olá João")
+    expect(clear).not.toHaveBeenCalled()
+    expect(Object.values(session.mapping)).toContain("João")
   })
 
   it("preserves the original callback error and still clears owned state", async () => {
@@ -204,6 +297,26 @@ describe("runInlineJson", () => {
     expect(output.nested).toEqual(input)
     expect(input).toEqual(snapshot)
   })
+
+  it("derives a caller-anonymizer session for JSON protection and restoration", async () => {
+    const anonymizer = callerAnonymizer()
+    const { created } = instrumentSessionCreation(anonymizer)
+    const input = { greeting: "Olá João", count: 1 } as const
+
+    const output = await runInlineJson<typeof input, { reply: string }>({
+      input,
+      anonymizer,
+      call: async (protectedInput) => {
+        expect(JSON.stringify(protectedInput)).not.toContain("João")
+        expect(JSON.stringify(protectedInput)).toMatch(TOKEN)
+        return { reply: protectedInput.greeting }
+      },
+    })
+
+    expect(output).toEqual({ reply: "Olá João" })
+    expect(created[0]?.clear).toHaveBeenCalledOnce()
+    expect(created[0]?.mapping).toEqual({})
+  })
 })
 
 describe("runInline", () => {
@@ -228,6 +341,76 @@ describe("runInline", () => {
 
     expect(output).toBe(3)
     expect(steps).toEqual(["protect", "call", "restore"])
+  })
+
+  it("protects and restores João through the advanced generic seam", async () => {
+    const anonymizer = callerAnonymizer()
+    const { created } = instrumentSessionCreation(anonymizer)
+
+    const output = await runInline({
+      input: "Olá João",
+      anonymizer,
+      protect: async (input, { session }) =>
+        (await session.anonymize(input)).redactedText,
+      call: async (protectedInput) => {
+        expect(protectedInput).not.toContain("João")
+        expect(protectedInput).toMatch(TOKEN)
+        return `Resposta: ${protectedInput}`
+      },
+      restore: (response, { session }) =>
+        session.rehydrate(response, { lenient: true }),
+    })
+
+    expect(output).toBe("Resposta: Olá João")
+    expect(created[0]?.clear).toHaveBeenCalledOnce()
+    expect(created[0]?.mapping).toEqual({})
+  })
+
+  it("clears a caller-anonymizer session after failure", async () => {
+    const anonymizer = callerAnonymizer()
+    const { created } = instrumentSessionCreation(anonymizer)
+    const failure = new Error("model failed")
+
+    await expect(
+      runInline({
+        input: "Olá João",
+        anonymizer,
+        protect: async (input, { session }) =>
+          (await session.anonymize(input)).redactedText,
+        call: async () => {
+          throw failure
+        },
+        restore: (response) => response,
+      })
+    ).rejects.toBe(failure)
+
+    expect(created[0]?.clear).toHaveBeenCalledOnce()
+    expect(created[0]?.mapping).toEqual({})
+  })
+
+  it("clears a caller-anonymizer session after abort", async () => {
+    const anonymizer = callerAnonymizer()
+    const { created } = instrumentSessionCreation(anonymizer)
+    const controller = new AbortController()
+    const reason = new Error("user stopped")
+
+    await expect(
+      runInline({
+        input: "Olá João",
+        signal: controller.signal,
+        anonymizer,
+        protect: async (input, { session }) =>
+          (await session.anonymize(input)).redactedText,
+        call: async (protectedInput) => {
+          controller.abort(reason)
+          return protectedInput
+        },
+        restore: (response) => response,
+      })
+    ).rejects.toBe(reason)
+
+    expect(created[0]?.clear).toHaveBeenCalledOnce()
+    expect(created[0]?.mapping).toEqual({})
   })
 })
 
@@ -308,6 +491,56 @@ describe("runInlineTextStream", () => {
     expect(output).toBe("Email ana@acme.com")
     expect(sessionTracker.sessions).toHaveLength(1)
     expect(sessionTracker.sessions[0]?.mapping).toEqual({})
+  })
+
+  it("derives and clears a caller-anonymizer session after stream completion", async () => {
+    const anonymizer = callerAnonymizer()
+    const { created } = instrumentSessionCreation(anonymizer)
+
+    const output = await collect(
+      runInlineTextStream({
+        input: "Olá João",
+        anonymizer,
+        call: async function* (wireInput) {
+          expect(wireInput).not.toContain("João")
+          expect(wireInput).toMatch(TOKEN)
+          yield `Resposta: ${wireInput}`
+        },
+      })
+    )
+
+    expect(output).toBe("Resposta: Olá João")
+    expect(created[0]?.clear).toHaveBeenCalledOnce()
+    expect(created[0]?.mapping).toEqual({})
+  })
+
+  it("clears a caller-anonymizer session on streamed early return", async () => {
+    const anonymizer = callerAnonymizer()
+    const { created } = instrumentSessionCreation(anonymizer)
+    let upstreamClosed = false
+
+    const iterator = runInlineTextStream({
+      input: "Olá João",
+      anonymizer,
+      call: async function* (wireInput) {
+        try {
+          yield wireInput
+          yield "unread"
+        } finally {
+          upstreamClosed = true
+        }
+      },
+    })[Symbol.asyncIterator]()
+
+    const first = await iterator.next()
+    expect(first.done).toBe(false)
+    expect(first.value).toBeTypeOf("string")
+    expect(Object.values(created[0]?.mapping ?? {})).toContain("João")
+    await iterator.return?.()
+
+    expect(upstreamClosed).toBe(true)
+    expect(created[0]?.clear).toHaveBeenCalledOnce()
+    expect(created[0]?.mapping).toEqual({})
   })
 
   it("preserves an upstream error and discards an incomplete token tail", async () => {

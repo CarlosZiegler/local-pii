@@ -1,4 +1,4 @@
-import { createAnonymizer } from "./anonymizer"
+import { createAnonymizer, type Anonymizer } from "./anonymizer"
 import { token } from "./placeholder/strategies"
 import { createStreamingRehydrator } from "./rehydrate"
 import type { PiiSession } from "./session"
@@ -15,6 +15,8 @@ export interface InlineTransformContext extends InlineContext {
 export interface InlineSessionOptions {
   /** Borrow a session whose vault should survive this call. */
   session?: PiiSession
+  /** Derive a temporary session when no session is supplied. */
+  anonymizer?: Anonymizer
   signal?: AbortSignal
 }
 
@@ -41,7 +43,8 @@ interface ResolvedSession {
 function resolveSession(options: InlineSessionOptions): ResolvedSession {
   if (options.session) return { session: options.session, owned: false }
 
-  const anonymizer = createAnonymizer({ placeholders: token() })
+  const anonymizer =
+    options.anonymizer ?? createAnonymizer({ placeholders: token() })
   return { session: anonymizer.createSession(), owned: true }
 }
 
