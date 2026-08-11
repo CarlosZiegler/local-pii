@@ -24,6 +24,9 @@ dist
 # turbo
 .turbo
 
+# isolated feature worktrees
+.worktrees/
+
 # misc
 .DS_Store
 *.pem
