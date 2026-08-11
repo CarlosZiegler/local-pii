@@ -5,9 +5,14 @@ const done = (): IteratorResult<string> => ({
 
 /** Internal settlement handle used by runtime disposal barriers. */
 export const generationSettlement = Symbol("generationSettlement")
+/** Internal abort handle for owners that must preserve a future abort error. */
+export const generationAbort = Symbol("generationAbort")
 
 type ManagedIterator = AsyncIterator<string> & {
   readonly [generationSettlement]?: Promise<void>
+  readonly [generationAbort]?: (
+    reason: unknown
+  ) => Promise<IteratorResult<string>>
 }
 
 /**
@@ -216,6 +221,10 @@ export function managedGeneration(
 
       const iterator: ManagedIterator = {
         [generationSettlement]: settled,
+        [generationAbort](reason: unknown) {
+          closeForAbort(reason)
+          return Promise.resolve(done())
+        },
         next() {
           if (closed) {
             if (hasPrimaryError && !pendingErrorDelivered) {
@@ -254,6 +263,7 @@ export function managedGeneration(
         },
         throw(error?: unknown) {
           fail(error)
+          pendingErrorDelivered = true
           return Promise.reject(error)
         },
       }
@@ -271,6 +281,7 @@ export function trackActiveGeneration(
     [Symbol.asyncIterator]() {
       const iterator = source[Symbol.asyncIterator]() as ManagedIterator
       const settlement = iterator[generationSettlement] ?? Promise.resolve()
+      const abort = iterator[generationAbort]
       let tracked = false
       let release!: () => void
       let rejectActive!: (reason: unknown) => void
@@ -296,6 +307,7 @@ export function trackActiveGeneration(
         )
       }
       return {
+        ...(abort === undefined ? {} : { [generationAbort]: abort }),
         [Symbol.asyncIterator]() {
           return this
         },

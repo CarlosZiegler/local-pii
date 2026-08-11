@@ -25,12 +25,14 @@ class FakeTextStreamer {
 }
 
 function fakeTransformers(
-  tokens: readonly string[] = ["one ", "two ", "three"]
+  tokens: readonly string[] = ["one ", "two ", "three"],
+  failure?: Error
 ) {
   const env: { experimental_useCrossOriginStorage?: boolean } = {}
   const promptMessages: Array<{ role: string; content: string }> = []
   const criteria: FakeStoppingCriteria[] = []
   let disposed = false
+  let generationFailure = failure
   const dispose = vi.fn(async () => {
     disposed = true
   })
@@ -49,6 +51,11 @@ function fakeTransformers(
           await new Promise((resolve) => setTimeout(resolve, 0))
           if (options.stopping_criteria[0]?.interrupted) break
           options.streamer.emit(value)
+        }
+        if (generationFailure) {
+          const error = generationFailure
+          generationFailure = undefined
+          throw error
         }
       }
     ),
@@ -404,6 +411,63 @@ describe("Gemma browser-generation runtime", () => {
     ])
   })
 
+  it("commits a successful prompt and assistant response to the next turn", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+
+    await expect(session.prompt("First question")).resolves.toBe("answer ")
+    expect(session.contextWindow).toBe(4096)
+    expect(session.inputQuota).toBe(4096)
+    expect(session.contextUsage).toBe(
+      Math.ceil("First questionanswer ".length / 4)
+    )
+    await expect(session.measureContextUsage("Second question")).resolves.toBe(
+      Math.ceil("Second question".length / 4)
+    )
+    const clone = await session.clone()
+    await expect(clone.prompt("Clone question")).resolves.toBe("answer ")
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "answer " },
+      { role: "user", content: "Clone question" },
+    ])
+    clone.destroy()
+    const second = session.promptStreaming("Second question")
+    const reader = second.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the second successful prompt.
+    }
+
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "answer " },
+      { role: "user", content: "Second question" },
+    ])
+  })
+
+  it("does not commit a failed prompt to session history", async () => {
+    const failure = new Error("generation failed")
+    const fake = fakeTransformers(["partial "], failure)
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+
+    await expect(session.prompt("Failed question")).rejects.toBe(failure)
+
+    const next = session.promptStreaming("Next question")
+    const reader = next.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the next prompt after the failed one.
+    }
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "Next question" },
+    ])
+  })
+
   it("exposes the synchronous native LanguageModel session surface", async () => {
     const fake = fakeTransformers(["ok"])
     const factory = await createGemmaLanguageModelFactory({
@@ -502,7 +566,8 @@ describe("Gemma browser-generation runtime", () => {
 
     session.destroy()
 
-    await expect(stream.getReader().read()).rejects.toMatchObject({
+    const reader = stream.getReader()
+    await expect(reader.read()).rejects.toMatchObject({
       name: "AbortError",
     })
   })
@@ -556,6 +621,59 @@ describe("Gemma browser-generation runtime", () => {
 
     await expect(pending).rejects.toBe(reason)
     session.destroy()
+  })
+
+  it("does not commit an aborted prompt to session history", async () => {
+    const fake = fakeTransformers(["partial ", "later "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const abort = new AbortController()
+    const stream = session.promptStreaming("Aborted question", {
+      signal: abort.signal,
+    })
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "partial ",
+    })
+    const pending = reader.read()
+    abort.abort(new DOMException("Stopped", "AbortError"))
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" })
+
+    const next = session.promptStreaming("Next question")
+    const nextReader = next.getReader()
+    while (!(await nextReader.read()).done) {
+      // Drain the next prompt after the aborted one.
+    }
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "Next question" },
+    ])
+  })
+
+  it("does not commit a cancelled prompt to session history", async () => {
+    const fake = fakeTransformers(["partial ", "later "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const stream = session.promptStreaming("Cancelled question")
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "partial ",
+    })
+    await reader.cancel("cancelled")
+
+    const next = session.promptStreaming("Next question")
+    const nextReader = next.getReader()
+    while (!(await nextReader.read()).done) {
+      // Drain the next prompt after the cancelled one.
+    }
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "Next question" },
+    ])
   })
 })
 

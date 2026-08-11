@@ -1,5 +1,6 @@
 import type { LanguageModelFactory } from "./prompt-runtime"
 import {
+  generationAbort,
   managedGeneration,
   trackActiveGeneration,
   waitForActiveGenerations,
@@ -16,6 +17,7 @@ import type {
 
 const MODEL_ID = "onnx-community/gemma-3-270m-it-ONNX"
 const MODEL_REVISION = "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+const CONTEXT_WINDOW = 4096
 
 function compatibleRole(role: unknown): ProtectedBrowserTurn["role"] {
   if (role === "system") return "system"
@@ -246,6 +248,15 @@ function validateConversation(history: readonly ProtectedBrowserTurn[]): void {
   }
 }
 
+/** A stable, deliberately simple estimate for the compatibility API. */
+function estimateUsage(history: readonly ProtectedBrowserTurn[]): number {
+  const characters = history.reduce(
+    (total, turn) => total + turn.protectedContent.length,
+    0
+  )
+  return Math.ceil(characters / 4)
+}
+
 function composeAbortSignals(
   sessionSignal: AbortSignal,
   callerSignal?: AbortSignal
@@ -283,10 +294,22 @@ function composeAbortSignals(
 }
 
 class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
-  contextUsage = 0
-  inputUsage = 0
-  contextWindow = 0
-  inputQuota = 0
+  get contextUsage(): number {
+    return estimateUsage(this.history)
+  }
+
+  get inputUsage(): number {
+    return this.contextUsage
+  }
+
+  get contextWindow(): number {
+    return CONTEXT_WINDOW
+  }
+
+  get inputQuota(): number {
+    return CONTEXT_WINDOW
+  }
+
   topK = 0
   temperature = 0
   oncontextoverflow: ((this: LanguageModel, ev: Event) => unknown) | null = null
@@ -321,6 +344,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   private requestFor(input: LanguageModelPrompt): {
     history: ProtectedBrowserTurn[]
     current: string
+    incoming: ProtectedBrowserTurn[]
   } {
     const turns = promptTurns(input)
     const final = turns.at(-1)
@@ -336,7 +360,21 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     const history = [...this.history, ...turns.slice(0, -1)]
     validateConversation(history)
     validateHistory([...history, final])
-    return { history, current: final.protectedContent }
+    return { history, current: final.protectedContent, incoming: turns }
+  }
+
+  private commitPrompt(
+    incoming: readonly ProtectedBrowserTurn[],
+    output: string
+  ): void {
+    this.ensureActive()
+    const nextHistory: ProtectedBrowserTurn[] = [
+      ...this.history,
+      ...incoming,
+      { role: "assistant", protectedContent: output },
+    ]
+    validateHistory(nextHistory)
+    this.history.splice(0, this.history.length, ...nextHistory)
   }
 
   promptStreaming(
@@ -345,7 +383,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   ): ReadableStream<string> {
     this.ensureActive()
     options.signal?.throwIfAborted()
-    const { history, current } = this.requestFor(input)
+    const { history, current, incoming } = this.requestFor(input)
     const composed = composeAbortSignals(
       this.sessionAbort.signal,
       options.signal
@@ -365,6 +403,8 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     }
 
     let released = false
+    let output = ""
+    let cancelled = false
     const release = () => {
       if (released) return
       released = true
@@ -373,14 +413,28 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
       this.activeReleases.delete(iterator)
     }
     this.activeReleases.set(iterator, release)
+    const session = this
     return new ReadableStream<string>({
       async pull(controller) {
         try {
           const next = await iterator.next()
-          if (next.done) {
+          if (cancelled) {
             release()
-            controller.close()
-          } else controller.enqueue(next.value)
+            return
+          }
+          if (next.done) {
+            try {
+              session.commitPrompt(incoming, output)
+              release()
+              controller.close()
+            } catch (error) {
+              release()
+              controller.error(error)
+            }
+          } else {
+            output += next.value
+            controller.enqueue(next.value)
+          }
         } catch (error) {
           try {
             await iterator.return?.()
@@ -392,6 +446,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
         }
       },
       async cancel(reason) {
+        cancelled = true
         try {
           await iterator.return?.(reason)
         } finally {
@@ -433,11 +488,8 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   ): Promise<number> {
     this.ensureActive()
     options.signal?.throwIfAborted()
-    const { history, current } = this.requestFor(input)
-    return [...history, { role: "user", protectedContent: current }].reduce(
-      (total, turn) => total + turn.protectedContent.length,
-      0
-    )
+    const { incoming } = this.requestFor(input)
+    return estimateUsage(incoming)
   }
 
   async measureInputUsage(
@@ -460,7 +512,19 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     for (const iterator of this.activeIterators) {
       this.activeReleases.get(iterator)?.()
       void Promise.resolve()
-        .then(() => iterator.throw?.(this.sessionAbortReason))
+        .then(() => {
+          const abort = (
+            iterator as AsyncIterator<string> & {
+              [generationAbort]?: (
+                reason: unknown
+              ) => Promise<IteratorResult<string>>
+            }
+          )[generationAbort]
+          return (
+            abort?.(this.sessionAbortReason) ??
+            iterator.throw?.(this.sessionAbortReason)
+          )
+        })
         .catch(() => undefined)
         .then(() => iterator.return?.(this.sessionAbortReason))
         .catch(() => undefined)

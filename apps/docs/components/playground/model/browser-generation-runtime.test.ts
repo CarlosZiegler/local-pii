@@ -184,6 +184,19 @@ describe("managedGeneration", () => {
     })
   })
 
+  it("delivers an explicit throw only once", async () => {
+    const reader = managedGeneration(async () => ({
+      next: () => new Promise<IteratorResult<string>>(() => {}),
+    }))[Symbol.asyncIterator]()
+    const reason = new Error("explicit throw")
+
+    await expect(reader.throw?.(reason)).rejects.toBe(reason)
+    await expect(reader.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+  })
+
   it("rejects promptly when abort interrupts a pending open", async () => {
     const abort = new AbortController()
     const opening = deferred<AsyncIterator<string>>()
