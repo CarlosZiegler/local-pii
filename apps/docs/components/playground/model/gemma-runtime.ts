@@ -1,5 +1,8 @@
 import type { LanguageModelFactory } from "./prompt-runtime"
-import { managedGeneration } from "./browser-generation-runtime"
+import {
+  managedGeneration,
+  trackActiveGeneration,
+} from "./browser-generation-runtime"
 import {
   assertProtectedBrowserRequest,
   createProtectedBrowserRequest,
@@ -40,6 +43,7 @@ interface TextGenerator {
       }
     ): string
   }
+  dispose?: () => void | Promise<void>
 }
 
 interface TransformersRuntime {
@@ -225,6 +229,17 @@ export function createGemmaBrowserRuntime(
     | undefined
   let disposed = false
   const active = new Set<Promise<void>>()
+  let runtimeDisposePromise: Promise<void> | undefined
+  const generatorDisposals = new WeakMap<object, Promise<void>>()
+
+  const disposeGenerator = (generator: TextGenerator): Promise<void> => {
+    const key = generator as object
+    const existing = generatorDisposals.get(key)
+    if (existing) return existing
+    const disposal = Promise.resolve(generator.dispose?.())
+    generatorDisposals.set(key, disposal)
+    return disposal
+  }
 
   const loadGenerator = () => {
     generatorPromise ??= loadTransformers()
@@ -264,7 +279,6 @@ export function createGemmaBrowserRuntime(
     id: "gemma-3-270m",
     disclosure: GEMMA_RUNTIME_DISCLOSURE,
     generate(input) {
-      if (disposed) throw new Error("The Gemma browser runtime is disposed")
       const request = input
       // Runtime callers must cross the same private marker as every other
       // browser adapter. This is intentionally a runtime assertion, not a
@@ -272,16 +286,27 @@ export function createGemmaBrowserRuntime(
       assertProtectedBrowserRequest(request)
       validateConversation(request.protectedHistory)
 
-      let settle!: () => void
-      const settled = new Promise<void>((resolve) => {
-        settle = resolve
-      })
-      let started = false
-      const generation = managedGeneration(
-        async () => {
+      const createGeneration = () =>
+        managedGeneration(async () => {
+          if (disposed) {
+            throw new Error("The Gemma browser runtime is disposed")
+          }
           request.signal?.throwIfAborted()
-          const { generator, transformers } = await loadGenerator()
-          request.signal?.throwIfAborted()
+          const loading = loadGenerator()
+          const { generator, transformers } = await loading
+          if (disposed) {
+            await disposeGenerator(generator)
+            throw new Error("The Gemma browser runtime is disposed")
+          }
+          if (request.signal?.aborted) {
+            try {
+              await disposeGenerator(generator)
+            } catch {
+              // Preserve the caller's abort reason as the primary error.
+            }
+            if (generatorPromise === loading) generatorPromise = undefined
+            throw request.signal.reason
+          }
           return createTextIterator(
             generator,
             transformers,
@@ -291,52 +316,27 @@ export function createGemmaBrowserRuntime(
             ),
             request.signal
           )
-        },
-        request.signal,
-        () => {
-          settle()
-          active.delete(settled)
-        }
-      )
+        }, request.signal)
       return {
         [Symbol.asyncIterator]() {
-          const iterator = generation[Symbol.asyncIterator]()
-          return {
-            [Symbol.asyncIterator]() {
-              return this
-            },
-            next(...args: [] | [undefined]) {
-              if (!started) {
-                started = true
-                active.add(settled)
-              }
-              return iterator.next(...args)
-            },
-            return(reason?: unknown) {
-              return (
-                iterator.return?.(reason) ??
-                Promise.resolve({ done: true, value: undefined })
-              )
-            },
-            throw(error?: unknown) {
-              return (
-                iterator.throw?.(error) ??
-                Promise.reject(
-                  error ?? new Error("The generation cannot throw")
-                )
-              )
-            },
-          }
+          return trackActiveGeneration(createGeneration(), active)[
+            Symbol.asyncIterator
+          ]()
         },
       }
     },
     async dispose() {
-      disposed = true
-      await Promise.all([...active])
-      // The pipeline object is reusable until runtime disposal. Dropping the
-      // promise releases our reference while allowing Transformers.js to own
-      // its cache according to its documented storage policy.
-      generatorPromise = undefined
+      runtimeDisposePromise ??= (async () => {
+        disposed = true
+        await Promise.all([...active])
+        const loaded = generatorPromise
+        generatorPromise = undefined
+        if (loaded) {
+          const { generator } = await loaded
+          await disposeGenerator(generator)
+        }
+      })()
+      return runtimeDisposePromise
     },
   }
 }

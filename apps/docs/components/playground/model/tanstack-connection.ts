@@ -110,6 +110,9 @@ export function createBrowserConnection(
             type: EventType.RUN_STARTED,
             threadId,
             runId,
+            ...(runContext?.parentRunId === undefined
+              ? {}
+              : { parentRunId: runContext.parentRunId }),
             model: runtime.id,
           } satisfies StreamChunk
           yield {
@@ -147,6 +150,8 @@ export function createBrowserConnection(
           if (!started) throw cause
           yield {
             type: EventType.RUN_ERROR,
+            threadId,
+            runId,
             message: errorMessage(cause),
             model: runtime.id,
           } satisfies StreamChunk

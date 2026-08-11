@@ -3,6 +3,7 @@ import { withPii } from "local-pii/ai-sdk"
 import type { LanguageModel } from "ai"
 import { describe, expect, it, vi } from "vitest"
 import { createFakeBrowserRuntime } from "./fake-runtime"
+import { managedGeneration } from "./browser-generation-runtime"
 import {
   createBrowserLanguageModel,
   UnsupportedBrowserModelInputError,
@@ -39,11 +40,12 @@ function options(): V4CallOptions {
 describe("createBrowserLanguageModel", () => {
   it("passes only protected history/current content and streams v4 parts", async () => {
     const runtime = createFakeBrowserRuntime({ chunks: ["Hello ", "there"] })
-    const sourcePrompt = structuredClone(options().prompt)
+    const modelOptions = options()
+    const sourcePrompt = structuredClone(modelOptions.prompt)
     const session = createAnonymizer({ detectors: "none" }).createSession()
     const model = withPii(createBrowserLanguageModel(runtime), { session })
 
-    const result = await model.doGenerate(options())
+    const result = await model.doGenerate(modelOptions)
     expect(result.content).toEqual([{ type: "text", text: "Hello there" }])
     expect(runtime.requests[0]).toMatchObject({
       protectedHistory: [
@@ -53,9 +55,9 @@ describe("createBrowserLanguageModel", () => {
       ],
       protectedContent: "Current",
     })
-    expect(options().prompt).toEqual(sourcePrompt)
+    expect(modelOptions.prompt).toEqual(sourcePrompt)
 
-    const parts = await collect((await model.doStream(options())).stream)
+    const parts = await collect((await model.doStream(modelOptions)).stream)
     expect(parts.map((part) => part.type)).toEqual([
       "stream-start",
       "text-start",
@@ -98,6 +100,7 @@ describe("createBrowserLanguageModel", () => {
   })
 
   it("returns the generation iterator when its v4 stream is cancelled", async () => {
+    const pending = deferred<IteratorResult<string>>()
     const returned = vi.fn(async () => ({
       done: true as const,
       value: undefined,
@@ -111,14 +114,10 @@ describe("createBrowserLanguageModel", () => {
         artifacts: { kind: "browser-managed" },
       },
       generate() {
-        return {
-          [Symbol.asyncIterator]() {
-            return {
-              next: () => new Promise<IteratorResult<string>>(() => {}),
-              return: returned,
-            }
-          },
-        }
+        return managedGeneration(async () => ({
+          next: () => pending.promise,
+          return: returned,
+        }))
       },
       dispose: async () => {},
     }
@@ -128,7 +127,24 @@ describe("createBrowserLanguageModel", () => {
     await expect(reader.read()).resolves.toMatchObject({
       value: { type: "stream-start" },
     })
-    await reader.cancel("stop")
+    const cancel = reader.cancel("stop")
+    const outcome = await Promise.race([
+      cancel.then(() => "cancelled" as const),
+      new Promise<"timed-out">((resolve) =>
+        setTimeout(() => resolve("timed-out"), 100)
+      ),
+    ])
+    pending.resolve({ done: true, value: undefined })
+    await cancel
+    expect(outcome).toBe("cancelled")
     expect(returned).toHaveBeenCalledWith("stop")
   })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}

@@ -4,7 +4,10 @@ import type {
   ProtectedBrowserTurn,
   RuntimeDisclosure,
 } from "./types"
-import { managedGeneration } from "./browser-generation-runtime"
+import {
+  managedGeneration,
+  trackActiveGeneration,
+} from "./browser-generation-runtime"
 
 export interface ChromePromptSession {
   promptStreaming(
@@ -75,85 +78,54 @@ export function createChromeBrowserRuntime(
     disclosure: CHROME_DISCLOSURE,
     generate(input) {
       assertProtectedBrowserRequest(input)
-      if (disposed) throw new Error("The Chrome browser runtime is disposed")
-      let settle!: () => void
-      const settled = new Promise<void>((resolve) => {
-        settle = resolve
-      })
-      let started = false
-      let session: ChromePromptSession | undefined
-      let sessionReleased = false
+      const createGeneration = () => {
+        let session: ChromePromptSession | undefined
+        let sessionReleased = false
 
-      const releaseSession = async () => {
-        if (!session || sessionReleased) return
-        sessionReleased = true
-        await destroySession(session)
-      }
-
-      const generation = managedGeneration(
-        async () => {
-          const options = {
-            initialPrompts: input.protectedHistory.map(
-              ({ role, protectedContent }) => ({
-                role,
-                content: protectedContent,
-              })
-            ),
-            ...(input.signal === undefined ? {} : { signal: input.signal }),
-          }
-          const created = await factory.create(options)
-          session = created
-          if (input.signal?.aborted) {
-            await releaseSession()
-            throw input.signal.reason
-          }
-          return asIterator(
-            created.promptStreaming(input.protectedContent, {
-              ...(input.signal === undefined ? {} : { signal: input.signal }),
-            })
-          )
-        },
-        input.signal,
-        async () => {
-          // The session is captured by the iterator wrapper so every path,
-          // including factory/stream errors, releases exactly one session.
-          try {
-            await releaseSession()
-          } finally {
-            settle()
-            active.delete(settled)
-          }
+        const releaseSession = async () => {
+          if (!session || sessionReleased) return
+          sessionReleased = true
+          await destroySession(session)
         }
-      )
+
+        return managedGeneration(
+          async () => {
+            if (disposed) {
+              throw new Error("The Chrome browser runtime is disposed")
+            }
+            const options = {
+              initialPrompts: input.protectedHistory.map(
+                ({ role, protectedContent }) => ({
+                  role,
+                  content: protectedContent,
+                })
+              ),
+              ...(input.signal === undefined ? {} : { signal: input.signal }),
+            }
+            const created = await factory.create(options)
+            session = created
+            if (disposed || input.signal?.aborted) {
+              await releaseSession()
+              throw (
+                input.signal?.reason ??
+                new Error("The Chrome browser runtime is disposed")
+              )
+            }
+            return asIterator(
+              created.promptStreaming(input.protectedContent, {
+                ...(input.signal === undefined ? {} : { signal: input.signal }),
+              })
+            )
+          },
+          input.signal,
+          () => releaseSession()
+        )
+      }
       return {
         [Symbol.asyncIterator]() {
-          const iterator = generation[Symbol.asyncIterator]()
-          return {
-            [Symbol.asyncIterator]() {
-              return this
-            },
-            next(...args: [] | [undefined]) {
-              if (!started) {
-                started = true
-                active.add(settled)
-              }
-              return iterator.next(...args)
-            },
-            return(reason?: unknown) {
-              return (
-                iterator.return?.(reason) ??
-                Promise.resolve({ done: true, value: undefined })
-              )
-            },
-            throw(error?: unknown) {
-              return (
-                iterator.throw?.(error) ??
-                Promise.reject(
-                  error ?? new Error("The generation cannot throw")
-                )
-              )
-            },
-          }
+          return trackActiveGeneration(createGeneration(), active)[
+            Symbol.asyncIterator
+          ]()
         },
       }
     },
@@ -173,7 +145,7 @@ export function discoverChromePromptFactory(): ChromePromptFactory | undefined {
     .LanguageModel
   if (
     candidate === null ||
-    typeof candidate !== "object" ||
+    (typeof candidate !== "object" && typeof candidate !== "function") ||
     typeof (candidate as { create?: unknown }).create !== "function"
   ) {
     return undefined

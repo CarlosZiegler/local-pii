@@ -4,7 +4,10 @@ import type {
   ProtectedBrowserRequest,
   RuntimeDisclosure,
 } from "./types"
-import { managedGeneration } from "./browser-generation-runtime"
+import {
+  managedGeneration,
+  trackActiveGeneration,
+} from "./browser-generation-runtime"
 
 export interface FakeBrowserRuntimeOptions {
   readonly chunks?: readonly string[]
@@ -49,15 +52,13 @@ export function createFakeBrowserRuntime(
       assertProtectedBrowserRequest(input)
       if (disposed) throw new Error("The fake browser runtime is disposed")
       requests.push(input)
-      let release!: () => void
-      const settled = new Promise<void>((resolve) => {
-        release = resolve
-      })
-      let started = false
+      let acquiredThisRun = false
 
       const generation = managedGeneration(
         async () => {
+          if (disposed) throw new Error("The fake browser runtime is disposed")
           acquired += 1
+          acquiredThisRun = true
           let index = 0
           return {
             async next() {
@@ -72,42 +73,10 @@ export function createFakeBrowserRuntime(
         },
         input.signal,
         () => {
-          released += 1
-          release()
-          active.delete(settled)
+          if (acquiredThisRun) released += 1
         }
       )
-      return {
-        [Symbol.asyncIterator]() {
-          const iterator = generation[Symbol.asyncIterator]()
-          return {
-            [Symbol.asyncIterator]() {
-              return this
-            },
-            next(...args: [] | [undefined]) {
-              if (!started) {
-                started = true
-                active.add(settled)
-              }
-              return iterator.next(...args)
-            },
-            return(reason?: unknown) {
-              return (
-                iterator.return?.(reason) ??
-                Promise.resolve({ done: true, value: undefined })
-              )
-            },
-            throw(error?: unknown) {
-              return (
-                iterator.throw?.(error) ??
-                Promise.reject(
-                  error ?? new Error("The generation cannot throw")
-                )
-              )
-            },
-          }
-        },
-      }
+      return trackActiveGeneration(generation, active)
     },
     async dispose() {
       disposed = true

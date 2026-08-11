@@ -25,6 +25,7 @@ function fakeTransformers(tokens = ["one ", "two ", "three"] as const) {
   const env: { experimental_useCrossOriginStorage?: boolean } = {}
   const promptMessages: Array<{ role: string; content: string }> = []
   const criteria: FakeStoppingCriteria[] = []
+  const dispose = vi.fn(async () => {})
   const generator = Object.assign(
     vi.fn(
       async (
@@ -51,6 +52,7 @@ function fakeTransformers(tokens = ["one ", "two ", "three"] as const) {
           return "formatted prompt"
         },
       },
+      dispose,
     }
   )
   const pipeline = vi.fn(async () => generator)
@@ -67,6 +69,7 @@ function fakeTransformers(tokens = ["one ", "two ", "three"] as const) {
     loadTransformers,
     pipeline,
     promptMessages,
+    dispose,
   }
 }
 
@@ -127,6 +130,9 @@ describe("Gemma browser-generation runtime", () => {
         origins: ["https://huggingface.co", "https://*.cdn.hf.co"],
       },
     })
+    await runtime.dispose()
+    await runtime.dispose()
+    expect(fake.dispose).toHaveBeenCalledOnce()
   })
 
   it("interrupts one criterion when its generation signal aborts", async () => {
@@ -173,4 +179,45 @@ describe("Gemma browser-generation runtime", () => {
     expect(() => runtime.generate(malformed)).toThrow("alternating")
     expect(fake.loadTransformers).not.toHaveBeenCalled()
   })
+
+  it("waits for a deferred pipeline and disposes it once", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers()
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const reader = runtime.generate(request())[Symbol.asyncIterator]()
+    const next = reader.next()
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+    const disposal = runtime.dispose()
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      pipeline: fake.pipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await expect(next).rejects.toThrow("disposed")
+    await disposal
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("surfaces a pipeline disposal error without repeating disposal", async () => {
+    const fake = fakeTransformers()
+    const disposalError = new Error("pipeline disposal")
+    fake.dispose.mockRejectedValue(disposalError)
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+    await collect(runtime.generate(request()))
+    await expect(runtime.dispose()).rejects.toBe(disposalError)
+    await expect(runtime.dispose()).rejects.toBe(disposalError)
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}

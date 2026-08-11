@@ -1,5 +1,9 @@
 import { describe, expect, it, vi } from "vitest"
-import { createChromeBrowserRuntime } from "./chrome-runtime"
+import {
+  createChromeBrowserRuntime,
+  discoverChromePromptFactory,
+  type ChromePromptSession,
+} from "./chrome-runtime"
 import { createProtectedBrowserRequest } from "./protected-request"
 
 async function collect(source: AsyncIterable<string>): Promise<string> {
@@ -17,6 +21,21 @@ function request(signal?: AbortSignal) {
 }
 
 describe("Chrome browser-generation runtime", () => {
+  it("discovers a class-shaped Chrome LanguageModel without writing to it", () => {
+    class NativeLanguageModel {
+      static create = vi.fn()
+    }
+    try {
+      vi.stubGlobal("LanguageModel", NativeLanguageModel)
+      expect(discoverChromePromptFactory()).toBe(NativeLanguageModel)
+
+      vi.stubGlobal("LanguageModel", function malformed() {})
+      expect(discoverChromePromptFactory()).toBeUndefined()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
   it("creates one Prompt API session with protected initial prompts", async () => {
     const destroy = vi.fn()
     const promptStreaming = vi.fn(
@@ -44,10 +63,11 @@ describe("Chrome browser-generation runtime", () => {
   it("destroys a session when the generation is cancelled", async () => {
     const abort = new AbortController()
     const destroy = vi.fn()
+    const streamCancel = vi.fn()
     const promptStreaming = vi.fn(
       () =>
         new ReadableStream<string>({
-          start() {},
+          cancel: streamCancel,
         })
     )
     const runtime = createChromeBrowserRuntime({
@@ -61,14 +81,40 @@ describe("Chrome browser-generation runtime", () => {
       [Symbol.asyncIterator]()
     const pending = iterator.next()
     await vi.waitFor(() => expect(promptStreaming).toHaveBeenCalledOnce())
-    abort.abort(new Error("stop"))
+    const reason = new Error("stop")
+    abort.abort(reason)
 
-    await expect(pending).rejects.toThrow("stop")
+    await expect(pending).rejects.toBe(reason)
     await expect(runtime.dispose()).resolves.toBeUndefined()
     expect(destroy).toHaveBeenCalledOnce()
+    expect(streamCancel).toHaveBeenCalledWith(reason)
     expect(promptStreaming).toHaveBeenCalledWith("Current", {
       signal: abort.signal,
     })
+  })
+
+  it("destroys a late-created session after disposal", async () => {
+    const opening = deferred<ChromePromptSession>()
+    const destroy = vi.fn()
+    const promptStreaming = vi.fn(
+      () =>
+        new ReadableStream<string>({
+          start(controller) {
+            controller.close()
+          },
+        })
+    )
+    const create = vi.fn(async () => opening.promise)
+    const runtime = createChromeBrowserRuntime({ create })
+    const reader = runtime.generate(request())[Symbol.asyncIterator]()
+    const next = reader.next()
+    await vi.waitFor(() => expect(create).toHaveBeenCalledOnce())
+    const disposal = runtime.dispose()
+    opening.resolve({ destroy, promptStreaming })
+    await expect(next).rejects.toThrow("disposed")
+    await disposal
+    expect(promptStreaming).not.toHaveBeenCalled()
+    expect(destroy).toHaveBeenCalledOnce()
   })
 
   it("rejects an unmarked request before factory acquisition", () => {
@@ -85,3 +131,11 @@ describe("Chrome browser-generation runtime", () => {
     expect(create).not.toHaveBeenCalled()
   })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}

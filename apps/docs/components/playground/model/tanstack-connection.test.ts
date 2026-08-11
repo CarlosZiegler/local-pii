@@ -1,4 +1,9 @@
-import { EventType, type ModelMessage } from "@tanstack/ai/client"
+import {
+  EventType,
+  type ModelMessage,
+  type StreamChunk,
+} from "@tanstack/ai/client"
+import type { RunAgentInputContext } from "@tanstack/ai-client"
 import { createAnonymizer } from "local-pii"
 import { piiConnection } from "local-pii/tanstack"
 import { describe, expect, it } from "vitest"
@@ -7,6 +12,7 @@ import {
   createBrowserConnection,
   UnsupportedPromptMessageError,
 } from "./tanstack-connection"
+import type { BrowserGenerationRuntime } from "./types"
 
 async function collect<T>(source: AsyncIterable<T>): Promise<T[]> {
   const values: T[] = []
@@ -27,6 +33,7 @@ describe("createBrowserConnection", () => {
       createBrowserConnection(runtime).connect(messages, undefined, undefined, {
         threadId: "thread-1",
         runId: "run-1",
+        parentRunId: "parent-1",
       })
     )
 
@@ -52,7 +59,11 @@ describe("createBrowserConnection", () => {
         .map((chunk) => chunk.delta)
         .join("")
     ).toBe("Hello there")
-    expect(chunks[0]).toMatchObject({ threadId: "thread-1", runId: "run-1" })
+    expect(chunks[0]).toMatchObject({
+      threadId: "thread-1",
+      runId: "run-1",
+      parentRunId: "parent-1",
+    })
     expect(chunks.at(-1)).toMatchObject({
       threadId: "thread-1",
       runId: "run-1",
@@ -95,6 +106,43 @@ describe("createBrowserConnection", () => {
     expect(messages[0]).toEqual({
       role: "user",
       content: "Email ana@example.com",
+    })
+  })
+
+  it("includes run identity on errors", async () => {
+    const runtime: BrowserGenerationRuntime = {
+      id: "failing",
+      disclosure: {
+        label: "test",
+        model: "test",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate() {
+        return (async function* (): AsyncGenerator<string> {
+          throw new Error("generation failed")
+        })()
+      },
+      dispose: async () => {},
+    }
+    const context: RunAgentInputContext = {
+      threadId: "thread-error",
+      runId: "run-error",
+      parentRunId: "parent-error",
+    }
+    const chunks: StreamChunk[] = []
+    for await (const chunk of createBrowserConnection(runtime).connect(
+      [{ role: "user", content: "Current" }],
+      undefined,
+      undefined,
+      context
+    )) {
+      chunks.push(chunk)
+    }
+    expect(chunks.at(-1)).toMatchObject({
+      type: EventType.RUN_ERROR,
+      threadId: "thread-error",
+      runId: "run-error",
     })
   })
 })

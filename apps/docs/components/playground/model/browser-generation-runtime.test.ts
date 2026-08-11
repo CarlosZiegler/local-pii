@@ -50,6 +50,29 @@ describe("managedGeneration", () => {
     expect(returned).toHaveBeenCalledWith("stop")
   })
 
+  it("returns the upstream concurrently with a pending next", async () => {
+    const pending = deferred<IteratorResult<string>>()
+    const returned = vi.fn(async () => ({
+      done: true as const,
+      value: undefined,
+    }))
+    const open = vi.fn(async () => ({
+      next: () => pending.promise,
+      return: returned,
+    }))
+    const reader = managedGeneration(open)[Symbol.asyncIterator]()
+    const next = reader.next()
+    await vi.waitFor(() => expect(open).toHaveBeenCalledOnce())
+    const close = reader.return?.("stop")
+    await Promise.resolve()
+    const returnedBeforeNextSettled = returned.mock.calls.length
+    pending.resolve({ done: true, value: undefined })
+    await close
+    await next
+    expect(returnedBeforeNextSettled).toBe(1)
+    expect(returned).toHaveBeenCalledWith("stop")
+  })
+
   it("returns the source on abort while next is pending", async () => {
     const abort = new AbortController()
     const pending = deferred<IteratorResult<string>>()
@@ -86,10 +109,10 @@ describe("managedGeneration", () => {
     abort.abort(reason)
 
     await expect(next).rejects.toBe(reason)
-    expect(settled).toHaveBeenCalledOnce()
     opening.resolve({
       next: async () => ({ done: true, value: undefined }),
     })
+    await vi.waitFor(() => expect(settled).toHaveBeenCalledOnce())
   })
 
   it("freezes the marked request and rejects a non-leading system turn", () => {
@@ -162,6 +185,31 @@ describe("managedGeneration", () => {
     ).rejects.toBe(cleanupError)
   })
 
+  it("preserves an undefined primary error over cleanup failure", async () => {
+    const cleanupError = new Error("cleanup")
+    const reader = managedGeneration(
+      async () => ({
+        async next(): Promise<IteratorResult<string>> {
+          throw undefined
+        },
+        async return() {
+          throw cleanupError
+        },
+      }),
+      undefined,
+      () => {
+        throw cleanupError
+      }
+    )[Symbol.asyncIterator]()
+    let caught: unknown = Symbol("not caught")
+    try {
+      await reader.next()
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeUndefined()
+  })
+
   it("waits for an active deterministic fake run before disposal", async () => {
     const runtime = createFakeBrowserRuntime({ chunks: ["one", "two"] })
     const source = runtime.generate(
@@ -194,6 +242,48 @@ describe("managedGeneration", () => {
       })
     )
     await expect(runtime.dispose()).resolves.toBeUndefined()
+  })
+
+  it("does not acquire an iterable created before disposal", async () => {
+    const runtime = createFakeBrowserRuntime()
+    const reader = runtime
+      .generate(
+        createProtectedBrowserRequest({
+          protectedHistory: [],
+          protectedContent: "current",
+        })
+      )
+      [Symbol.asyncIterator]()
+    await runtime.dispose()
+    await expect(reader.next()).rejects.toThrow("disposed")
+    expect(runtime.acquired).toBe(0)
+  })
+
+  it("tracks two iterators from one iterable independently", async () => {
+    const runtime = createFakeBrowserRuntime({ chunks: ["one", "two"] })
+    const source = runtime.generate(
+      createProtectedBrowserRequest({
+        protectedHistory: [],
+        protectedContent: "current",
+      })
+    )
+    const first = source[Symbol.asyncIterator]()
+    const second = source[Symbol.asyncIterator]()
+    await first.next()
+    await second.next()
+    const disposal = runtime.dispose()
+    await Promise.resolve()
+    await first.return?.("first")
+    let settled = false
+    void disposal.then(() => {
+      settled = true
+    })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    await second.return?.("second")
+    await disposal
+    expect(runtime.acquired).toBe(2)
+    expect(runtime.released).toBe(2)
   })
 
   it("settles an iterator returned before its source is opened", async () => {
