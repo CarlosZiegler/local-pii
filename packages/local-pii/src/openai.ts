@@ -1,8 +1,10 @@
 import { createAnonymizer, type Anonymizer } from "./anonymizer"
 import {
+  cloneOpenAIValue,
   protectOpenAIMessages,
   restoreOpenAICompletion,
   restoreOpenAIMessage,
+  restoreOpenAIParseCompletion,
 } from "./openai-content"
 import { restoreOpenAIStream, throwIfOpenAIAborted } from "./openai-stream"
 import { token } from "./placeholder/strategies"
@@ -126,24 +128,53 @@ type ApiInvocation<T> = Promise<T> & {
   withResponse?: (...args: unknown[]) => Promise<unknown>
 }
 
+const COMPLETION_CRUD_HELPERS = new Set([
+  "retrieve",
+  "update",
+  "list",
+  "delete",
+])
+const OBJECT_FUNCTIONS = new Set([
+  "constructor",
+  "toString",
+  "toLocaleString",
+  "valueOf",
+  "hasOwnProperty",
+  "isPrototypeOf",
+  "propertyIsEnumerable",
+  "__defineGetter__",
+  "__defineSetter__",
+  "__lookupGetter__",
+  "__lookupSetter__",
+])
+
 function deferredApiPromise<T>(
   operation: Promise<T>,
-  rawResult: () => unknown
+  handleReady: Promise<{ value: unknown }>,
+  restore: (value: unknown) => T
 ): ApiInvocation<T> {
+  void operation.catch(() => undefined)
+  void handleReady.catch(() => undefined)
   const helper =
     (name: "asResponse" | "withResponse") =>
     (...args: unknown[]): Promise<unknown> =>
-      operation.then(async (restored) => {
-        const raw = rawResult() as ApiInvocation<unknown> | undefined
+      handleReady.then(async ({ value: rawResult }) => {
+        const raw = rawResult as ApiInvocation<unknown> | undefined
         const method = raw?.[name]
         if (typeof method !== "function") {
-          if (name === "withResponse") return { data: restored }
+          if (name === "withResponse")
+            return operation.then((restored) => ({ data: restored }))
           throw new TypeError(`OpenAI APIPromise does not support ${name}()`)
         }
         const envelope = await method.apply(raw, args)
         if (name === "asResponse") return envelope
-        if (isRecord(envelope)) return { ...envelope, data: restored }
-        return { data: restored, envelope }
+        if (isRecord(envelope) && "data" in envelope)
+          return cloneOpenAIValue(envelope, {
+            data: restore(envelope.data),
+          })
+        return isRecord(envelope)
+          ? cloneOpenAIValue(envelope, { data: restore(undefined) })
+          : { data: restore(undefined), envelope }
       })
 
   return new Proxy(operation as ApiInvocation<T>, {
@@ -152,7 +183,11 @@ function deferredApiPromise<T>(
         return Reflect.get(target, property, target).bind(target)
       if (property === "asResponse" || property === "withResponse")
         return helper(property)
-      return Reflect.get(target, property, target)
+      const value = Reflect.get(target, property, target)
+      if (value !== undefined) return value
+      return () => {
+        throw new PiiOpenAIHelperError(`APIPromise.${String(property)}`)
+      }
     },
   })
 }
@@ -164,21 +199,32 @@ function protectedInvocation<T>(
   invoke: (body: Record<string, unknown>, options?: unknown) => unknown,
   restore: (result: unknown) => T
 ): ApiInvocation<T> {
-  let rawResult: unknown
+  let resolveHandle: (value: { value: unknown }) => void = () => undefined
+  let rejectHandle: (reason: unknown) => void = () => undefined
+  const handleReady = new Promise<{ value: unknown }>((resolve, reject) => {
+    resolveHandle = resolve
+    rejectHandle = reject
+  })
   const operation = (async () => {
-    const signal = requestSignal(body, options)
-    // Check before protection and before invoking the provider.
-    throwIfOpenAIAborted(signal)
-    const originalMessages = Array.isArray(body.messages) ? body.messages : []
-    const messages = await protectOpenAIMessages(session, originalMessages)
-    throwIfOpenAIAborted(signal)
-    rawResult =
-      options === undefined
-        ? invoke({ ...body, messages })
-        : invoke({ ...body, messages }, options)
-    return restore(await rawResult)
+    try {
+      const signal = requestSignal(body, options)
+      // Check before protection and before invoking the provider.
+      throwIfOpenAIAborted(signal)
+      const originalMessages = Array.isArray(body.messages) ? body.messages : []
+      const messages = await protectOpenAIMessages(session, originalMessages)
+      throwIfOpenAIAborted(signal)
+      const rawResult =
+        options === undefined
+          ? invoke({ ...body, messages })
+          : invoke({ ...body, messages }, options)
+      resolveHandle({ value: rawResult })
+      return restore(await rawResult)
+    } catch (error) {
+      rejectHandle(error)
+      throw error
+    }
   })()
-  return deferredApiPromise(operation, () => rawResult)
+  return deferredApiPromise(operation, handleReady, restore)
 }
 
 /**
@@ -209,13 +255,18 @@ export function withPiiOpenAI<T extends OpenAILike>(
         )
       : undefined
 
+  const failClosedError = (helper: string): never => {
+    throw new PiiOpenAIHelperError(helper)
+  }
+
   const wrappedCreate = (params: Record<string, unknown>, options?: unknown) =>
     protectedInvocation(session, params, options, create, (result) =>
       params.stream
         ? (restoreOpenAIStream(
             session,
             result as AsyncIterable<unknown>,
-            requestSignal(params, options)
+            requestSignal(params, options),
+            failClosedError
           ) as never)
         : restoreOpenAICompletion(session, result)
     )
@@ -223,13 +274,11 @@ export function withPiiOpenAI<T extends OpenAILike>(
   const wrappedParse = parse
     ? (params: Record<string, unknown>, options?: unknown) =>
         protectedInvocation(session, params, options, parse, (result) =>
-          restoreOpenAICompletion(session, result)
+          restoreOpenAIParseCompletion(session, result)
         )
     : undefined
 
-  const failClosed = (helper: string) => () => {
-    throw new PiiOpenAIHelperError(helper)
-  }
+  const failClosed = (helper: string) => () => failClosedError(helper)
 
   const completions = new Proxy(targetCompletions as object, {
     get(target, property) {
@@ -238,7 +287,14 @@ export function withPiiOpenAI<T extends OpenAILike>(
       if (property === "stream" || property === "runTools")
         return failClosed(String(property))
       const value = Reflect.get(target, property, target)
-      return typeof value === "function" ? value.bind(target) : value
+      if (typeof value !== "function") return value
+      if (
+        typeof property === "string" &&
+        (COMPLETION_CRUD_HELPERS.has(property) ||
+          OBJECT_FUNCTIONS.has(property))
+      )
+        return value.bind(target)
+      return failClosed(property.toString())
     },
   })
 

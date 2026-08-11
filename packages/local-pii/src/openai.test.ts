@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest"
 import { createAnonymizer } from "./anonymizer"
 import { protectOpenAIMessages } from "./openai-content"
-import { createPiiChat, withPiiOpenAI, type ChatMessage } from "./openai"
+import {
+  createPiiChat,
+  PiiOpenAIHelperError,
+  withPiiOpenAI,
+  type ChatMessage,
+} from "./openai"
 import { sequential } from "./placeholder/strategies"
 
 const TOKEN = /PII[0-9A-HJKMNP-TV-Z]+/
@@ -118,6 +123,8 @@ class PrivateCompletions {
   parseOptions: object | undefined
   streamCalls = 0
   runToolsCalls = 0
+  generateCalls = 0
+  readonly resource = { kind: "resource" }
 
   create(body: Record<string, unknown>, options?: object) {
     return this.parse(body, options)
@@ -145,6 +152,16 @@ class PrivateCompletions {
     return undefined
   }
 
+  generate(body: Record<string, unknown>) {
+    void body
+    this.generateCalls++
+    return { choices: [] }
+  }
+
+  retrieve() {
+    return this.#secret
+  }
+
   privateValue() {
     return this.#secret
   }
@@ -155,6 +172,7 @@ class SurfaceStream implements AsyncIterable<unknown> {
   readonly controller = { state: "active" }
   readonly chunks: unknown[]
   rawReadableCalls = 0
+  collectCalls = 0
 
   constructor(chunks: unknown[]) {
     this.chunks = chunks
@@ -182,6 +200,11 @@ class SurfaceStream implements AsyncIterable<unknown> {
     this.rawReadableCalls++
     throw new Error("raw stream helper must not bypass restoration")
   }
+
+  collect() {
+    this.collectCalls++
+    return this.chunks
+  }
 }
 
 describe("withPiiOpenAI client surface compatibility", () => {
@@ -203,7 +226,80 @@ describe("withPiiOpenAI client surface compatibility", () => {
       (completions.parseBody!.messages as ChatMessage[])[0]!.content
     ).not.toContain("ana@acme.com")
     expect(restored.choices[0]!.message.content).toBe("email ana@acme.com")
-    expect(wrapped.chat.completions.privateValue()).toBe("private-completions")
+    expect(() => wrapped.chat.completions.privateValue()).toThrow(
+      PiiOpenAIHelperError
+    )
+  })
+
+  it("deep-restores parse semantic fields without touching controls", async () => {
+    const client = {
+      chat: {
+        completions: {
+          create: (params: Record<string, unknown>) => {
+            void params
+            return testApiPromise({ choices: [] }, {})
+          },
+          parse: (body: Record<string, unknown>) => {
+            const placeholder = (
+              (body.messages as ChatMessage[])[0]!.content as string
+            ).match(TOKEN)![0]
+            const parsed = {
+              email: placeholder,
+              nested: [{ value: placeholder }],
+            }
+            const parsedArguments = { email: placeholder }
+            return testApiPromise(
+              {
+                choices: [
+                  {
+                    message: {
+                      role: "assistant",
+                      content: placeholder,
+                      parsed,
+                      control: { value: placeholder },
+                      tool_calls: [
+                        {
+                          id: "call-1",
+                          function: {
+                            name: "lookup",
+                            arguments: JSON.stringify({ email: placeholder }),
+                            parsed_arguments: parsedArguments,
+                            control: { value: placeholder },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+              {}
+            )
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const restored = (await wrapped.chat.completions.parse({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    })) as {
+      choices: Array<{ message: ChatMessage & { parsed: unknown } }>
+    }
+    const message = restored.choices[0]!.message
+    expect(message.content).toBe("ana@acme.com")
+    expect((message.parsed as { email: string }).email).toBe("ana@acme.com")
+    expect(
+      (message.parsed as { nested: Array<{ value: string }> }).nested[0]!.value
+    ).toBe("ana@acme.com")
+    expect(message.control).toEqual({ value: expect.stringMatching(TOKEN) })
+    const functionValue = message.tool_calls![0]!.function as unknown as Record<
+      string,
+      unknown
+    >
+    expect(functionValue.parsed_arguments).toEqual({ email: "ana@acme.com" })
+    expect(functionValue.control).toEqual({
+      value: expect.stringMatching(TOKEN),
+    })
   })
 
   it("fails closed for raw stream and runTools helpers", () => {
@@ -223,6 +319,21 @@ describe("withPiiOpenAI client surface compatibility", () => {
     ).toThrow(/completions\.create/i)
     expect(completions.streamCalls).toBe(0)
     expect(completions.runToolsCalls).toBe(0)
+  })
+
+  it("fails closed for unknown completion helpers but binds CRUD helpers", () => {
+    const completions = new PrivateCompletions()
+    const wrapped = withPiiOpenAI({ chat: { completions } })
+    const completionSurface = wrapped.chat.completions as typeof completions
+    expect(() =>
+      completionSurface.generate({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "email ana@acme.com" }],
+      })
+    ).toThrow(PiiOpenAIHelperError)
+    expect(completions.generateCalls).toBe(0)
+    expect(completionSurface.retrieve()).toBe("private-completions")
+    expect(completionSurface.resource).toBe(completions.resource)
   })
 
   it("forwards RequestOptions by identity and honors its signal", async () => {
@@ -317,6 +428,75 @@ describe("withPiiOpenAI client surface compatibility", () => {
     expect(rawPromise).toBeDefined()
   })
 
+  it("delegates asResponse as soon as a raw APIPromise handle exists", async () => {
+    const response = new Response("one-shot body")
+    const parseFailure = new Error("parsed data failed")
+    let rawPromise: TestApiPromise<unknown> | undefined
+    const client = {
+      chat: {
+        completions: {
+          create: (params: Record<string, unknown>) => {
+            const protectedContent = (params.messages as ChatMessage[])[0]!
+              .content as string
+            const rejected = Promise.reject(
+              parseFailure
+            ) as TestApiPromise<unknown>
+            rawPromise = Object.assign(rejected, {
+              asResponse: async () => response,
+              withResponse: async () => ({
+                data: {
+                  choices: [{ message: { content: protectedContent } }],
+                },
+                response,
+                request_id: "request-raw",
+              }),
+            })
+            return rawPromise
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const result = wrapped.chat.completions.create({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    }) as TestApiPromise<unknown>
+    const envelope = await result.withResponse()
+    expect(envelope.request_id).toBe("request-raw")
+    expect(
+      (envelope.data as { choices: Array<{ message: ChatMessage }> })
+        .choices[0]!.message.content
+    ).toBe("email ana@acme.com")
+    const rawResponse = await result.asResponse()
+    expect(rawResponse).toBe(response)
+    expect(response.bodyUsed).toBe(false)
+    expect(await response.text()).toBe("one-shot body")
+    await expect(result).rejects.toBe(parseFailure)
+    expect(rawPromise).toBeDefined()
+  })
+
+  it("fails closed for unknown APIPromise helpers", async () => {
+    const client = {
+      chat: {
+        completions: {
+          create: (params: Record<string, unknown>) => {
+            void params
+            return testApiPromise({ choices: [] }, {})
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const result = wrapped.chat.completions.create({
+      model: "gpt-test",
+      messages: [],
+    }) as unknown as TestApiPromise<unknown> & {
+      collect(): unknown
+    }
+    expect(() => result.collect()).toThrow(PiiOpenAIHelperError)
+    await result
+  })
+
   it("preserves stream surfaces while wrapping tee and readable-stream output", async () => {
     let rawStream: SurfaceStream | undefined
     const client = {
@@ -341,7 +521,7 @@ describe("withPiiOpenAI client surface compatibility", () => {
       messages: [{ role: "user", content: "email ana@acme.com" }],
     })) as SurfaceStream & AsyncIterable<unknown>
     expect(stream.controller).toBe(rawStream!.controller)
-    expect(stream.privateValue()).toBe("private-stream")
+    expect(() => stream.privateValue()).toThrow(PiiOpenAIHelperError)
     const tee = stream.tee()
     expect(tee).toHaveLength(2)
     for (const branch of tee) {
@@ -366,6 +546,8 @@ describe("withPiiOpenAI client surface compatibility", () => {
       choices: [{ index: 0, delta: { content: "ana@acme.com" } }],
     })
     expect(rawStream!.rawReadableCalls).toBe(0)
+    expect(() => stream.collect()).toThrow(PiiOpenAIHelperError)
+    expect(rawStream!.collectCalls).toBe(0)
   })
 })
 
@@ -493,6 +675,12 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       usage: { total_tokens: 12, metadata: "ana@acme.com" },
       custom: { preserve: "ana@acme.com" },
     }
+    Object.defineProperty(response, "_request_id", {
+      configurable: true,
+      enumerable: false,
+      value: "request-42",
+      writable: false,
+    })
     let providerSnapshot: typeof response | undefined
     let choicesReference: typeof response.choices | undefined
     let messageReference: (typeof response.choices)[0]["message"] | undefined
@@ -553,6 +741,9 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       metadata: "ana@acme.com",
     })
     expect(restored.custom).toEqual({ preserve: "ana@acme.com" })
+    expect(Object.getOwnPropertyDescriptor(restored, "_request_id")).toEqual(
+      Object.getOwnPropertyDescriptor(response, "_request_id")
+    )
     expect(providerSnapshot).toBeDefined()
     expect(response).toEqual(providerSnapshot)
     expect(response.choices).toBe(choicesReference)
@@ -1112,6 +1303,67 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     })
     await expect(rejection).rejects.toMatchObject({ name: "AbortError" })
     expect(providerCalls).toBe(0)
+  })
+
+  it("honors an OpenAI stream controller abort before flushing buffered tails", async () => {
+    const controller = new AbortController()
+    const reason = new Error("stream controller cancelled")
+    let placeholder = ""
+    let pulls = 0
+    const source: AsyncIterable<unknown> & {
+      controller: { signal: AbortSignal; abort(reason?: unknown): void }
+    } = {
+      controller: {
+        signal: controller.signal,
+        abort(value?: unknown) {
+          controller.abort(value)
+        },
+      },
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            pulls++
+            if (controller.signal.aborted)
+              return { done: true, value: undefined }
+            return {
+              done: false,
+              value: {
+                choices: [
+                  { index: 0, delta: { content: placeholder.slice(0, 4) } },
+                ],
+              },
+            }
+          },
+          async return() {
+            return { done: true, value: undefined }
+          },
+        }
+      },
+    }
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: Record<string, unknown>) => {
+            placeholder = (
+              (params.messages as ChatMessage[])[0]!.content as string
+            ).match(TOKEN)![0]
+            return source
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const stream = (await wrapped.chat.completions.create({
+      model: "gpt-test",
+      stream: true,
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    })) as typeof source & AsyncIterable<unknown>
+    const iterator = stream[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    expect(JSON.stringify(first.value)).not.toContain("ana@acme.com")
+    stream.controller.abort(reason)
+    await expect(iterator.next()).rejects.toBe(reason)
+    expect(pulls).toBe(1)
   })
 
   it("preserves a provider generation failure", async () => {

@@ -1,4 +1,5 @@
 import { createStreamingRehydrator } from "./rehydrate"
+import { cloneOpenAIValue } from "./openai-content"
 import type { PiiSession } from "./session"
 import type { OpenAIRecord } from "./openai-content"
 import type { Mapping } from "./types"
@@ -24,6 +25,14 @@ function isRecord(value: unknown): value is OpenAIRecord {
 
 function numericIndex(value: unknown, fallback: number): number {
   return typeof value === "number" && Number.isFinite(value) ? value : fallback
+}
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    typeof (value as { aborted?: unknown }).aborted === "boolean"
+  )
 }
 
 /** Make the abort error only when AbortSignal.reason is unavailable. */
@@ -79,27 +88,25 @@ function restoreChoice(
   const choiceIndex = numericIndex(choice.index, 0)
   const delta = choice.delta
   let changed = false
-  const nextDelta: OpenAIRecord = { ...delta }
+  const deltaOverrides: OpenAIRecord = {}
 
   if (typeof delta.content === "string") {
-    nextDelta.content = textStateFor(textStates, session, choiceIndex).push(
-      delta.content
-    )
+    deltaOverrides.content = textStateFor(
+      textStates,
+      session,
+      choiceIndex
+    ).push(delta.content)
     changed = true
   }
 
   if (Array.isArray(delta.tool_calls)) {
-    const toolCalls: unknown[] = []
-    for (const toolCall of delta.tool_calls) {
-      if (!isRecord(toolCall) || !isRecord(toolCall.function)) {
-        toolCalls.push(toolCall)
-        continue
-      }
+    const toolCallOverrides: Record<string, unknown> = {}
+    let toolCallsChanged = false
+    for (let index = 0; index < delta.tool_calls.length; index++) {
+      const toolCall = delta.tool_calls[index]
+      if (!isRecord(toolCall) || !isRecord(toolCall.function)) continue
       const fn = toolCall.function
-      if (typeof fn.arguments !== "string") {
-        toolCalls.push(toolCall)
-        continue
-      }
+      if (typeof fn.arguments !== "string") continue
       const toolIndex = numericIndex(toolCall.index, 0)
       const restoredArguments = toolStateFor(
         toolStates,
@@ -107,16 +114,24 @@ function restoreChoice(
         choiceIndex,
         toolIndex
       ).rehydrator.push(fn.arguments)
-      toolCalls.push({
-        ...toolCall,
-        function: { ...fn, arguments: restoredArguments },
+      toolCallOverrides[index] = cloneOpenAIValue(toolCall, {
+        function: cloneOpenAIValue(fn, { arguments: restoredArguments }),
       })
+      toolCallsChanged = true
       changed = true
     }
-    if (changed) nextDelta.tool_calls = toolCalls
+    if (toolCallsChanged)
+      deltaOverrides.tool_calls = cloneOpenAIValue(
+        delta.tool_calls,
+        toolCallOverrides
+      )
   }
 
-  return changed ? { ...choice, delta: nextDelta } : choice
+  return changed
+    ? cloneOpenAIValue(choice, {
+        delta: cloneOpenAIValue(delta, deltaOverrides),
+      })
+    : choice
 }
 
 function flushStates(
@@ -162,8 +177,27 @@ function flushStates(
 export function restoreOpenAIStream(
   session: PiiSession,
   source: AsyncIterable<unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  failClosed?: (helper: string) => never
 ): AsyncIterable<unknown> {
+  const sourceController = isRecord(source) ? source.controller : undefined
+  const sourceSignal =
+    isRecord(sourceController) && isAbortSignal(sourceController.signal)
+      ? sourceController.signal
+      : undefined
+  const checkAborted = (): void => {
+    throwIfOpenAIAborted(signal)
+    throwIfOpenAIAborted(sourceSignal)
+  }
+  const helperError =
+    failClosed ??
+    ((helper: string): never => {
+      const error = new Error(
+        `OpenAI stream helper ${helper}() cannot be wrapped safely`
+      )
+      error.name = "PiiOpenAIHelperError"
+      throw error
+    })
   const iteratorFactory = (): AsyncIterator<unknown> => {
     let upstream: AsyncIterator<unknown> | undefined
     const textStates = new Map<number, TextState>()
@@ -199,7 +233,7 @@ export function restoreOpenAIStream(
         if (done) return { done: true, value: undefined }
         if (flushQueue.length > 0) {
           try {
-            throwIfOpenAIAborted(signal)
+            checkAborted()
             return { done: false, value: flushQueue.shift() }
           } catch (error) {
             return fail(error)
@@ -211,15 +245,15 @@ export function restoreOpenAIStream(
         }
 
         try {
-          throwIfOpenAIAborted(signal)
+          checkAborted()
           if (!upstream) upstream = source[Symbol.asyncIterator]()
           const next = await upstream.next()
-          throwIfOpenAIAborted(signal)
+          checkAborted()
           if (next.done) {
             upstreamDone = true
             flushQueue = flushStates(session, textStates, toolStates)
             if (flushQueue.length > 0) {
-              throwIfOpenAIAborted(signal)
+              checkAborted()
               return { done: false, value: flushQueue.shift() }
             }
             done = true
@@ -229,7 +263,8 @@ export function restoreOpenAIStream(
             return { done: false, value: next.value }
           }
           let choicesChanged = false
-          const choices = next.value.choices.map((choice) => {
+          const choiceOverrides: Record<string, unknown> = {}
+          next.value.choices.forEach((choice, index) => {
             const restored = restoreChoice(
               session,
               textStates,
@@ -237,11 +272,18 @@ export function restoreOpenAIStream(
               choice
             )
             choicesChanged ||= restored !== choice
-            return restored
+            if (restored !== choice) choiceOverrides[index] = restored
           })
           return {
             done: false,
-            value: choicesChanged ? { ...next.value, choices } : next.value,
+            value: choicesChanged
+              ? cloneOpenAIValue(next.value, {
+                  choices: cloneOpenAIValue(
+                    next.value.choices,
+                    choiceOverrides
+                  ),
+                })
+              : next.value,
           }
         } catch (error) {
           return fail(error)
@@ -308,14 +350,16 @@ export function restoreOpenAIStream(
             restoreOpenAIStream(
               session,
               branch as AsyncIterable<unknown>,
-              signal
+              signal,
+              helperError
             )
           )
         }
       }
       if (property === "toReadableStream") return toReadableStream
       const value = Reflect.get(target, property, target)
-      return typeof value === "function" ? value.bind(target) : value
+      if (typeof value !== "function") return value
+      return () => helperError(String(property))
     },
   }) as unknown as AsyncIterable<unknown>
 }

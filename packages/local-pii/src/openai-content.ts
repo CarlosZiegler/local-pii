@@ -12,6 +12,35 @@ function isRecord(value: unknown): value is OpenAIRecord {
   return value !== null && typeof value === "object"
 }
 
+/** Clone one changed path without dropping SDK metadata or descriptors. */
+export function cloneOpenAIValue<T extends object>(
+  source: T,
+  overrides: Record<string, unknown>
+): T {
+  const clone = Array.isArray(source)
+    ? []
+    : Object.create(Object.getPrototypeOf(source))
+  const descriptors = Object.getOwnPropertyDescriptors(source) as Record<
+    string,
+    PropertyDescriptor
+  >
+  for (const [key, value] of Object.entries(overrides)) {
+    const descriptor = descriptors[key]
+    if (descriptor && "value" in descriptor) {
+      descriptors[key] = { ...descriptor, value }
+    } else {
+      descriptors[key] = {
+        configurable: descriptor?.configurable ?? true,
+        enumerable: descriptor?.enumerable ?? true,
+        value,
+        writable: true,
+      }
+    }
+  }
+  Object.defineProperties(clone, descriptors)
+  return clone as T
+}
+
 async function protectText(
   session: PiiSession,
   value: string
@@ -68,10 +97,11 @@ async function protectMessage(
       )
       if (argumentsValue !== fn.arguments) {
         callsChanged = true
-        nextCalls!.push({
-          ...call,
-          function: { ...fn, arguments: argumentsValue },
-        })
+        nextCalls!.push(
+          cloneOpenAIValue(call, {
+            function: cloneOpenAIValue(fn, { arguments: argumentsValue }),
+          })
+        )
       } else {
         nextCalls!.push(call)
       }
@@ -81,10 +111,10 @@ async function protectMessage(
   changed ||= callsChanged
 
   if (!changed) return message
-  const next: OpenAIRecord = { ...source }
-  if (hasContent) next.content = content
-  if (callsChanged) next.tool_calls = nextCalls
-  return next
+  const overrides: OpenAIRecord = {}
+  if (hasContent) overrides.content = content
+  if (callsChanged) overrides.tool_calls = nextCalls
+  return cloneOpenAIValue(source, overrides)
 }
 
 /** Protect only message content and tool-call function arguments. */
@@ -252,52 +282,157 @@ export function restoreOpenAIMessage<T>(session: PiiSession, message: T): T {
   }
 
   let toolCalls: unknown[] | null = null
+  const callOverrides: Record<string, unknown> = {}
   let callsChanged = false
   if (Array.isArray(source.tool_calls)) {
     toolCalls = []
-    for (const call of source.tool_calls) {
+    for (let index = 0; index < source.tool_calls.length; index++) {
+      const call = source.tool_calls[index]
       if (!isRecord(call) || !isRecord(call.function)) {
-        toolCalls.push(call)
         continue
       }
       const fn = call.function as OpenAIRecord
-      if (typeof fn.arguments !== "string") {
-        toolCalls.push(call)
-        continue
-      }
+      if (typeof fn.arguments !== "string") continue
       const argumentsValue = restoreOpenAIToolArguments(session, fn.arguments)
       if (argumentsValue !== fn.arguments) {
         callsChanged = true
-        toolCalls.push({
-          ...call,
-          function: { ...fn, arguments: argumentsValue },
+        callOverrides[index] = cloneOpenAIValue(call, {
+          function: cloneOpenAIValue(fn, { arguments: argumentsValue }),
         })
-      } else {
-        toolCalls.push(call)
       }
     }
+    if (callsChanged)
+      toolCalls = cloneOpenAIValue(source.tool_calls, callOverrides)
   }
 
   changed ||= callsChanged
 
   if (!changed) return message
-  const next: OpenAIRecord = { ...source }
-  if (typeof source.content === "string") next.content = content
-  if (callsChanged) next.tool_calls = toolCalls
-  return next as T
+  const overrides: OpenAIRecord = {}
+  if (typeof source.content === "string") overrides.content = content
+  if (callsChanged) overrides.tool_calls = toolCalls
+  return cloneOpenAIValue(source, overrides) as T
+}
+
+interface RestoredSemanticValue {
+  changed: boolean
+  value: unknown
+}
+
+function restoreSemanticValue(
+  session: PiiSession,
+  value: unknown
+): RestoredSemanticValue {
+  if (typeof value === "string") {
+    const restored = session.rehydrate(value, { lenient: true })
+    return { changed: restored !== value, value: restored }
+  }
+  if (Array.isArray(value)) {
+    const restored = value.map((item) => restoreSemanticValue(session, item))
+    if (!restored.some((item) => item.changed)) return { changed: false, value }
+    const overrides: Record<string, unknown> = {}
+    for (let index = 0; index < restored.length; index++)
+      overrides[index] = restored[index]!.value
+    return {
+      changed: true,
+      value: cloneOpenAIValue(value, overrides),
+    }
+  }
+  if (!isRecord(value)) return { changed: false, value }
+  const overrides: Record<string, unknown> = {}
+  let changed = false
+  for (const [key, item] of Object.entries(value)) {
+    const restored = restoreSemanticValue(session, item)
+    if (restored.changed) {
+      changed = true
+      overrides[key] = restored.value
+    }
+  }
+  return {
+    changed,
+    value: changed ? cloneOpenAIValue(value, overrides) : value,
+  }
+}
+
+/** Restore parse-only structured fields in addition to ordinary messages. */
+export function restoreOpenAIParseCompletion<T>(
+  session: PiiSession,
+  result: T
+): T {
+  if (!isRecord(result) || !Array.isArray(result.choices)) return result
+  let changed = false
+  const choiceOverrides: Record<string, unknown> = {}
+  for (let index = 0; index < result.choices.length; index++) {
+    const choice = result.choices[index]
+    if (!isRecord(choice) || !isRecord(choice.message)) continue
+    let message = restoreOpenAIMessage(session, choice.message)
+    const sourceMessage = message as OpenAIMessageLike
+    const messageOverrides: Record<string, unknown> = {}
+    const parsed = restoreSemanticValue(session, sourceMessage.parsed)
+    if (parsed.changed) messageOverrides.parsed = parsed.value
+
+    const calls = Array.isArray(sourceMessage.tool_calls)
+      ? sourceMessage.tool_calls
+      : undefined
+    if (calls) {
+      const callOverrides: Record<string, unknown> = {}
+      let callsChanged = false
+      for (let index = 0; index < calls.length; index++) {
+        const call = calls[index]
+        if (!isRecord(call) || !isRecord(call.function)) continue
+        const fn = call.function
+        if (!("parsed_arguments" in fn)) continue
+        const parsedArguments = restoreSemanticValue(
+          session,
+          fn.parsed_arguments
+        )
+        if (!parsedArguments.changed) continue
+        callsChanged = true
+        callOverrides[index] = cloneOpenAIValue(call, {
+          function: cloneOpenAIValue(fn, {
+            parsed_arguments: parsedArguments.value,
+          }),
+        })
+      }
+      if (callsChanged) {
+        const restoredCalls = cloneOpenAIValue(calls, callOverrides)
+        messageOverrides.tool_calls = restoredCalls
+      }
+    }
+    if (Object.keys(messageOverrides).length > 0) {
+      changed = true
+      message = cloneOpenAIValue(message, messageOverrides)
+      choiceOverrides[index] = cloneOpenAIValue(choice, { message })
+      continue
+    }
+    if (message !== choice.message) {
+      changed = true
+      choiceOverrides[index] = cloneOpenAIValue(choice, { message })
+      continue
+    }
+  }
+  return changed
+    ? cloneOpenAIValue(result, {
+        choices: cloneOpenAIValue(result.choices, choiceOverrides),
+      })
+    : result
 }
 
 /** Restore a completion's changed message paths while preserving its envelope. */
 export function restoreOpenAICompletion<T>(session: PiiSession, result: T): T {
   if (!isRecord(result) || !Array.isArray(result.choices)) return result
   let changed = false
-  const choices = result.choices.map((choice) => {
-    if (!isRecord(choice) || !isRecord(choice.message)) return choice
+  const choiceOverrides: Record<string, unknown> = {}
+  for (let index = 0; index < result.choices.length; index++) {
+    const choice = result.choices[index]
+    if (!isRecord(choice) || !isRecord(choice.message)) continue
     const message = restoreOpenAIMessage(session, choice.message)
-    if (message === choice.message) return choice
+    if (message === choice.message) continue
     changed = true
-    return { ...choice, message }
-  })
+    choiceOverrides[index] = cloneOpenAIValue(choice, { message })
+  }
   if (!changed) return result
-  return { ...result, choices } as T
+  return cloneOpenAIValue(result, {
+    choices: cloneOpenAIValue(result.choices, choiceOverrides),
+  })
 }
