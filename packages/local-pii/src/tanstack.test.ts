@@ -4192,6 +4192,388 @@ describe("piiConnection text streaming", () => {
   )
 
   it.each(["connect", "joinRun"] as const)(
+    "delivers expanded %s throw output before a later normal throw",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize("ana@acme.com"))
+        .redactedText
+      let nextCalls = 0
+      let throwCalls = 0
+      let laterSettled = false
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              nextCalls += 1
+              if (nextCalls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "expanded-message",
+                    delta: protectedContent,
+                  } satisfies StreamChunk,
+                }
+              return { done: true as const, value: undefined }
+            },
+            throw() {
+              throwCalls += 1
+              if (throwCalls === 1)
+                return Promise.resolve({
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_END,
+                    messageId: "expanded-message",
+                  } satisfies StreamChunk,
+                })
+              return Promise.resolve({
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "later-message",
+                  delta: "later",
+                } satisfies StreamChunk,
+              })
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+      const first = await iterator.throw?.(new Error(`${entrypoint} first`))
+      expect(first).toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_CONTENT, delta: "ana@acme.com" },
+      })
+      const later = iterator.throw?.(new Error(`${entrypoint} later`))
+      void later?.then(
+        () => {
+          laterSettled = true
+        },
+        () => {
+          laterSettled = true
+        }
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(throwCalls).toBe(1)
+      expect(laterSettled).toBe(false)
+      await expect(iterator.next()).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_END },
+      })
+      await expect(later).resolves.toMatchObject({
+        done: false,
+        value: { messageId: "later-message", delta: "" },
+      })
+      expect(throwCalls).toBe(2)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "delivers expanded %s throw output before a later RUN_ERROR",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize("ana@acme.com"))
+        .redactedText
+      let nextCalls = 0
+      let throwCalls = 0
+      let laterSettled = false
+      const runError = {
+        type: EventType.RUN_ERROR,
+        message: "later failed",
+      } satisfies StreamChunk
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              nextCalls += 1
+              if (nextCalls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "expanded-error-message",
+                    delta: protectedContent,
+                  } satisfies StreamChunk,
+                }
+              return { done: true as const, value: undefined }
+            },
+            throw() {
+              throwCalls += 1
+              if (throwCalls === 1)
+                return Promise.resolve({
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_END,
+                    messageId: "expanded-error-message",
+                  } satisfies StreamChunk,
+                })
+              return Promise.resolve({ done: false as const, value: runError })
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+      await expect(
+        iterator.throw?.(new Error(`${entrypoint} first`))
+      ).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_CONTENT, delta: "ana@acme.com" },
+      })
+      const later = iterator.throw?.(new Error(`${entrypoint} error`))
+      void later?.then(
+        () => {
+          laterSettled = true
+        },
+        () => {
+          laterSettled = true
+        }
+      )
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(throwCalls).toBe(1)
+      expect(laterSettled).toBe(false)
+      await expect(iterator.next()).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_END },
+      })
+      await expect(later).resolves.toEqual({ done: false, value: runError })
+      expect(throwCalls).toBe(2)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "serializes %s throw-next-throw recovery across split output",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize("ana@acme.com"))
+        .redactedText
+      const firstError = new Error(`${entrypoint} first`)
+      const secondError = new Error(`${entrypoint} second`)
+      let nextCalls = 0
+      let throwCalls = 0
+      let releaseFirst!: (result: IteratorResult<StreamChunk>) => void
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              nextCalls += 1
+              if (nextCalls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "cross-method",
+                    delta: protectedContent,
+                  } satisfies StreamChunk,
+                }
+              return { done: true as const, value: undefined }
+            },
+            throw(value?: unknown) {
+              expect(value).toBe(throwCalls === 0 ? firstError : secondError)
+              throwCalls += 1
+              if (throwCalls === 1)
+                return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                  releaseFirst = resolve
+                })
+              return Promise.resolve({
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "after-cross-method",
+                  delta: "later",
+                } satisfies StreamChunk,
+              })
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      await iterator.next()
+
+      const first = iterator.throw?.(firstError)
+      const middle = iterator.next()
+      const second = iterator.throw?.(secondError)
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(throwCalls).toBe(1)
+
+      releaseFirst({
+        done: false,
+        value: {
+          type: EventType.TEXT_MESSAGE_END,
+          messageId: "cross-method",
+        } satisfies StreamChunk,
+      })
+      await expect(first).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_CONTENT, delta: "ana@acme.com" },
+      })
+      await expect(middle).resolves.toMatchObject({
+        done: false,
+        value: { type: EventType.TEXT_MESSAGE_END, messageId: "cross-method" },
+      })
+      await expect(second).resolves.toMatchObject({
+        done: false,
+        value: {
+          type: EventType.TEXT_MESSAGE_CONTENT,
+          messageId: "after-cross-method",
+          delta: "",
+        },
+      })
+      expect(throwCalls).toBe(2)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "settles a later %s throw when an earlier next exhausts",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const primary = new Error(`${entrypoint} pending throw`)
+      let releaseNext!: (result: IteratorResult<StreamChunk>) => void
+      let releaseThrow!: (result: IteratorResult<StreamChunk>) => void
+      let returnCalls = 0
+      let nextStarted = false
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              nextStarted = true
+              return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                releaseNext = resolve
+              })
+            },
+            throw(value?: unknown) {
+              expect(value).toBe(primary)
+              return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                releaseThrow = resolve
+              })
+            },
+            async return() {
+              returnCalls += 1
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      const next = iterator.next()
+      for (let attempt = 0; !nextStarted && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      const throwing = iterator.throw?.(primary)
+      for (
+        let attempt = 0;
+        releaseThrow === undefined && attempt < 20;
+        attempt++
+      )
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(releaseThrow).toBeDefined()
+      releaseNext({ done: true, value: undefined })
+      await expect(next).resolves.toEqual({ done: true, value: undefined })
+      await expect(throwing).resolves.toEqual({ done: true, value: undefined })
+      expect(returnCalls).toBe(0)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "propagates an earlier %s next error to later controls",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const primary = new Error(`${entrypoint} pending next failure`)
+      let rejectNext!: (error: unknown) => void
+      let nextStarted = false
+      let returnValue: unknown
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              nextStarted = true
+              return new Promise<IteratorResult<StreamChunk>>((_, reject) => {
+                rejectNext = reject
+              })
+            },
+            throw() {
+              return new Promise<IteratorResult<StreamChunk>>(() => {})
+            },
+            async return(value?: unknown) {
+              returnValue = value
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      const next = iterator.next()
+      for (let attempt = 0; !nextStarted && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      const throwing = iterator.throw?.(new Error(`${entrypoint} later`))
+      rejectNext(primary)
+      await expect(next).rejects.toBe(primary)
+      await expect(throwing).rejects.toBe(primary)
+      expect(returnValue).toBe(primary)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
     "awaits sibling %s throw failures behind shared cleanup",
     async (entrypoint) => {
       const session = createAnonymizer({
