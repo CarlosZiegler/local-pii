@@ -1,16 +1,26 @@
-import { describe, expect, it, vi } from "vitest"
+import { describe, expect, expectTypeOf, it, vi } from "vitest"
 import { createAnonymizer } from "./anonymizer"
 import { rehydrate } from "./rehydrate"
 import { hashed } from "./placeholder/strategies"
-import type { Entity, NerBackend } from "./types"
+import type { AnonymizerOptions } from "./anonymizer"
+import type { DetectionModel, Entity, NerBackend } from "./types"
+
+expectTypeOf<DetectionModel>().toEqualTypeOf<NerBackend>()
+expectTypeOf<NerBackend>().toEqualTypeOf<DetectionModel>()
+expectTypeOf<AnonymizerOptions["detection"]>().toEqualTypeOf<
+  DetectionModel | false | undefined
+>()
+expectTypeOf<AnonymizerOptions["ner"]>().toEqualTypeOf<
+  NerBackend | false | undefined
+>()
 
 /** A NER backend that returns whatever the caller computes from the text. */
 function mockNer(fn: (text: string) => Entity[]): NerBackend {
   return {
     name: "mock",
     load: vi.fn(async () => {}),
-    detect: async (t) => fn(t),
-    dispose: async () => {},
+    detect: vi.fn(async (t) => fn(t)),
+    dispose: vi.fn(async () => {}),
   }
 }
 
@@ -85,6 +95,48 @@ describe("createAnonymizer (deterministic)", () => {
 })
 
 describe("createAnonymizer (NER integration)", () => {
+  it.each(["detection", "ner"] as const)(
+    "uses the %s compatibility name for the same model seam",
+    async (key) => {
+      const model = mockNer((text) => [span(text, "ana@acme.com", "EMAIL")])
+      const result = await createAnonymizer({
+        detectors: "none",
+        [key]: model,
+      }).anonymize("ana@acme.com")
+
+      expect(result.redactedText).toBe("[EMAIL_1]")
+      expect(model.load).toHaveBeenCalledOnce()
+      expect(model.detect).toHaveBeenCalledOnce()
+    }
+  )
+
+  it("rejects every ambiguous detection/ner combination synchronously", () => {
+    const model = mockNer(() => [])
+
+    const bothModels = () => createAnonymizer({ detection: model, ner: model })
+    expect(bothModels).toThrow(TypeError)
+    expect(bothModels).toThrow(
+      '"detection" and "ner" configure the same Detection model'
+    )
+    expect(() => createAnonymizer({ detection: false, ner: false })).toThrow(
+      TypeError
+    )
+    expect(() =>
+      createAnonymizer({ detection: model, ner: undefined })
+    ).not.toThrow()
+    expect(() =>
+      createAnonymizer({ detection: undefined, ner: model })
+    ).not.toThrow()
+    expect(() => createAnonymizer({ detection: model, ner: false })).toThrow(
+      TypeError
+    )
+    expect(() => createAnonymizer({ detection: false, ner: model })).toThrow(
+      TypeError
+    )
+    expect(model.load).not.toHaveBeenCalled()
+    expect(model.detect).not.toHaveBeenCalled()
+  })
+
   it("merges NER names with deterministic detections and round-trips", async () => {
     const text = "João Silva ligou de joao@example.com"
     const pii = createAnonymizer({

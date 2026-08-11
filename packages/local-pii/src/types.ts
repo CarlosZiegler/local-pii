@@ -89,6 +89,9 @@ export interface NerBackend {
   dispose(): Promise<void>
 }
 
+/** Preferred vocabulary for the model that detects personal information. */
+export type DetectionModel = NerBackend
+
 /**
  * Plain, serializable snapshot of the reverse index: placeholder -> original
  * value. This is what {@link rehydrate} consumes. It is the secret that must
