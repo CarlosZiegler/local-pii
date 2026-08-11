@@ -35,13 +35,49 @@ function completed<T>(value?: unknown): IteratorResult<T> {
  * the upstream iterator promptly or with the caller's exact value.
  */
 function lazyStream<T>(
-  initialize: (isClosed: () => boolean) => Promise<AsyncIterator<T> | undefined>
+  initialize: (
+    isClosed: () => boolean
+  ) => Promise<AsyncIterator<T> | undefined>,
+  signal?: AbortSignal
 ): AsyncIterable<T> {
   return {
     [Symbol.asyncIterator]() {
       let closed = false
+      let closeKind: "return" | "abort" | "throw" | undefined
+      let closeReason: unknown
       let delegate: AsyncIterator<T> | undefined
       let initialization: Promise<AsyncIterator<T> | undefined> | undefined
+      let nextTail: Promise<unknown> = Promise.resolve()
+      const pendingNext = new Set<{
+        resolve: (result: IteratorResult<T>) => void
+        reject: (error: unknown) => void
+      }>()
+      let removeAbortListener = () => {}
+
+      const settlePending = (
+        kind: "return" | "abort" | "throw",
+        value?: unknown
+      ) => {
+        for (const pending of pendingNext) {
+          if (kind === "return") pending.resolve(completed<T>())
+          else pending.reject(value)
+        }
+        pendingNext.clear()
+      }
+
+      const exposeNext = (operation: Promise<IteratorResult<T>>) =>
+        new Promise<IteratorResult<T>>((resolve, reject) => {
+          const pending = { resolve, reject }
+          pendingNext.add(pending)
+          void operation.then(
+            (result) => {
+              if (pendingNext.delete(pending)) resolve(result)
+            },
+            (error: unknown) => {
+              if (pendingNext.delete(pending)) reject(error)
+            }
+          )
+        })
 
       const ensureDelegate = () => {
         if (!initialization) {
@@ -53,7 +89,7 @@ function lazyStream<T>(
         return initialization
       }
 
-      const close = (value?: unknown) => {
+      const close = (value?: unknown, kind: "return" | "abort" = "return") => {
         const current = delegate
         if (current) {
           let result: PromiseLike<IteratorResult<T>> | undefined
@@ -62,9 +98,10 @@ function lazyStream<T>(
           } catch (error) {
             return Promise.reject(error)
           }
-          return Promise.resolve(result ?? completed<T>(value)).then(() =>
-            completed<T>(value)
-          )
+          const cleanup = Promise.resolve(result ?? completed<T>(value))
+          void cleanup.catch(() => undefined)
+          if (kind === "abort") return Promise.resolve(completed<T>())
+          return cleanup.then(() => completed<T>(value))
         }
 
         if (!initialization) return Promise.resolve(completed<T>(value))
@@ -81,23 +118,96 @@ function lazyStream<T>(
         return Promise.resolve(completed<T>(value))
       }
 
+      const abort = () => {
+        if (closed) return
+        closed = true
+        closeKind = "abort"
+        closeReason = signal?.reason
+        settlePending("abort", closeReason)
+        void close(closeReason, "abort").catch(() => undefined)
+      }
+
+      if (signal) {
+        if (signal.aborted) abort()
+        else {
+          signal.addEventListener("abort", abort, { once: true })
+          removeAbortListener = () => signal.removeEventListener("abort", abort)
+        }
+      }
+
       const iterator: AsyncIterator<T> & AsyncIterable<T> = {
         next(value?: unknown) {
-          if (closed) return Promise.resolve(completed<T>())
-          return ensureDelegate().then((current) => {
-            if (closed || !current) return completed<T>()
-            return Promise.resolve(current.next(value))
+          if (closed) {
+            if (closeKind === "abort" || closeKind === "throw")
+              return Promise.reject(closeReason)
+            return Promise.resolve(completed<T>())
+          }
+          const operation = nextTail.then(async () => {
+            if (closed) {
+              if (closeKind === "abort" || closeKind === "throw")
+                throw closeReason
+              return completed<T>()
+            }
+            const current = await ensureDelegate()
+            if (closed) {
+              if (closeKind === "abort" || closeKind === "throw")
+                throw closeReason
+              return completed<T>()
+            }
+            if (!current) return completed<T>()
+            return current.next(value)
           })
+          nextTail = operation.then(
+            () => undefined,
+            () => undefined
+          )
+          return exposeNext(operation)
         },
         return(value?: unknown) {
           if (closed) return Promise.resolve(completed<T>(value))
           closed = true
+          closeKind = "return"
+          closeReason = value
+          settlePending("return")
+          removeAbortListener()
           return close(value)
         },
         throw(error?: unknown) {
-          if (closed) return Promise.resolve(completed<T>())
+          if (closed) return Promise.reject(error)
           closed = true
-          return close(error)
+          closeKind = "throw"
+          closeReason = error
+          settlePending("throw", error)
+          removeAbortListener()
+
+          const current = delegate
+          if (current?.throw) {
+            try {
+              return Promise.resolve(current.throw(error))
+            } catch (throwError) {
+              return Promise.reject(throwError)
+            }
+          }
+
+          if (current?.return) {
+            let cleanup: PromiseLike<IteratorResult<T>>
+            try {
+              cleanup = current.return(error)
+            } catch {
+              return Promise.reject(error)
+            }
+            return Promise.resolve(cleanup).then(
+              () => Promise.reject(error),
+              () => Promise.reject(error)
+            )
+          }
+
+          if (initialization) {
+            void initialization
+              .then((initialized) => initialized?.throw?.(error))
+              .catch(() => undefined)
+          }
+          return Promise.reject(error)
         },
         [Symbol.asyncIterator]() {
           return this
@@ -146,7 +256,7 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
       return restoreTanStackStream(options.session, upstream, signal)[
         Symbol.asyncIterator
       ]()
-    })
+    }, signal)
     return stream as unknown as ReturnType<T["connect"]>
   }
 
@@ -174,7 +284,7 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
         return restoreTanStackStream(options.session, upstream, signal)[
           Symbol.asyncIterator
         ]()
-      })
+      }, signal)
   }
 
   return wrapped

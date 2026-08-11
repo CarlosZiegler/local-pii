@@ -149,11 +149,13 @@ function restoreContentPart(session: PiiSession, part: unknown): unknown {
 function restoreToolResultValue(session: PiiSession, value: unknown): unknown {
   if (typeof value === "string") return restoreJsonText(session, value)
   if (Array.isArray(value)) {
-    return value.map((part) => {
-      if (isRecord(part) && part.type === "text")
-        return restoreContentPart(session, part)
-      return session.rehydrateJson(part, { lenient: true })
+    let changed = false
+    const restored = value.map((part) => {
+      const output = restoreContentPart(session, part)
+      changed ||= output !== part
+      return output
     })
+    return changed ? restored : value
   }
   return session.rehydrateJson(value, { lenient: true })
 }
@@ -270,6 +272,39 @@ export function restoreTanStackStream(
       let aborted = false
       let failed = false
       let pendingReturn: Promise<IteratorResult<StreamChunk>> | undefined
+      let closed = false
+      let nextInFlight = false
+      let nextTail: Promise<unknown> = Promise.resolve()
+      const pendingNext = new Set<{
+        resolve: (result: IteratorResult<StreamChunk>) => void
+        reject: (error: unknown) => void
+      }>()
+
+      const settlePending = (
+        kind: "return" | "abort" | "throw",
+        value?: unknown
+      ) => {
+        for (const pending of pendingNext) {
+          if (kind === "return")
+            pending.resolve({ done: true, value: undefined })
+          else pending.reject(value)
+        }
+        pendingNext.clear()
+      }
+
+      const exposeNext = (operation: Promise<IteratorResult<StreamChunk>>) =>
+        new Promise<IteratorResult<StreamChunk>>((resolve, reject) => {
+          const pending = { resolve, reject }
+          pendingNext.add(pending)
+          void operation.then(
+            (result) => {
+              if (pendingNext.delete(pending)) resolve(result)
+            },
+            (error: unknown) => {
+              if (pendingNext.delete(pending)) reject(error)
+            }
+          )
+        })
 
       const clear = () => {
         text.clear()
@@ -368,12 +403,19 @@ export function restoreTanStackStream(
           iterator = upstream
           while (true) {
             signal?.throwIfAborted()
-            const next = await nextWithAbort(upstream, signal, () => {
-              aborted = true
-              closed = true
-              clear()
-              beginReturn(signal?.reason)
-            })
+            nextInFlight = true
+            let next: IteratorResult<StreamChunk>
+            try {
+              next = await nextWithAbort(upstream, signal, () => {
+                aborted = true
+                closed = true
+                settlePending("abort", signal?.reason)
+                clear()
+                beginReturn(signal?.reason)
+              })
+            } finally {
+              nextInFlight = false
+            }
             signal?.throwIfAborted()
             if (closed) {
               clear()
@@ -461,6 +503,8 @@ export function restoreTanStackStream(
         } catch (error) {
           if (signal?.aborted && !aborted) {
             aborted = true
+            closed = true
+            settlePending("abort", signal.reason)
             clear()
             beginReturn(signal.reason)
           }
@@ -487,7 +531,6 @@ export function restoreTanStackStream(
       }
 
       const generator = run()
-      let closed = false
       const done = (value?: unknown): IteratorResult<StreamChunk> => ({
         done: true,
         value,
@@ -495,26 +538,59 @@ export function restoreTanStackStream(
 
       const wrapped: AsyncIterator<StreamChunk> & AsyncIterable<StreamChunk> = {
         next(value?: unknown) {
-          if (closed) return Promise.resolve(done())
-          return generator.next(value)
+          if (closed) {
+            if (aborted) return Promise.reject(signal?.reason)
+            return Promise.resolve(done())
+          }
+          const operation = nextTail.then(() => generator.next(value))
+          nextTail = operation.then(
+            () => undefined,
+            () => undefined
+          )
+          return exposeNext(operation)
         },
         return(value?: unknown) {
           clear()
+          if (closed) return Promise.resolve(done(value))
           closed = true
+          settlePending("return")
           const cleanup = beginReturn(value)
           const closing = generator.return?.(value)
           void Promise.resolve(closing).catch(() => undefined)
+          if (nextInFlight) return Promise.resolve(done(value))
           return cleanup
             ? cleanup.then(() => done(value))
             : Promise.resolve(done(value))
         },
         throw(error?: unknown) {
           clear()
+          if (closed) return Promise.reject(error)
           closed = true
+          settlePending("throw", error)
+          const upstream = iterator
+          if (upstream?.throw) {
+            upstreamClosed = true
+            returnStarted = true
+            let result: PromiseLike<IteratorResult<StreamChunk>>
+            try {
+              result = upstream.throw(error)
+            } catch (throwError) {
+              return Promise.reject(throwError)
+            }
+            const throwing = Promise.resolve(result)
+            void throwing.catch(() => undefined)
+            const closing = generator.return?.(error)
+            void Promise.resolve(closing).catch(() => undefined)
+            return throwing
+          }
+
           const cleanup = beginReturn(error)
           const throwing = generator.throw?.(error)
           void Promise.resolve(throwing).catch(() => undefined)
-          return cleanup ? cleanup.then(() => done()) : Promise.resolve(done())
+          const rejectPrimary = () => Promise.reject(error)
+          if (nextInFlight) return rejectPrimary()
+          if (cleanup) return cleanup.then(rejectPrimary, rejectPrimary)
+          return rejectPrimary()
         },
         [Symbol.asyncIterator]() {
           return this
