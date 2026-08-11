@@ -47,7 +47,7 @@ function arraySplice<T>(items: T[], start: number, deleteCount?: number) {
 }
 
 export interface PiiConnectionOptions {
-  /** One caller-owned session per conversation or thread. */
+  /** One caller-owned privacy session per private conversation. */
   session: PiiSession
 }
 

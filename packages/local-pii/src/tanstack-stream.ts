@@ -355,7 +355,6 @@ export function restoreTanStackStream(
 
       type ThrowGate = {
         canceled: boolean
-        close: Promise<IteratorResult<StreamChunk>>
         resolve: (result: IteratorResult<StreamChunk>) => void
         reject: (error: unknown) => void
       }
@@ -377,6 +376,7 @@ export function restoreTanStackStream(
         kind: "throw"
         error: unknown
         concurrent?: boolean
+        preemptedNext?: NextOperation
         gate: ThrowGate
       }
       type Operation = NextOperation | ThrowOperation
@@ -384,8 +384,8 @@ export function restoreTanStackStream(
       let activeOperation:
         | (Operation & { preempted?: boolean; waitingSource?: boolean })
         | undefined
-      let preemptedNext: NextOperation | undefined
-      let losingNext: NextOperation | undefined
+      const preemptedNext = new Set<NextOperation>()
+      const losingNext = new Set<NextOperation>()
       let allowConcurrentThrow = false
       let errorCloseStarted = false
       let errorCleanup: Promise<IteratorResult<StreamChunk>> | undefined
@@ -621,9 +621,12 @@ export function restoreTanStackStream(
                   cancelPendingNext = () => {}
                 nextInFlight = false
               }
-              if (losingNext?.preemptedSettled) {
-                const terminal = losingNext.preemptedTerminal
-                losingNext = undefined
+              const losing = losingNext.values().next().value as
+                | NextOperation
+                | undefined
+              if (losing?.preemptedSettled) {
+                const terminal = losing.preemptedTerminal
+                losingNext.delete(losing)
                 if (terminal) return
                 continue
               }
@@ -641,9 +644,12 @@ export function restoreTanStackStream(
 
               for (const output of restoreChunk(next.value)) yield output
             } catch (error) {
-              if (losingNext?.preemptedSettled) {
-                const terminal = losingNext.preemptedTerminal
-                losingNext = undefined
+              const losing = losingNext.values().next().value as
+                | NextOperation
+                | undefined
+              if (losing?.preemptedSettled) {
+                const terminal = losing.preemptedTerminal
+                losingNext.delete(losing)
                 if (terminal) return
                 continue
               }
@@ -710,19 +716,27 @@ export function restoreTanStackStream(
       const settlePreemptedNext = (
         kind: "return" | "abort" | "throw",
         value?: unknown,
-        recoverable = false
+        recoverable = false,
+        target?: NextOperation
       ) => {
-        const operation = preemptedNext
-        preemptedNext = undefined
-        if (!operation) return
-        operation.preemptedSettled = true
-        operation.preemptedTerminal = kind !== "throw" || !recoverable
-        if (kind === "return") resolveNext(operation, done())
-        else
-          rejectNext(
-            operation,
-            recoverable ? recoverableTanStackNextError(value) : value
-          )
+        const settle = (operation: NextOperation) => {
+          if (operation.preemptedSettled) return
+          operation.preemptedSettled = true
+          operation.preemptedTerminal = kind !== "throw" || !recoverable
+          if (kind === "return") resolveNext(operation, done())
+          else
+            rejectNext(
+              operation,
+              recoverable ? recoverableTanStackNextError(value) : value
+            )
+        }
+        if (target) {
+          preemptedNext.delete(target)
+          settle(target)
+          return
+        }
+        for (const operation of preemptedNext) settle(operation)
+        preemptedNext.clear()
       }
 
       const closeAfterError = (error: unknown, skip?: PendingNext) => {
@@ -761,11 +775,18 @@ export function restoreTanStackStream(
       ) => {
         activeThrows.delete(operation.gate)
         if (outcome.kind === "error") {
-          closeAfterError(outcome.error)
-          operation.gate.reject(outcome.error)
+          const cleanup = closeAfterError(outcome.error)
+          const reject = () => operation.gate.reject(outcome.error)
+          if (cleanup) void cleanup.then(reject, reject).catch(() => undefined)
+          else reject()
           return
         }
-        settlePreemptedNext("throw", operation.error, true)
+        settlePreemptedNext(
+          "throw",
+          operation.error,
+          true,
+          operation.preemptedNext
+        )
         operation.gate.resolve(outcome.result)
         if (outcome.result.done) closeAfterDone(outcome.result.value)
       }
@@ -830,7 +851,12 @@ export function restoreTanStackStream(
           for (let index = 1; index < restored.length; index += 1)
             queueValue(restored[index] as StreamChunk)
           activeThrows.delete(operation.gate)
-          settlePreemptedNext("throw", operation.error, true)
+          settlePreemptedNext(
+            "throw",
+            operation.error,
+            true,
+            operation.preemptedNext
+          )
           operation.gate.resolve(
             first
               ? { done: false as const, value: first }
@@ -1024,25 +1050,27 @@ export function restoreTanStackStream(
             )
             const gate: ThrowGate = {
               canceled: false,
-              close: closeGate,
               resolve: (result: IteratorResult<StreamChunk>) =>
                 resolveGate(result),
               reject: (throwError: unknown) => rejectGate(throwError),
             }
             activeThrows.add(gate)
+            let preempted: NextOperation | undefined
             if (
               activeOperation?.kind === "next" &&
               activeOperation.waitingSource &&
               !activeOperation.preempted
             ) {
-              activeOperation.preempted = true
-              preemptedNext = activeOperation
-              losingNext = activeOperation
+              preempted = activeOperation
+              preempted.preempted = true
+              preemptedNext.add(preempted)
+              losingNext.add(preempted)
               activeOperation = undefined
             }
             operations.push({
               kind: "throw",
               error,
+              preemptedNext: preempted,
               concurrent:
                 allowConcurrentThrow ||
                 activeOperation?.kind === "throw" ||
