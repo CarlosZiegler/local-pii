@@ -34,38 +34,49 @@ export interface BrowserGenerationRuntime {
   dispose(): Promise<void>
 }
 
-export type LocalRuntimeKind = "gemini-nano" | "gemma-3-270m"
+export type RuntimeKind = "gemini-nano" | "gemma-3-270m"
 
-export type LocalRuntimeStatus =
-  | "checking"
-  | "native-ready"
-  | "native-downloadable"
-  | "fallback-available"
-  | "downloading"
-  | "ready"
-  | "error"
-
+/** Compatibility shape used by the adapters until they consume the direct seam. */
 export interface BrowserModelRuntime {
-  kind: LocalRuntimeKind
+  kind: RuntimeKind
   availability(options?: LanguageModelCreateCoreOptions): Promise<Availability>
   create(options?: LanguageModelCreateOptions): Promise<LanguageModel>
 }
 
-export interface LocalRuntimeMetadata {
-  artifactSize?: string
-  device: "browser"
-  execution: "local"
-  model: string
-  source: string
+export type RuntimeAvailability =
+  "ready" | "requires-activation" | "unavailable"
+
+export interface RuntimeOption {
+  readonly kind: RuntimeKind
+  readonly availability: RuntimeAvailability
+  readonly disclosure: RuntimeDisclosure
 }
 
-export interface LocalRuntimeSnapshot {
-  error?: Error
-  fallbackCached?: boolean
-  kind?: LocalRuntimeKind
-  metadata?: LocalRuntimeMetadata
-  nativeAvailability?: Availability
-  progress?: number
-  runtime?: BrowserModelRuntime
-  status: LocalRuntimeStatus
-}
+export type RuntimeRecovery =
+  "check-again" | "retry-activation" | "choose-runtime"
+
+export type RuntimeSnapshot =
+  | { readonly status: "checking"; readonly operationId: number }
+  | {
+      readonly status: "choice-required"
+      readonly options: readonly RuntimeOption[]
+    }
+  | {
+      readonly status: "activating"
+      readonly operationId: number
+      readonly kind: RuntimeKind
+      readonly disclosure: RuntimeDisclosure
+      readonly progress?: number
+    }
+  | {
+      readonly status: "ready"
+      readonly kind: RuntimeKind
+      readonly disclosure: RuntimeDisclosure
+    }
+  | {
+      readonly status: "error"
+      readonly operationId: number
+      readonly kind?: RuntimeKind
+      readonly error: Error
+      readonly recovery: readonly RuntimeRecovery[]
+    }

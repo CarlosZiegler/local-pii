@@ -1,4 +1,3 @@
-import type { LanguageModelFactory } from "./prompt-runtime"
 import {
   generationAbort,
   managedGeneration,
@@ -14,6 +13,12 @@ import type {
   ProtectedBrowserTurn,
   RuntimeDisclosure,
 } from "./types"
+
+/** Compatibility factory retained for the browser Prompt API test seam. */
+interface LanguageModelFactory {
+  availability(options?: LanguageModelCreateCoreOptions): Promise<Availability>
+  create(options?: LanguageModelCreateOptions): Promise<LanguageModel>
+}
 
 const MODEL_ID = "onnx-community/gemma-3-270m-it-ONNX"
 const MODEL_REVISION = "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
