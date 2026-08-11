@@ -87,7 +87,7 @@ function callerAnonymizer(): Anonymizer {
 }
 
 function instrumentSessionCreation(anonymizer: Anonymizer) {
-  const createSession = anonymizer.createSession
+  const createSession = anonymizer.createSession.bind(anonymizer)
   const created: PiiSession[] = []
   const createSessionSpy = vi
     .spyOn(anonymizer, "createSession")
@@ -98,6 +98,19 @@ function instrumentSessionCreation(anonymizer: Anonymizer) {
       return session
     })
   return { created, createSessionSpy }
+}
+
+function anonymizerWithClearFailure(cleanup: Error) {
+  const anonymizer = callerAnonymizer()
+  const session = anonymizer.createSession()
+  const clear = vi.fn(() => {
+    throw cleanup
+  })
+  session.clear = clear
+  const createSessionSpy = vi
+    .spyOn(anonymizer, "createSession")
+    .mockReturnValue(session)
+  return { anonymizer, clear, createSessionSpy, session }
 }
 
 beforeEach(() => {
@@ -412,6 +425,45 @@ describe("runInline", () => {
     expect(created[0]?.clear).toHaveBeenCalledOnce()
     expect(created[0]?.mapping).toEqual({})
   })
+
+  it("preserves the primary error when complete cleanup fails", async () => {
+    const primary = new Error("primary")
+    const cleanup = new Error("cleanup")
+    const { anonymizer, clear } = anonymizerWithClearFailure(cleanup)
+
+    await expect(
+      runInline({
+        input: "Olá João",
+        anonymizer,
+        protect: async (input, { session }) =>
+          (await session.anonymize(input)).redactedText,
+        call: async () => {
+          throw primary
+        },
+        restore: (response) => response,
+      })
+    ).rejects.toBe(primary)
+
+    expect(clear).toHaveBeenCalledOnce()
+  })
+
+  it("surfaces cleanup failure after a successful complete operation", async () => {
+    const cleanup = new Error("cleanup")
+    const { anonymizer, clear } = anonymizerWithClearFailure(cleanup)
+
+    await expect(
+      runInline({
+        input: "Olá João",
+        anonymizer,
+        protect: async (input, { session }) =>
+          (await session.anonymize(input)).redactedText,
+        call: async (protectedInput) => protectedInput,
+        restore: (response) => response,
+      })
+    ).rejects.toBe(cleanup)
+
+    expect(clear).toHaveBeenCalledOnce()
+  })
 })
 
 describe("runInlineTextStream", () => {
@@ -541,6 +593,68 @@ describe("runInlineTextStream", () => {
     expect(upstreamClosed).toBe(true)
     expect(created[0]?.clear).toHaveBeenCalledOnce()
     expect(created[0]?.mapping).toEqual({})
+  })
+
+  it("preserves the primary error when streamed cleanup fails", async () => {
+    const primary = new Error("primary")
+    const cleanup = new Error("cleanup")
+    const { anonymizer, clear } = anonymizerWithClearFailure(cleanup)
+
+    const stream = runInlineTextStream({
+      input: "Olá João",
+      anonymizer,
+      call: () => {
+        throw primary
+      },
+    })
+
+    await expect(collect(stream)).rejects.toBe(primary)
+    expect(clear).toHaveBeenCalledOnce()
+  })
+
+  it("surfaces stream cleanup failure after successful completion", async () => {
+    const cleanup = new Error("cleanup")
+    const { anonymizer, clear } = anonymizerWithClearFailure(cleanup)
+
+    await expect(
+      collect(
+        runInlineTextStream({
+          input: "Olá João",
+          anonymizer,
+          call: async function* (wireInput) {
+            yield wireInput
+          },
+        })
+      )
+    ).rejects.toBe(cleanup)
+
+    expect(clear).toHaveBeenCalledOnce()
+  })
+
+  it("preserves the first stream cleanup failure", async () => {
+    const upstreamCleanup = new Error("upstream cleanup")
+    const sessionCleanup = new Error("session cleanup")
+    const { anonymizer, clear } = anonymizerWithClearFailure(sessionCleanup)
+    const upstream: AsyncIterable<string> = {
+      [Symbol.asyncIterator]() {
+        return {
+          next: async () => ({ done: false as const, value: "chunk" }),
+          return: async () => {
+            throw upstreamCleanup
+          },
+        }
+      },
+    }
+
+    const iterator = runInlineTextStream({
+      input: "Olá João",
+      anonymizer,
+      call: () => upstream,
+    })[Symbol.asyncIterator]()
+
+    await iterator.next()
+    await expect(iterator.return?.()).rejects.toBe(upstreamCleanup)
+    expect(clear).toHaveBeenCalledOnce()
   })
 
   it("preserves an upstream error and discards an incomplete token tail", async () => {
