@@ -139,6 +139,236 @@ describe("piiConnection message protection", () => {
     }
   )
 
+  it("prepares detached message values before asynchronous anonymization", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const message = {
+      id: "before-id",
+      role: "user" as const,
+      content: "ana@acme.com",
+    }
+    const originalAnonymize = session.anonymize.bind(session)
+    vi.spyOn(session, "anonymize").mockImplementation(async (text) => {
+      message.id = "after-id"
+      message.content = "mutated@acme.com"
+      await Promise.resolve()
+      return originalAnonymize(text)
+    })
+    let received: Array<ModelMessage> = []
+    const wrapped = piiConnection(
+      {
+        connect(messages) {
+          received = messages as Array<ModelMessage>
+          return emptyStream()
+        },
+      },
+      { session }
+    )
+
+    await collect(wrapped.connect([message]))
+    expect(received[0]).not.toBe(message)
+    expect(received[0]!.id).toBe("before-id")
+    expect(received[0]!.content).toMatch(TOKEN)
+  })
+
+  it("captures a stateful proxy once without invoking ordinary get or rereading it", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const target = { type: "text", content: "ana@acme.com" }
+    let getCalls = 0
+    let ownKeysCalls = 0
+    const part = new Proxy(target, {
+      get(object, key, receiver) {
+        if (key === "content") getCalls += 1
+        return key === "content"
+          ? "proxy-secret@acme.com"
+          : Reflect.get(object, key, receiver)
+      },
+      ownKeys(object) {
+        ownKeysCalls += 1
+        if (ownKeysCalls > 1) throw new Error("proxy secret")
+        return Reflect.ownKeys(object)
+      },
+    })
+    let received: Array<UIMessage> = []
+    const wrapped = piiConnection(
+      {
+        connect(messages) {
+          received = messages as Array<UIMessage>
+          return emptyStream()
+        },
+      },
+      { session }
+    )
+
+    await collect(
+      wrapped.connect([
+        { id: "proxy", role: "user", parts: [part] },
+      ] as unknown as Array<UIMessage>)
+    )
+    expect(ownKeysCalls).toBe(1)
+    expect(getCalls).toBe(0)
+    const forwardedPart = received[0]!.parts[0]!
+    expect(Object.is(forwardedPart, part)).toBe(false)
+    expect(forwardedPart).toMatchObject({
+      type: "text",
+      content: expect.stringMatching(TOKEN),
+    })
+  })
+
+  it("rejects an all-ambiguous message array before session work", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const anonymize = vi.spyOn(session, "anonymize")
+    const connect = vi.fn(() => emptyStream())
+    const wrapped = piiConnection({ connect }, { session })
+    const message = {
+      id: "ambiguous",
+      role: "user" as const,
+      parts: [{ type: "text" as const, content: "ana@acme.com" }],
+      content: "ana@acme.com",
+    } as unknown as UIMessage & ModelMessage
+
+    await expect(collect(wrapped.connect([message]))).rejects.toMatchObject({
+      discriminant: "<ambiguous>",
+    })
+    expect(anonymize).not.toHaveBeenCalled()
+    expect(connect).not.toHaveBeenCalled()
+    expect(Object.keys(session.mapping)).toHaveLength(0)
+  })
+
+  const strictJsonExotics: Array<[string, () => unknown]> = [
+    [
+      "custom prototype",
+      () =>
+        Object.assign(Object.create({ inherited: true }), {
+          email: "ana@acme.com",
+        }),
+    ],
+    [
+      "toJSON",
+      () => ({
+        email: "ana@acme.com",
+        toJSON: () => ({ email: "ana@acme.com" }),
+      }),
+    ],
+    ["function", () => ({ email: () => "ana@acme.com" })],
+    ["symbol", () => ({ email: Symbol("ana@acme.com") })],
+    ["bigint", () => ({ email: 1n })],
+    ["nonfinite", () => ({ email: Number.NaN })],
+    [
+      "accessor",
+      () =>
+        Object.defineProperty({}, "email", {
+          enumerable: true,
+          get: () => "ana@acme.com",
+        }),
+    ],
+    [
+      "cycle",
+      () => {
+        const value: Record<string, unknown> = { email: "ana@acme.com" }
+        value.self = value
+        return value
+      },
+    ],
+    ["sparse", () => Object.assign(new Array(2), { 1: "ana@acme.com" })],
+    [
+      "proxy trap",
+      () =>
+        new Proxy(
+          { email: "ana@acme.com" },
+          {
+            ownKeys: () => {
+              throw new Error("secret key")
+            },
+          }
+        ),
+    ],
+  ]
+
+  it.each(strictJsonExotics)(
+    "rejects %s semantic tool input before mapping",
+    async (_label, createValue) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const connect = vi.fn(() => emptyStream())
+      const wrapped = piiConnection({ connect }, { session })
+      const message = {
+        id: "tool",
+        role: "assistant" as const,
+        parts: [
+          {
+            type: "tool-call" as const,
+            id: "call",
+            name: "lookup",
+            arguments: '{"email":"ana@acme.com"}',
+            input: createValue(),
+            state: "input-complete" as const,
+          },
+        ],
+      } satisfies UIMessage
+
+      let caught: unknown
+      try {
+        await collect(wrapped.connect([message]))
+      } catch (error) {
+        caught = error
+      }
+      expect(caught).toBeInstanceOf(UnsupportedTanStackSemanticContentError)
+      expect(String(caught)).not.toContain("secret key")
+      expect(String(caught)).not.toContain("ana@acme.com")
+      expect(connect).not.toHaveBeenCalled()
+      expect(Object.keys(session.mapping)).toHaveLength(0)
+    }
+  )
+
+  it("preserves anonymizer failures from parsed freeform tool results", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const failure = new Error("anonymizer failure")
+    const anonymize = vi.spyOn(session, "anonymize").mockRejectedValue(failure)
+    const wrapped = piiConnection({ connect: () => emptyStream() }, { session })
+    const message = {
+      id: "result",
+      role: "assistant" as const,
+      parts: [
+        {
+          type: "tool-result" as const,
+          toolCallId: "call",
+          content: '{"email":"ana@acme.com"}',
+          state: "complete" as const,
+        },
+      ],
+    } satisfies UIMessage
+
+    await expect(collect(wrapped.connect([message]))).rejects.toBe(failure)
+    expect(anonymize).toHaveBeenCalledOnce()
+  })
+
+  it("rejects JSON graphs deeper than the bounded preparation limit", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const connect = vi.fn(() => emptyStream())
+    const wrapped = piiConnection({ connect }, { session })
+    let data: Record<string, unknown> = { email: "ana@acme.com" }
+    for (let index = 0; index < 300; index += 1) data = { next: data }
+    const message = {
+      id: "deep",
+      role: "assistant" as const,
+      parts: [
+        {
+          type: "structured-output" as const,
+          status: "complete" as const,
+          raw: "",
+          data,
+        },
+      ],
+    } satisfies UIMessage
+
+    await expect(collect(wrapped.connect([message]))).rejects.toMatchObject({
+      discriminant: "<depth>",
+    })
+    expect(connect).not.toHaveBeenCalled()
+    expect(Object.keys(session.mapping)).toHaveLength(0)
+  })
+
   it("rejects a structured-output data fallback that is cyclic and protects a valid empty-raw fallback", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const connect = vi.fn(() => emptyStream())
@@ -188,7 +418,7 @@ describe("piiConnection message protection", () => {
     await expect(
       collect(wrapped.connect([cyclicMessage]))
     ).rejects.toMatchObject({
-      path: [0, "parts", 0, "data", "self"],
+      path: [0, "parts", 0, "data", "<field>"],
       discriminant: "<cycle>",
     })
     expect(connect).toHaveBeenCalledOnce()
@@ -210,14 +440,14 @@ describe("piiConnection message protection", () => {
     await expect(
       collect(wrapped.connect([invalidMessage]))
     ).rejects.toMatchObject({
-      path: [0, "parts", 0, "data", "callback"],
+      path: [0, "parts", 0, "data", "<field>"],
       discriminant: "<invalid-json>",
     })
     expect(connect).toHaveBeenCalledOnce()
     expect(session.mapping).toEqual(before)
   })
 
-  it("rejects malformed tool-call JSON while keeping freeform tool-result text protectable", async () => {
+  it("preserves incomplete tool-call JSON while rejecting included malformed calls", async () => {
     const original = 'Ana "Boss"'
     const session = createAnonymizer({
       dictionary: [{ value: original, type: "CUSTOM" }],
@@ -239,11 +469,29 @@ describe("piiConnection message protection", () => {
         },
       ],
     } satisfies UIMessage
-    await expect(collect(wrapped.connect([uiMessage]))).rejects.toMatchObject({
+    await collect(wrapped.connect([uiMessage]))
+    expect(connect).toHaveBeenCalledOnce()
+    const incomplete = (
+      (
+        connect.mock.calls as unknown as Array<unknown[]>
+      )[0]![0] as Array<UIMessage>
+    )[0]!
+    expect(incomplete).not.toBe(uiMessage)
+    expect(incomplete.parts[0]).not.toBe(uiMessage.parts[0])
+    expect(incomplete.parts[0]).toMatchObject({ arguments: truncated })
+    expect(Object.keys(session.mapping)).toHaveLength(0)
+
+    const includedUiMessage = {
+      ...uiMessage,
+      parts: [{ ...uiMessage.parts[0]!, state: "input-complete" as const }],
+    } satisfies UIMessage
+    await expect(
+      collect(wrapped.connect([includedUiMessage]))
+    ).rejects.toMatchObject({
       path: [0, "parts", 0, "arguments"],
       discriminant: "<invalid-json>",
     })
-    expect(connect).not.toHaveBeenCalled()
+    expect(connect).toHaveBeenCalledOnce()
     expect(Object.keys(session.mapping)).toHaveLength(0)
 
     const modelMessage = {
@@ -263,7 +511,7 @@ describe("piiConnection message protection", () => {
       path: [0, "toolCalls", 0, "function", "arguments"],
       discriminant: "<invalid-json>",
     })
-    expect(connect).not.toHaveBeenCalled()
+    expect(connect).toHaveBeenCalledOnce()
 
     await collect(
       wrapped.connect([
@@ -283,7 +531,7 @@ describe("piiConnection message protection", () => {
     )
     const resultPart = (
       connect.mock.calls as unknown as Array<unknown[]>
-    )[0]![0] as Array<UIMessage>
+    )[1]![0] as Array<UIMessage>
     const result = resultPart[0]!.parts[0]!
     if (result.type !== "tool-result") throw new Error("expected tool result")
     expect(result.content).not.toContain(original)
@@ -313,7 +561,7 @@ describe("piiConnection message protection", () => {
     }
     expect(caught).toMatchObject({
       path: [0, "parts", 0],
-      discriminant: type === "future-secret-part" ? type : "<invalid>",
+      discriminant: "<unsupported>",
     })
     expect(String(caught)).not.toContain("ana@acme.com")
     expect(String(caught)).not.toContain("\n")
@@ -338,7 +586,7 @@ describe("piiConnection message protection", () => {
       id: "ui-1",
       role: "user" as const,
       parts: [{ type: "text" as const, content: "ana@acme.com" }],
-      content: [futurePart],
+      content: { future: futurePart },
       toolCalls: [futurePart],
     } as unknown as UIMessage & { content: unknown; toolCalls: unknown }
     const model = {
@@ -356,14 +604,14 @@ describe("piiConnection message protection", () => {
     expect(protectedUi.toolCalls).toBe(ui.toolCalls)
     const protectedModel = calls[1]![0][0] as typeof model
     expect(protectedModel.content).toMatch(TOKEN)
-    expect(protectedModel.parts).toBe(model.parts)
+    expect(Object.is(protectedModel.parts, model.parts)).toBe(true)
 
     const modelWithId = { ...model, id: "model-id" }
     const laterModelOnly = { role: "user" as const, content: "safe" }
     await collect(wrapped.connect([modelWithId, laterModelOnly]))
     const protectedModelWithId = calls[2]![0][0] as typeof modelWithId
     expect(protectedModelWithId.content).toMatch(TOKEN)
-    expect(protectedModelWithId.parts).toBe(modelWithId.parts)
+    expect(Object.is(protectedModelWithId.parts, modelWithId.parts)).toBe(true)
 
     const firstAmbiguous = {
       id: "ambiguous",
@@ -372,6 +620,9 @@ describe("piiConnection message protection", () => {
       content: "safe",
     } as unknown as UIMessage & ModelMessage
     const laterModel = { role: "user" as const, content: "ana@acme.com" }
+    await expect(
+      collect(wrapped.connect([firstAmbiguous]))
+    ).rejects.toMatchObject({ discriminant: "<ambiguous>" })
     await collect(wrapped.connect([firstAmbiguous, laterModel]))
     expect((calls[3]![0][1] as typeof laterModel).content).toMatch(TOKEN)
 
@@ -385,7 +636,7 @@ describe("piiConnection message protection", () => {
       collect(
         wrapped.connect([uiOnly, modelOnly] as unknown as Array<UIMessage>)
       )
-    ).rejects.toMatchObject({ discriminant: "<invalid>" })
+    ).rejects.toMatchObject({ discriminant: "<unsupported>" })
     expect(calls).toHaveLength(4)
   })
 
@@ -504,10 +755,10 @@ describe("piiConnection message protection", () => {
       type: "text",
       content: expect.stringMatching(TOKEN),
     })
-    expect(protectedParts[1]).toBe(uiParts[1])
-    expect(protectedParts[2]).toBe(uiParts[2])
-    expect(protectedParts[3]).toBe(uiParts[3])
-    expect(protectedParts[4]).toBe(uiParts[4])
+    expect(protectedParts[1]).not.toBe(uiParts[1])
+    expect(protectedParts[2]).not.toBe(uiParts[2])
+    expect(protectedParts[3]).not.toBe(uiParts[3])
+    expect(protectedParts[4]).not.toBe(uiParts[4])
     expect(protectedParts[5]).toMatchObject({
       type: "tool-call",
       id: "call-ana@acme.com",
@@ -522,13 +773,13 @@ describe("piiConnection message protection", () => {
       content: expect.stringMatching(TOKEN),
       error: expect.stringMatching(TOKEN),
     })
-    expect(protectedParts[7]).toBe(uiParts[7])
+    expect(Object.is(protectedParts[7], uiParts[7])).toBe(false)
     expect(protectedParts[8]).toMatchObject({
       type: "structured-output",
       status: "complete",
       raw: expect.stringMatching(TOKEN),
     })
-    expect(protectedParts[9]).toBe(uiParts[9])
+    expect(Object.is(protectedParts[9], uiParts[9])).toBe(false)
     expect(protectedUi.unknownControl).toBe(uiMessage.unknownControl)
 
     const protectedModel = calls[1]![0][0] as ModelMessage & {
@@ -543,8 +794,8 @@ describe("piiConnection message protection", () => {
     ])
     if (!Array.isArray(protectedModel.content))
       throw new Error("expected parts")
-    expect(protectedModel.content[1]).toBe(modelContent[1])
-    expect(protectedModel.content[4]).toBe(modelContent[4])
+    expect(Object.is(protectedModel.content[1], modelContent[1])).toBe(false)
+    expect(Object.is(protectedModel.content[4], modelContent[4])).toBe(false)
     expect(protectedModel.id).toBe(modelMessage.id)
     expect(protectedModel.name).toBe(modelMessage.name)
     expect(protectedModel.thinking).toBe(modelMessage.thinking)
@@ -599,10 +850,10 @@ describe("piiConnection message protection", () => {
       expect(caught).toMatchObject({
         name: "UnsupportedTanStackSemanticContentError",
         path: [0, location, 1],
-        discriminant: "future-secret-part",
+        discriminant: "<unsupported>",
       })
       expect(String(caught)).toBe(
-        `UnsupportedTanStackSemanticContentError: Unsupported TanStack semantic content at $[0].${location}[1]: future-secret-part`
+        `UnsupportedTanStackSemanticContentError: Unsupported TanStack semantic content at $[0].${location}[1]: <unsupported>`
       )
       expect(String(caught)).not.toContain("ana@acme.com")
       expect(caught).not.toHaveProperty("part")
@@ -757,8 +1008,8 @@ describe("piiConnection message protection", () => {
     expect(ui.id).toBe("ana@acme.com-control-id")
     expect(ui.role).toBe("user")
     expect(ui.createdAt).toBe(createdAt)
-    expect(ui.parts[1]).toBe(imagePart)
-    expect(ui.parts[2]).toBe(uiMessages[0]!.parts[2])
+    expect(Object.is(ui.parts[1], imagePart)).toBe(false)
+    expect(Object.is(ui.parts[2], uiMessages[0]!.parts[2])).toBe(false)
     const structured = ui.parts[3]!
     expect(structured.type).toBe("structured-output")
     expect("raw" in structured ? structured.raw : "").not.toContain(
@@ -851,7 +1102,7 @@ describe("piiConnection message protection", () => {
     }>
     expect(modelParts[0]!.content).toMatch(TOKEN)
     expect(modelParts[0]!.metadata).toBe(modelTextMetadata)
-    expect(modelParts[1]).toBe(documentPart)
+    expect(Object.is(modelParts[1], documentPart)).toBe(false)
     expect(protectedModel[1]!.toolCalls).not.toBe(modelMessages[1]!.toolCalls)
     expect(protectedModel[1]!.toolCalls?.[0]?.function.arguments).not.toContain(
       "ana@acme.com"
