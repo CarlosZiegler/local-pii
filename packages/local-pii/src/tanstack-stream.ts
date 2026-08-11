@@ -24,6 +24,11 @@ const TRUSTED_ARRAY_PUSH = Array.prototype.push
 const TRUSTED_ARRAY_SHIFT = Array.prototype.shift
 const recoverableNextErrors = new WeakMap<object, unknown>()
 const concurrentThrowHandlers = new WeakMap<object, () => void>()
+const ignoreTanStackPromiseRejection = () => undefined
+
+function observeTanStackPromise<T>(promise: Promise<T>) {
+  void promise.catch(ignoreTanStackPromiseRejection)
+}
 
 function arrayPush<T>(items: T[], item: T) {
   TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_PUSH, items, [item])
@@ -277,6 +282,56 @@ const RETIRED_TANSTACK_READ = Symbol("retired TanStack stream read")
 type TanStackReadOutcome =
   IteratorResult<StreamChunk> | typeof RETIRED_TANSTACK_READ
 
+type TanStackReadSink = {
+  settled: boolean
+  resolve?: (outcome: TanStackReadOutcome) => void
+  reject?: (error: unknown) => void
+  cancel?: () => void
+}
+
+function resolveTanStackReadSink(
+  sink: TanStackReadSink,
+  outcome: TanStackReadOutcome
+) {
+  if (sink.settled) return
+  sink.settled = true
+  const resolve = sink.resolve
+  const cancel = sink.cancel
+  sink.resolve = undefined
+  sink.reject = undefined
+  sink.cancel = undefined
+  try {
+    cancel?.()
+  } catch {
+    // A hostile signal method must not strand the public read gate.
+  }
+  resolve?.(outcome)
+}
+
+function rejectTanStackReadSink(sink: TanStackReadSink, error: unknown) {
+  if (sink.settled) return
+  sink.settled = true
+  const reject = sink.reject
+  const cancel = sink.cancel
+  sink.resolve = undefined
+  sink.reject = undefined
+  sink.cancel = undefined
+  try {
+    cancel?.()
+  } catch {
+    // A hostile signal method must not strand the public read gate.
+  }
+  reject?.(error)
+}
+
+function createTanStackReadHandlers(sink: TanStackReadSink) {
+  return {
+    resolve: (result: IteratorResult<StreamChunk>) =>
+      resolveTanStackReadSink(sink, result),
+    reject: (error: unknown) => rejectTanStackReadSink(sink, error),
+  }
+}
+
 function nextWithAbort(
   iterator: AsyncIterator<StreamChunk>,
   signal: AbortSignal | undefined,
@@ -288,43 +343,46 @@ function nextWithAbort(
 } {
   if (signal) signal.throwIfAborted()
 
-  const next = signal
-    ? Promise.resolve().then(() => iterator.next())
-    : Promise.resolve(iterator.next())
-  // The race below may settle with the private retirement sentinel first. Keep
-  // observing the source promise after that point so a late rejection cannot
-  // become an unhandled rejection, without retaining the stream state.
-  void next.catch(() => undefined)
-
-  let retireRead = () => {}
-  const retired = new Promise<typeof RETIRED_TANSTACK_READ>((resolve) => {
-    retireRead = () => resolve(RETIRED_TANSTACK_READ)
+  const sink: TanStackReadSink = { settled: false }
+  const promise = new Promise<TanStackReadOutcome>((resolve, reject) => {
+    sink.resolve = resolve
+    sink.reject = reject
   })
   let removeAbortListener = () => {}
-  const aborted = new Promise<never>((_, reject) => {
-    if (!signal) return
-    const handleAbort = () => {
-      onAbort()
-      reject(signal.reason)
-    }
-    removeAbortListener = () => signal.removeEventListener("abort", handleAbort)
-    signal.addEventListener("abort", handleAbort, { once: true })
-  })
   let canceled = false
   const cancel = () => {
     if (canceled) return
     canceled = true
-    removeAbortListener()
+    try {
+      removeAbortListener()
+    } catch {
+      // Listener cleanup is best effort after the bridge has settled.
+    }
   }
-  const promise = signal
-    ? Promise.race([next, aborted, retired]).finally(cancel)
-    : Promise.race([next, retired]).finally(cancel)
+  sink.cancel = cancel
+  if (signal) {
+    const handleAbort = () => {
+      onAbort()
+      rejectTanStackReadSink(sink, signal.reason)
+    }
+    removeAbortListener = () => signal.removeEventListener("abort", handleAbort)
+    signal.addEventListener("abort", handleAbort, { once: true })
+  }
+
+  const next = signal
+    ? Promise.resolve().then(() => iterator.next())
+    : Promise.resolve(iterator.next())
+  // These handlers are created in a scope containing only the mutable sink.
+  // Once it settles, all bridge callbacks and the stream-owned
+  // resolver/rejector are cleared; the source may retain its raw Promise
+  // without retaining this privacy session.
+  const handlers = createTanStackReadHandlers(sink)
+  void next.then(handlers.resolve, handlers.reject)
   return {
     promise,
     cancel,
     retire: () => {
-      retireRead()
-      cancel()
+      resolveTanStackReadSink(sink, RETIRED_TANSTACK_READ)
     },
   }
 }
@@ -507,7 +565,7 @@ export function restoreTanStackStream(
         // Abort deliberately does not await a native iterator's queued
         // return while its current next() is suspended. Keep the eventual
         // cleanup observed so it cannot become an unhandled rejection.
-        void pendingReturn.catch(() => undefined)
+        observeTanStackPromise(pendingReturn)
         return pendingReturn
       }
 
@@ -702,7 +760,7 @@ export function restoreTanStackStream(
         settlePending("throw", error, false, skip)
         settleDelegatedThrows("throw", error, cleanup)
         retireActiveReads()
-        void cleanup?.catch(() => undefined)
+        if (cleanup) observeTanStackPromise(cleanup)
         return cleanup
       }
 
@@ -1142,10 +1200,11 @@ export function restoreTanStackStream(
           clear()
           discardQueuedOperations()
           settlePending("throw", error)
+          const hadReadInFlight = nextInFlight
           const cleanup = beginReturn(error)
           retireActiveReads()
           const rejectPrimary = () => Promise.reject(error)
-          if (nextInFlight) return rejectPrimary()
+          if (hadReadInFlight) return rejectPrimary()
           if (cleanup) return cleanup.then(rejectPrimary, rejectPrimary)
           return rejectPrimary()
         },

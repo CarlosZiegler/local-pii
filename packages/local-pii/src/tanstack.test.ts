@@ -51,6 +51,16 @@ function barrier(parties: number): () => Promise<void> {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (error: unknown) => void
+  const promise = new Promise<T>((resolveResult, rejectResult) => {
+    resolve = resolveResult
+    reject = rejectResult
+  })
+  return { promise, resolve, reject }
+}
+
 function deepFreeze<T>(value: T): T {
   if (value && typeof value === "object" && !Object.isFrozen(value)) {
     Object.freeze(value)
@@ -3116,6 +3126,7 @@ describe("piiConnection text streaming", () => {
   it.each(["connect", "joinRun"] as const)(
     "retires a never-settling %s source read before observing its late rejection",
     async (entrypoint) => {
+      let heldRawNext: Promise<IteratorResult<StreamChunk>> | undefined
       const prepare = async () => {
         const session = createAnonymizer({
           placeholders: token(),
@@ -3126,9 +3137,10 @@ describe("piiConnection text streaming", () => {
           [Symbol.asyncIterator]() {
             return {
               next() {
-                return new Promise<IteratorResult<StreamChunk>>((_, reject) => {
-                  rejectLate = reject
-                })
+                const raw = deferred<IteratorResult<StreamChunk>>()
+                heldRawNext = raw.promise
+                rejectLate = raw.reject
+                return raw.promise
               },
               async return() {
                 state.returnCalls += 1
@@ -3166,6 +3178,7 @@ describe("piiConnection text streaming", () => {
       }
 
       const { weakSession, rejectLate, state } = await prepare()
+      expect(heldRawNext).toBeDefined()
       const runtime = (
         globalThis as {
           Bun?: { gc?: (force?: boolean) => void }
@@ -3182,6 +3195,166 @@ describe("piiConnection text streaming", () => {
       rejectLate(new Error(`${entrypoint} retired late rejection`))
       await new Promise((resolve) => setTimeout(resolve, 0))
       expect(state.returnCalls).toBe(1)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "rejects fallback %s throw promptly while cleanup remains pending",
+    async (entrypoint) => {
+      let heldRawNext: Promise<IteratorResult<StreamChunk>> | undefined
+      let resolveRawNext!: (result: IteratorResult<StreamChunk>) => void
+      let heldCleanup: Promise<IteratorResult<StreamChunk>> | undefined
+      const prepare = async () => {
+        const session = createAnonymizer({
+          placeholders: token(),
+        }).createSession()
+        const source: AsyncIterable<StreamChunk> = {
+          [Symbol.asyncIterator]() {
+            return {
+              next() {
+                const raw = deferred<IteratorResult<StreamChunk>>()
+                heldRawNext = raw.promise
+                resolveRawNext = raw.resolve
+                return raw.promise
+              },
+              return() {
+                heldCleanup = deferred<IteratorResult<StreamChunk>>().promise
+                return heldCleanup
+              },
+            }
+          },
+        }
+        const inner: ConnectConnectionAdapter = {
+          connect: () => source,
+          joinRun: () => source,
+        }
+        const stream =
+          entrypoint === "connect"
+            ? piiConnection(inner, { session }).connect([
+                { role: "user", content: "hello" },
+              ])
+            : piiConnection(inner, { session }).joinRun!("run-1")
+        const iterator = stream[Symbol.asyncIterator]()
+        const pendingNext = iterator.next()
+        for (let attempt = 0; !heldRawNext && attempt < 20; attempt += 1)
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(heldRawNext).toBeDefined()
+        const primary = new Error(`${entrypoint} fallback throw`)
+        const throwing = iterator.throw?.(primary)
+        const timedOut = Symbol("fallback throw timed out")
+        await expect(
+          Promise.race([
+            throwing?.then(
+              () => Symbol("settled"),
+              (error) => error
+            ),
+            new Promise<typeof timedOut>((resolve) =>
+              setTimeout(() => resolve(timedOut), 50)
+            ),
+          ])
+        ).resolves.toBe(primary)
+        await expect(pendingNext).rejects.toBe(primary)
+        resolveRawNext({ done: true, value: undefined })
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return new WeakRef(session)
+      }
+
+      const weakSession = await prepare()
+      expect(heldCleanup).toBeDefined()
+      const runtime = (
+        globalThis as {
+          Bun?: { gc?: (force?: boolean) => void }
+        }
+      ).Bun
+      if (runtime?.gc) {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          runtime.gc(true)
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+        expect(weakSession.deref()).toBeUndefined()
+      }
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "retires a recovered %s loser while its raw source Promise remains held",
+    async (entrypoint) => {
+      let heldRawNext: Promise<IteratorResult<StreamChunk>> | undefined
+      let rejectRawNext!: (error: unknown) => void
+      let returnCalls = 0
+      const prepare = async () => {
+        const session = createAnonymizer({
+          placeholders: token(),
+        }).createSession()
+        const source: AsyncIterable<StreamChunk> = {
+          [Symbol.asyncIterator]() {
+            return {
+              next() {
+                const raw = deferred<IteratorResult<StreamChunk>>()
+                heldRawNext = raw.promise
+                rejectRawNext = raw.reject
+                return raw.promise
+              },
+              async throw() {
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "held-recovered-loser",
+                    delta: "recovered",
+                  } satisfies StreamChunk,
+                }
+              },
+              async return() {
+                returnCalls += 1
+                return { done: true as const, value: undefined }
+              },
+            }
+          },
+        }
+        const inner: ConnectConnectionAdapter = {
+          connect: () => source,
+          joinRun: () => source,
+        }
+        const stream =
+          entrypoint === "connect"
+            ? piiConnection(inner, { session }).connect([
+                { role: "user", content: "hello" },
+              ])
+            : piiConnection(inner, { session }).joinRun!("run-1")
+        const iterator = stream[Symbol.asyncIterator]()
+        const pendingNext = iterator.next()
+        for (let attempt = 0; !heldRawNext && attempt < 20; attempt += 1)
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(heldRawNext).toBeDefined()
+        const primary = new Error(`${entrypoint} held loser`)
+        await expect(iterator.throw?.(primary)).resolves.toMatchObject({
+          done: false,
+          value: { delta: "recovered" },
+        })
+        await expect(pendingNext).rejects.toBe(primary)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+        return new WeakRef(session)
+      }
+
+      const weakSession = await prepare()
+      expect(heldRawNext).toBeDefined()
+      const runtime = (
+        globalThis as {
+          Bun?: { gc?: (force?: boolean) => void }
+        }
+      ).Bun
+      if (runtime?.gc) {
+        for (let attempt = 0; attempt < 5; attempt += 1) {
+          runtime.gc(true)
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        }
+        expect(weakSession.deref()).toBeUndefined()
+      }
+
+      rejectRawNext(new Error(`${entrypoint} held loser late rejection`))
+      await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(returnCalls).toBe(0)
     }
   )
 
