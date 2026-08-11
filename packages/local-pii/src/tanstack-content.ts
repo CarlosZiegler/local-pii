@@ -80,13 +80,12 @@ function safePath(path: Path): Path {
   Object.setPrototypeOf(cleaned, SAFE_ARRAY_PROTOTYPE)
   for (let index = 0; index < path.length; index += 1) {
     const part = path[index]
-    cleaned.push(
+    cleaned[index] =
       typeof part === "number" && Number.isSafeInteger(part) && part >= 0
         ? part
         : typeof part === "string" && SAFE_SEGMENTS.has(part)
           ? part
           : "<field>"
-    )
   }
   return Object.freeze(cleaned)
 }
@@ -156,13 +155,21 @@ function capture(value: unknown, path: Path): Captured {
     const prototype = Object.getPrototypeOf(value)
     const raw = Object.getOwnPropertyDescriptors(value)
     const descriptors: DescriptorEntry[] = []
+    Object.setPrototypeOf(descriptors, SAFE_ARRAY_PROTOTYPE)
     const descriptorMap = raw as Record<PropertyKey, PropertyDescriptor>
-    for (const key of Reflect.ownKeys(raw)) {
+    const keys = Reflect.ownKeys(raw)
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index]!
       const descriptor = descriptorMap[key]
       if (!descriptor) return fail(path, "<invalid>")
       if (!("value" in descriptor))
         return fail(descriptorPath(path, key), "<accessor>")
-      descriptors.push([key, Object.freeze({ ...descriptor })])
+      const entry = safeArray<
+        PropertyKey | PropertyDescriptor
+      >() as unknown as [PropertyKey, PropertyDescriptor]
+      entry[0] = key
+      entry[1] = Object.freeze({ ...descriptor })
+      descriptors[index] = Object.freeze(entry)
     }
     if (
       Object.prototype.hasOwnProperty.call(raw, "toJSON") ||
@@ -170,8 +177,10 @@ function capture(value: unknown, path: Path): Captured {
     )
       return fail(path, "<unsupported>")
     const lookup = new Map<PropertyKey, PropertyDescriptor>()
-    for (const [key, descriptor] of descriptors)
-      lookup.set(keyOf(key), descriptor)
+    for (let index = 0; index < descriptors.length; index += 1) {
+      const entry = descriptors[index]!
+      lookup.set(keyOf(entry[0]), entry[1])
+    }
     return Object.freeze({
       prototype,
       array: Array.isArray(value),
@@ -189,12 +198,14 @@ function keyOf(key: PropertyKey): PropertyKey {
 }
 
 function descriptorPath(path: Path, key: PropertyKey): Path {
-  if (typeof key === "string" && SAFE_SEGMENTS.has(key)) return [...path, key]
+  if (typeof key === "string" && SAFE_SEGMENTS.has(key))
+    return appendPath(path, key)
   if (typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key)) {
     const index = Number(key)
-    if (Number.isSafeInteger(index) && index >= 0) return [...path, index]
+    if (Number.isSafeInteger(index) && index >= 0)
+      return appendPath(path, index)
   }
-  return [...path, "<field>"]
+  return appendPath(path, "<field>")
 }
 
 function descriptor(
@@ -225,28 +236,49 @@ function optional(record: Captured, key: PropertyKey): Field {
   return field(record, key)
 }
 
-interface ArrayPrototypeFingerprint {
-  readonly prototype: object
+interface ArrayPrototypeChainNode {
+  readonly value: object
+  readonly parent: object | null
   readonly keys: readonly PropertyKey[]
   readonly descriptors: ReadonlyMap<PropertyKey, PropertyDescriptor>
 }
 
+interface ArrayPrototypeFingerprint {
+  readonly nodes: readonly ArrayPrototypeChainNode[]
+}
+
 function snapshotArrayPrototype(): ArrayPrototypeFingerprint | null {
   try {
-    const prototype = Array.prototype as object
-    const keys = Reflect.ownKeys(prototype)
-    const descriptors = new Map<PropertyKey, PropertyDescriptor>()
-    for (let index = 0; index < keys.length; index += 1) {
-      const key = keys[index]!
-      const descriptor = Object.getOwnPropertyDescriptor(prototype, key)
-      if (!descriptor) return null
-      descriptors.set(key, Object.freeze({ ...descriptor }))
+    const nodes: Array<ArrayPrototypeChainNode> = []
+    let current: object | null = Array.prototype as object
+    const seen = new WeakSet<object>()
+    while (current !== null) {
+      if (seen.has(current)) return null
+      seen.add(current)
+      const keys = Reflect.ownKeys(current)
+      const descriptors = new Map<PropertyKey, PropertyDescriptor>()
+      for (let index = 0; index < keys.length; index += 1) {
+        const key = keys[index]!
+        const descriptor = Object.getOwnPropertyDescriptor(current, key)
+        if (!descriptor) return null
+        descriptors.set(key, Object.freeze({ ...descriptor }))
+      }
+      const parent = Object.getPrototypeOf(current)
+      const node = Object.freeze({
+        value: current,
+        parent,
+        keys: Object.freeze(keys),
+        descriptors,
+      })
+      Object.defineProperty(nodes, String(nodes.length), {
+        configurable: true,
+        enumerable: true,
+        writable: true,
+        value: node,
+      })
+      current = parent
     }
-    return Object.freeze({
-      prototype,
-      keys: Object.freeze(keys),
-      descriptors,
-    })
+    return Object.freeze({ nodes: Object.freeze(nodes) })
   } catch {
     return null
   }
@@ -273,19 +305,28 @@ function sameDescriptor(
 function arrayPrototypeMatchesBaseline(): boolean {
   const baseline = ARRAY_PROTOTYPE_BASELINE
   const current = snapshotArrayPrototype()
-  if (!baseline || !current || baseline.prototype !== current.prototype)
+  if (!baseline || !current || baseline.nodes.length !== current.nodes.length)
     return false
-  if (baseline.keys.length !== current.keys.length) return false
-  for (let index = 0; index < baseline.keys.length; index += 1) {
-    const key = baseline.keys[index]
-    if (key !== current.keys[index]) return false
+  for (let nodeIndex = 0; nodeIndex < baseline.nodes.length; nodeIndex += 1) {
+    const expected = baseline.nodes[nodeIndex]!
+    const actual = current.nodes[nodeIndex]!
     if (
-      !sameDescriptor(
-        baseline.descriptors.get(key!),
-        current.descriptors.get(key!)
-      )
+      expected.value !== actual.value ||
+      expected.parent !== actual.parent ||
+      expected.keys.length !== actual.keys.length
     )
       return false
+    for (let keyIndex = 0; keyIndex < expected.keys.length; keyIndex += 1) {
+      const key = expected.keys[keyIndex]
+      if (key !== actual.keys[keyIndex]) return false
+      if (
+        !sameDescriptor(
+          expected.descriptors.get(key!),
+          actual.descriptors.get(key!)
+        )
+      )
+        return false
+    }
   }
   return true
 }
@@ -301,11 +342,12 @@ export function assertTanStackArrayPrototypeStable(): void {
 const SAFE_ARRAY_PROTOTYPE = (() => {
   const prototype = Object.create(null) as object
   const baseline = ARRAY_PROTOTYPE_BASELINE
-  if (baseline)
-    for (let index = 0; index < baseline.keys.length; index += 1) {
-      const key = baseline.keys[index]!
+  const arrayNode = baseline?.nodes[0]
+  if (arrayNode)
+    for (let index = 0; index < arrayNode.keys.length; index += 1) {
+      const key = arrayNode.keys[index]!
       if (key === "length" || key === "toJSON") continue
-      const descriptor = baseline.descriptors.get(key)
+      const descriptor = arrayNode.descriptors.get(key)
       if (!descriptor) continue
       if (!("value" in descriptor)) continue
       if (typeof descriptor.value !== "function") continue
@@ -331,9 +373,16 @@ function appendPath(
 ): Path {
   const result: Array<string | number> = []
   Object.setPrototypeOf(result, SAFE_ARRAY_PROTOTYPE)
-  for (let index = 0; index < path.length; index += 1) result.push(path[index]!)
+  for (let index = 0; index < path.length; index += 1)
+    result[index] = path[index]!
   for (let index = 0; index < segments.length; index += 1)
-    result.push(segments[index]!)
+    result[path.length + index] = segments[index]!
+  return result
+}
+
+function safeArray<T>(): T[] {
+  const result: T[] = []
+  Object.setPrototypeOf(result, SAFE_ARRAY_PROTOTYPE)
   return result
 }
 
@@ -383,7 +432,14 @@ function captureArray(value: unknown, path: Path): CapturedArray {
     length.value < 0
   )
     return fail(path, "<invalid>")
-  for (const [key, item] of record.descriptors) {
+  for (
+    let descriptorIndex = 0;
+    descriptorIndex < record.descriptors.length;
+    descriptorIndex += 1
+  ) {
+    const entry = record.descriptors[descriptorIndex]!
+    const key = entry[0]
+    const item = entry[1]
     if (key === "length") continue
     if (
       typeof key !== "string" ||
@@ -394,12 +450,12 @@ function captureArray(value: unknown, path: Path): CapturedArray {
     )
       return fail(descriptorPath(path, key), "<invalid>")
   }
-  const values: unknown[] = []
+  const values = safeArray<unknown>()
   for (let index = 0; index < length.value; index += 1) {
     const item = descriptor(record, index)
-    if (!item) return fail([...path, index], "<missing>")
-    if (!("value" in item)) return fail([...path, index], "<accessor>")
-    values.push(item.value)
+    if (!item) return fail(appendPath(path, index), "<missing>")
+    if (!("value" in item)) return fail(appendPath(path, index), "<accessor>")
+    values[index] = item.value
   }
   return Object.freeze({ record, values: Object.freeze(values) })
 }
@@ -414,7 +470,7 @@ interface JsonArray {
 }
 
 function jsonPath(path: Path): Path {
-  return [...path, "<field>"]
+  return appendPath(path, "<field>")
 }
 
 function jsonValuePath(path: Path): Path {
@@ -450,7 +506,14 @@ function captureJson(
         length.value < 0
       )
         return fail(path, "<invalid-json>")
-      for (const [key, item] of record.descriptors) {
+      for (
+        let descriptorIndex = 0;
+        descriptorIndex < record.descriptors.length;
+        descriptorIndex += 1
+      ) {
+        const entry = record.descriptors[descriptorIndex]!
+        const key = entry[0]
+        const item = entry[1]
         if (key === "length") continue
         if (
           typeof key !== "string" ||
@@ -461,23 +524,32 @@ function captureJson(
         if (!item.enumerable || !("value" in item))
           return fail(jsonPath(path), "<accessor>")
       }
-      const output: PreparedJson[] = []
+      const output = safeArray<PreparedJson>()
       for (let index = 0; index < length.value; index += 1) {
         const item = descriptor(record, index)
-        if (!item) return fail([...path, index], "<invalid-json>")
+        if (!item) return fail(appendPath(path, index), "<invalid-json>")
         if (!item.enumerable || !("value" in item))
-          return fail([...path, index], "<accessor>")
-        output.push(
-          captureJson(item.value, [...path, index], depth + 1, active)
+          return fail(appendPath(path, index), "<accessor>")
+        output[index] = captureJson(
+          item.value,
+          appendPath(path, index),
+          depth + 1,
+          active
         )
       }
-      Object.setPrototypeOf(output, null)
       return Object.freeze(output) as JsonArray
     }
     if (record.prototype !== null && record.prototype !== Object.prototype)
       return fail(path, "<invalid-json>")
     const output = Object.create(null) as JsonObject
-    for (const [key, item] of record.descriptors) {
+    for (
+      let descriptorIndex = 0;
+      descriptorIndex < record.descriptors.length;
+      descriptorIndex += 1
+    ) {
+      const entry = record.descriptors[descriptorIndex]!
+      const key = entry[0]
+      const item = entry[1]
       if (typeof key !== "string" || key === "toJSON")
         return fail(jsonPath(path), "<invalid-json>")
       if (!item.enumerable || !("value" in item))
@@ -587,13 +659,19 @@ function prepareParts(
   jsonText: boolean
 ): PreparedPartList {
   const captured = captureArray(value, path)
+  const items = safeArray<PreparedPart>()
+  for (let index = 0; index < captured.values.length; index += 1)
+    items[index] = Object.freeze(
+      preparePart(
+        captured.values[index],
+        appendPath(path, index),
+        family,
+        jsonText
+      )
+    )
   return Object.freeze({
     template: captured.record,
-    items: Object.freeze(
-      captured.values.map((item, index) =>
-        Object.freeze(preparePart(item, [...path, index], family, jsonText))
-      )
-    ),
+    items: Object.freeze(items),
   })
 }
 
@@ -604,49 +682,48 @@ function preparePart(
   jsonText: boolean
 ): PreparedPart {
   const template = capture(value, path)
-  const type = required(template, "type", [...path, "type"])
+  const type = required(template, "type", appendPath(path, "type"))
   const kind = policy(family, type)
   if (!kind) return fail(path, "<unsupported>")
   if (kind === "opaque") return { kind, template }
   if (kind === "text") {
-    const content = required(template, "content", [...path, "content"])
+    const content = required(template, "content", appendPath(path, "content"))
     if (typeof content !== "string")
-      return fail([...path, "content"], "<invalid>")
+      return fail(appendPath(path, "content"), "<invalid>")
     return jsonText
       ? {
           kind: "freeform-text",
           template,
-          value: freeform(content, [...path, "content"]),
+          value: freeform(content, appendPath(path, "content")),
         }
       : { kind, template, text: content }
   }
   if (kind === "structured") {
-    const status = required(template, "status", [...path, "status"])
+    const status = required(template, "status", appendPath(path, "status"))
     if (status !== "streaming" && status !== "complete" && status !== "error")
-      return fail([...path, "status"], "<invalid>")
+      return fail(appendPath(path, "status"), "<invalid>")
     if (status !== "complete") return { kind: "opaque", template }
-    const raw = required(template, "raw", [...path, "raw"])
-    if (typeof raw !== "string") return fail([...path, "raw"], "<invalid>")
+    const raw = required(template, "raw", appendPath(path, "raw"))
+    if (typeof raw !== "string")
+      return fail(appendPath(path, "raw"), "<invalid>")
     return {
       kind: "structured-fallback",
       template,
       json:
         raw === ""
-          ? captureJson(required(template, "data", [...path, "data"]), [
-              ...path,
-              "data",
-            ])
-          : strictJson(raw, [...path, "raw"]),
+          ? captureJson(
+              required(template, "data", appendPath(path, "data")),
+              appendPath(path, "data")
+            )
+          : strictJson(raw, appendPath(path, "raw")),
     }
   }
   if (kind === "tool-call") {
-    const argumentsValue = required(template, "arguments", [
-      ...path,
-      "arguments",
-    ])
+    const argumentsPath = appendPath(path, "arguments")
+    const argumentsValue = required(template, "arguments", argumentsPath)
     if (typeof argumentsValue !== "string")
-      return fail([...path, "arguments"], "<invalid>")
-    const state = required(template, "state", [...path, "state"])
+      return fail(argumentsPath, "<invalid>")
+    const state = required(template, "state", appendPath(path, "state"))
     const validState =
       state === "awaiting-input" ||
       state === "input-streaming" ||
@@ -655,16 +732,16 @@ function preparePart(
       state === "approval-responded" ||
       state === "complete" ||
       state === "error"
-    if (!validState) return fail([...path, "state"], "<invalid>")
+    if (!validState) return fail(appendPath(path, "state"), "<invalid>")
     const input = optional(template, "input")
     const output = optional(template, "output")
     const preparedInput =
       input.kind === "data" && input.value !== undefined
-        ? captureJson(input.value, [...path, "input"])
+        ? captureJson(input.value, appendPath(path, "input"))
         : undefined
     const preparedOutput =
       output.kind === "data" && output.value !== undefined
-        ? captureJson(output.value, [...path, "output"])
+        ? captureJson(output.value, appendPath(path, "output"))
         : undefined
     const partialState =
       state === "awaiting-input" || state === "input-streaming"
@@ -672,29 +749,29 @@ function preparePart(
       kind,
       template,
       args: partialState
-        ? partialJson(argumentsValue, [...path, "arguments"])
+        ? partialJson(argumentsValue, argumentsPath)
         : {
             kind: "json",
-            value: strictJson(argumentsValue, [...path, "arguments"]),
+            value: strictJson(argumentsValue, argumentsPath),
           },
       ...(preparedInput !== undefined ? { input: preparedInput } : {}),
       ...(preparedOutput !== undefined ? { output: preparedOutput } : {}),
     }
   }
-  const content = required(template, "content", [...path, "content"])
+  const content = required(template, "content", appendPath(path, "content"))
   const preparedContent =
     typeof content === "string"
-      ? freeform(content, [...path, "content"])
+      ? freeform(content, appendPath(path, "content"))
       : Array.isArray(content)
-        ? prepareParts(content, [...path, "content"], "model", true)
-        : fail([...path, "content"], "<invalid>")
+        ? prepareParts(content, appendPath(path, "content"), "model", true)
+        : fail(appendPath(path, "content"), "<invalid>")
   const error = optional(template, "error")
   if (
     error.kind === "data" &&
     error.value !== undefined &&
     typeof error.value !== "string"
   )
-    return fail([...path, "error"], "<invalid>")
+    return fail(appendPath(path, "error"), "<invalid>")
   return {
     kind,
     template,
@@ -717,32 +794,22 @@ interface PreparedToolCalls {
 
 function prepareToolCalls(value: unknown, path: Path): PreparedToolCalls {
   const captured = captureArray(value, path)
-  const items = captured.values.map((item, index) => {
-    const template = capture(item, [...path, index])
-    const functionValue = required(template, "function", [
-      ...path,
-      index,
-      "function",
-    ])
-    const functionTemplate = capture(functionValue, [
-      ...path,
-      index,
-      "function",
-    ])
-    const args = required(functionTemplate, "arguments", [
-      ...path,
-      index,
-      "function",
-      "arguments",
-    ])
-    if (typeof args !== "string")
-      return fail([...path, index, "function", "arguments"], "<invalid>")
-    return Object.freeze({
+  const items = safeArray<PreparedToolCall>()
+  for (let index = 0; index < captured.values.length; index += 1) {
+    const itemPath = appendPath(path, index)
+    const functionPath = appendPath(itemPath, "function")
+    const argumentsPath = appendPath(functionPath, "arguments")
+    const template = capture(captured.values[index], itemPath)
+    const functionValue = required(template, "function", functionPath)
+    const functionTemplate = capture(functionValue, functionPath)
+    const args = required(functionTemplate, "arguments", argumentsPath)
+    if (typeof args !== "string") return fail(argumentsPath, "<invalid>")
+    items[index] = Object.freeze({
       template,
       functionTemplate,
-      args: strictJson(args, [...path, index, "function", "arguments"]),
+      args: strictJson(args, argumentsPath),
     })
-  })
+  }
   return Object.freeze({
     template: captured.record,
     items: Object.freeze(items),
@@ -783,18 +850,21 @@ function classify(records: readonly Captured[]): Family {
   let ambiguousIndex: number | undefined
   // A record that matches both structural families wins neither: reject it
   // after scanning so a later unambiguous record cannot reinterpret it.
-  records.forEach((record, index) => {
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index]!
     const current = shape(record)
     const family =
       current.ui === current.model ? undefined : current.ui ? "ui" : "model"
     if (!family) {
       ambiguousIndex ??= index
-      return
+      continue
     }
-    if (candidate && candidate !== family) return fail([index], "<unsupported>")
+    if (candidate && candidate !== family)
+      return fail(appendPath([], index), "<unsupported>")
     candidate = family
-  })
-  if (ambiguousIndex !== undefined) return fail([ambiguousIndex], "<ambiguous>")
+  }
+  if (ambiguousIndex !== undefined)
+    return fail(appendPath([], ambiguousIndex), "<ambiguous>")
   if (candidate) return candidate
   return fail([], "<unsupported>")
 }
@@ -804,43 +874,52 @@ function prepareMessage(
   index: number,
   family: Family
 ): PreparedMessage {
-  const role = required(record, "role", [index, "role"])
+  const messagePath = appendPath([], index)
+  const rolePath = appendPath(messagePath, "role")
+  const role = required(record, "role", rolePath)
   if (family === "ui") {
-    const id = required(record, "id", [index, "id"])
-    if (typeof id !== "string") return fail([index, "id"], "<invalid>")
+    const idPath = appendPath(messagePath, "id")
+    const id = required(record, "id", idPath)
+    if (typeof id !== "string") return fail(idPath, "<invalid>")
     if (role !== "system" && role !== "user" && role !== "assistant")
-      return fail([index, "role"], "<invalid>")
+      return fail(rolePath, "<invalid>")
     return {
       family,
       template: record,
       parts: prepareParts(
-        required(record, "parts", [index, "parts"]),
-        [index, "parts"],
+        required(record, "parts", appendPath(messagePath, "parts")),
+        appendPath(messagePath, "parts"),
         "ui",
         false
       ),
     }
   }
   if (role !== "user" && role !== "assistant" && role !== "tool")
-    return fail([index, "role"], "<invalid>")
-  const content = required(record, "content", [index, "content"])
+    return fail(rolePath, "<invalid>")
+  const contentPath = appendPath(messagePath, "content")
+  const content = required(record, "content", contentPath)
   const prepared =
     typeof content === "string"
       ? role === "tool"
-        ? freeform(content, [index, "content"])
+        ? freeform(content, contentPath)
         : content
       : content === null
         ? null
         : Array.isArray(content)
-          ? prepareParts(content, [index, "content"], "model", role === "tool")
-          : fail([index, "content"], "<invalid>")
+          ? prepareParts(content, contentPath, "model", role === "tool")
+          : fail(contentPath, "<invalid>")
   const toolCalls = optional(record, "toolCalls")
   return {
     family,
     template: record,
     content: prepared,
     ...(toolCalls.kind === "data" && toolCalls.value !== undefined
-      ? { toolCalls: prepareToolCalls(toolCalls.value, [index, "toolCalls"]) }
+      ? {
+          toolCalls: prepareToolCalls(
+            toolCalls.value,
+            appendPath(messagePath, "toolCalls")
+          ),
+        }
       : {}),
   }
 }
@@ -848,17 +927,21 @@ function prepareMessage(
 /** The sole caller-object phase: captures and compiles the complete graph synchronously. */
 function captureMessages(messages: TanStackMessages): PreparedMessages {
   const root = captureArray(messages, [])
-  const records = root.values.map((value, index) => capture(value, [index]))
+  const records = safeArray<Captured>()
+  for (let index = 0; index < root.values.length; index += 1)
+    records[index] = capture(root.values[index], appendPath([], index))
   if (records.length === 0)
-    return Object.freeze({ template: root.record, items: Object.freeze([]) })
+    return Object.freeze({
+      template: root.record,
+      items: Object.freeze(safeArray<PreparedMessage>()),
+    })
   const family = classify(records)
+  const items = safeArray<PreparedMessage>()
+  for (let index = 0; index < records.length; index += 1)
+    items[index] = Object.freeze(prepareMessage(records[index]!, index, family))
   return Object.freeze({
     template: root.record,
-    items: Object.freeze(
-      records.map((record, index) =>
-        Object.freeze(prepareMessage(record, index, family))
-      )
-    ),
+    items: Object.freeze(items),
   })
 }
 
@@ -875,10 +958,9 @@ async function protectPreparedJson(
     return value
   if (typeof value === "string") return protectText(session, value)
   if (Array.isArray(value)) {
-    const output: PreparedJson[] = []
-    Object.setPrototypeOf(output, SAFE_ARRAY_PROTOTYPE)
+    const output = safeArray<PreparedJson>()
     for (let index = 0; index < value.length; index += 1)
-      output.push(await protectPreparedJson(session, value[index]!))
+      output[index] = await protectPreparedJson(session, value[index]!)
     return Object.freeze(output) as JsonArray
   }
   const output = Object.create(null) as JsonObject
@@ -1008,9 +1090,9 @@ async function renderMessage(
     const overrides = new Map<PropertyKey, unknown>()
     overrides.set(
       "parts",
-      await renderParts(session, plan.parts, [index, "parts"])
+      await renderParts(session, plan.parts, appendPath([], index, "parts"))
     )
-    return cloneRecord(plan.template, overrides, [index])
+    return cloneRecord(plan.template, overrides, appendPath([], index))
   }
   const overrides = new Map<PropertyKey, unknown>()
   if (typeof plan.content === "string")
@@ -1021,14 +1103,18 @@ async function renderMessage(
   else
     overrides.set(
       "content",
-      await renderParts(session, plan.content, [index, "content"])
+      await renderParts(session, plan.content, appendPath([], index, "content"))
     )
   if (plan.toolCalls)
     overrides.set(
       "toolCalls",
-      await renderToolCalls(session, plan.toolCalls, [index, "toolCalls"])
+      await renderToolCalls(
+        session,
+        plan.toolCalls,
+        appendPath([], index, "toolCalls")
+      )
     )
-  return cloneRecord(plan.template, overrides, [index])
+  return cloneRecord(plan.template, overrides, appendPath([], index))
 }
 
 export async function protectTanStackMessages(
@@ -1048,6 +1134,5 @@ export async function protectTanStackMessages(
     overrides,
     []
   ) as TanStackMessages
-  assertArrayPrototypeStable()
   return protectedMessages
 }

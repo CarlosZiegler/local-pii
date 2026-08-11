@@ -279,6 +279,10 @@ describe("piiConnection message protection", () => {
       Array.prototype,
       "length"
     )
+    const arrayPrototypeParent = Object.getPrototypeOf(Array.prototype)
+    const chainMutation = {
+      toJSON: () => ({ leaked: "ana@acme.com" }),
+    }
     vi.spyOn(session, "anonymize").mockImplementation(async (text) => {
       const result = await originalAnonymize(text)
       Object.defineProperty(arrayPrototype, "toJSON", {
@@ -299,6 +303,7 @@ describe("piiConnection message protection", () => {
         configurable: true,
         set() {},
       })
+      Object.setPrototypeOf(arrayPrototype, chainMutation)
       return result
     })
     const innerConnect = vi.fn(() => emptyStream())
@@ -336,9 +341,116 @@ describe("piiConnection message protection", () => {
       else delete (Array.prototype as Array<unknown>)[0]
       if (arrayLengthDescriptor)
         Object.defineProperty(Array.prototype, "length", arrayLengthDescriptor)
+      Object.setPrototypeOf(Array.prototype, arrayPrototypeParent)
     }
     expect(innerConnect).not.toHaveBeenCalled()
     expect(caught).toMatchObject({ path: [], discriminant: "<invalid>" })
+  })
+
+  it("does not resolve a transient Array.prototype map replacement from a caller trap", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const originalMap = Object.getOwnPropertyDescriptor(Array.prototype, "map")!
+    const source = [
+      { role: "user" as const, content: "ana@acme.com" },
+    ] as Array<ModelMessage>
+    let ownKeysCalls = 0
+    const messages = new Proxy(source, {
+      ownKeys(target) {
+        ownKeysCalls += 1
+        Object.defineProperty(Array.prototype, "map", {
+          configurable: true,
+          value: () => [],
+        })
+        Object.defineProperty(Array.prototype, "map", originalMap)
+        return Reflect.ownKeys(target)
+      },
+    })
+    const received: Array<ModelMessage>[] = []
+    const wrapped = piiConnection(
+      {
+        connect(protectedMessages) {
+          received.push(protectedMessages as Array<ModelMessage>)
+          return emptyStream()
+        },
+      },
+      { session }
+    )
+
+    await collect(wrapped.connect(messages))
+    expect(ownKeysCalls).toBe(1)
+    expect(received[0]![0]!.content).toMatch(TOKEN)
+  })
+
+  it("pins connect before a getter can mutate the Array prototype chain", () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const originalToJson = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      "toJSON"
+    )
+    const connect = vi.fn(() => emptyStream())
+    const inner = {
+      get connect() {
+        Object.defineProperty(Array.prototype, "toJSON", {
+          configurable: true,
+          value: () => ({ leaked: "ana@acme.com" }),
+        })
+        return connect
+      },
+    } as unknown as ConnectConnectionAdapter
+
+    try {
+      expect(() => piiConnection(inner, { session })).toThrow(
+        UnsupportedTanStackSemanticContentError
+      )
+    } finally {
+      if (originalToJson)
+        Object.defineProperty(Array.prototype, "toJSON", originalToJson)
+      else
+        delete (Array.prototype as Array<unknown> & { toJSON?: unknown }).toJSON
+    }
+    expect(connect).not.toHaveBeenCalled()
+    expect(Object.keys(session.mapping)).toHaveLength(0)
+  })
+
+  it("gives an abort reason precedence over a late intrinsic mutation", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const originalAnonymize = session.anonymize.bind(session)
+    const originalToJson = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      "toJSON"
+    )
+    const controller = new AbortController()
+    const abortReason = new Error("abort wins")
+    const connect = vi.fn(() => emptyStream())
+    vi.spyOn(session, "anonymize").mockImplementation(async (text) => {
+      const result = await originalAnonymize(text)
+      Object.defineProperty(Array.prototype, "toJSON", {
+        configurable: true,
+        value: () => ({ leaked: "ana@acme.com" }),
+      })
+      controller.abort(abortReason)
+      return result
+    })
+
+    let caught: unknown
+    try {
+      await collect(
+        piiConnection({ connect }, { session }).connect(
+          [{ role: "user", content: "ana@acme.com" }],
+          undefined,
+          controller.signal
+        )
+      )
+    } catch (error) {
+      caught = error
+    } finally {
+      if (originalToJson)
+        Object.defineProperty(Array.prototype, "toJSON", originalToJson)
+      else
+        delete (Array.prototype as Array<unknown> & { toJSON?: unknown }).toJSON
+    }
+    expect(caught).toBe(abortReason)
+    expect(connect).not.toHaveBeenCalled()
   })
 
   it("captures a stateful proxy once without invoking ordinary get or rereading it", async () => {

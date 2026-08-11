@@ -15,6 +15,13 @@ export interface PiiConnectionOptions {
   session: PiiSession
 }
 
+function pinMethod<T>(read: () => T): T {
+  assertTanStackArrayPrototypeStable()
+  const method = read()
+  assertTanStackArrayPrototypeStable()
+  return method
+}
+
 /**
  * Wrap a TanStack AI client connection without introducing a server transport.
  * Message semantics are protected before `connect`; streamed text is restored
@@ -24,10 +31,17 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
   inner: T,
   options: PiiConnectionOptions
 ): ConnectConnectionAdapter {
+  const pinnedConnect = pinMethod(() => inner.connect)
+  const pinnedHydrate = pinMethod(() => inner.hydrate)
+  const pinnedHydrateGeneration = pinMethod(() => inner.hydrateGeneration)
+  const pinnedJoinRun = pinMethod(() => inner.joinRun)
   const connect = (
     ...args: Parameters<T["connect"]>
   ): ReturnType<T["connect"]> => {
-    const [messages, data, signal, runContext] = args
+    const messages = args[0]
+    const data = args[1]
+    const signal = args[2]
+    const runContext = args[3]
     const stream: AsyncIterable<StreamChunk> = {
       async *[Symbol.asyncIterator]() {
         signal?.throwIfAborted()
@@ -37,12 +51,12 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
         )
         signal?.throwIfAborted()
         assertTanStackArrayPrototypeStable()
-        const upstream = inner.connect(
+        const upstream = Reflect.apply(pinnedConnect, inner, [
           protectedMessages,
           data,
           signal,
-          runContext
-        )
+          runContext,
+        ])
         yield* restoreTanStackStream(options.session, upstream, signal)
       },
     }
@@ -53,17 +67,18 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
     connect: connect as unknown as ConnectConnectionAdapter["connect"],
   }
 
-  if (inner.hydrate) {
-    wrapped.hydrate = (...args) => inner.hydrate!(...args)
+  if (pinnedHydrate) {
+    wrapped.hydrate = (...args) => Reflect.apply(pinnedHydrate, inner, args)
   }
-  if (inner.hydrateGeneration) {
-    wrapped.hydrateGeneration = (...args) => inner.hydrateGeneration!(...args)
+  if (pinnedHydrateGeneration) {
+    wrapped.hydrateGeneration = (...args) =>
+      Reflect.apply(pinnedHydrateGeneration, inner, args)
   }
-  if (inner.joinRun) {
+  if (pinnedJoinRun) {
     wrapped.joinRun = (runId, signal) =>
       restoreTanStackStream(
         options.session,
-        inner.joinRun!(runId, signal),
+        Reflect.apply(pinnedJoinRun, inner, [runId, signal]),
         signal
       )
   }
