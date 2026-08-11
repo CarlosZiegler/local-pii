@@ -155,8 +155,9 @@ export function managedGeneration(
         closed = true
         primaryError = error
         hasPrimaryError = true
-        pendingErrorDelivered = true
+        const hadPendingNext = pendingNext !== undefined
         rejectPending(error)
+        if (hadPendingNext) pendingErrorDelivered = true
         signal?.removeEventListener("abort", onAbort)
         void settle()
       }

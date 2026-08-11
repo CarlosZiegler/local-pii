@@ -186,13 +186,39 @@ function protectedMessages(
   ]
 }
 
-function validateConversation(history: readonly ProtectedBrowserTurn[]): void {
-  let expected: "system" | "user" | "assistant" =
-    history[0]?.role === "system" ? "system" : "user"
+function promptMessageContent(
+  content: string | readonly { type: string; value: unknown }[]
+): string {
+  if (typeof content === "string") return content
+  return content
+    .map((part) => {
+      if (part.type !== "text" || typeof part.value !== "string") {
+        throw new DOMException(
+          "The Gemma fallback supports text content only",
+          "NotSupportedError"
+        )
+      }
+      return part.value
+    })
+    .join("")
+}
+
+function promptTurns(input: LanguageModelPrompt): ProtectedBrowserTurn[] {
+  if (typeof input === "string") {
+    return [{ role: "user", protectedContent: input }]
+  }
+  return input.map((message) => ({
+    role: compatibleRole(message.role),
+    protectedContent: promptMessageContent(message.content),
+  }))
+}
+
+function validateHistory(history: readonly ProtectedBrowserTurn[]): void {
+  let expected: "user" | "assistant" = "user"
   let sawSystem = false
-  for (const turn of history) {
+  for (const [index, turn] of history.entries()) {
     if (turn.role === "system") {
-      if (sawSystem || turn !== history[0]) {
+      if (sawSystem || index !== 0) {
         throw new TypeError(
           "Gemma generation accepts at most one leading system turn"
         )
@@ -208,11 +234,239 @@ function validateConversation(history: readonly ProtectedBrowserTurn[]): void {
     }
     expected = turn.role === "user" ? "assistant" : "user"
   }
+}
+
+function validateConversation(history: readonly ProtectedBrowserTurn[]): void {
+  validateHistory(history)
   // The current protected content is always a user turn.
-  if (expected !== "user") {
+  if (history.at(-1)?.role === "user") {
     throw new TypeError(
       "Gemma generation requires the current turn after an assistant turn"
     )
+  }
+}
+
+function composeAbortSignals(
+  sessionSignal: AbortSignal,
+  callerSignal?: AbortSignal
+): { signal: AbortSignal; cleanup: () => void } {
+  const controller = new AbortController()
+  let cleaned = false
+  let cleanup = () => {}
+
+  const abortFrom = (source: AbortSignal) => {
+    if (controller.signal.aborted) return
+    controller.abort(source.reason)
+    cleanup()
+  }
+  const onSessionAbort = () => abortFrom(sessionSignal)
+  const onCallerAbort = () => {
+    if (callerSignal) abortFrom(callerSignal)
+  }
+
+  if (callerSignal?.aborted) {
+    abortFrom(callerSignal)
+  } else if (sessionSignal.aborted) {
+    abortFrom(sessionSignal)
+  } else {
+    sessionSignal.addEventListener("abort", onSessionAbort)
+    callerSignal?.addEventListener("abort", onCallerAbort)
+  }
+
+  cleanup = () => {
+    if (cleaned) return
+    cleaned = true
+    sessionSignal.removeEventListener("abort", onSessionAbort)
+    callerSignal?.removeEventListener("abort", onCallerAbort)
+  }
+  return { signal: controller.signal, cleanup }
+}
+
+class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
+  contextUsage = 0
+  inputUsage = 0
+  contextWindow = 0
+  inputQuota = 0
+  topK = 0
+  temperature = 0
+  oncontextoverflow: ((this: LanguageModel, ev: Event) => unknown) | null = null
+  onquotaoverflow: ((this: LanguageModel, ev: Event) => unknown) | null = null
+
+  private readonly sessionAbort = new AbortController()
+  private readonly sessionAbortReason = new DOMException(
+    "The compatibility session was destroyed",
+    "AbortError"
+  )
+  private readonly activeIterators = new Set<AsyncIterator<string>>()
+  private readonly activeReleases = new Map<AsyncIterator<string>, () => void>()
+  private destroyed = false
+
+  constructor(
+    private readonly runtime: BrowserGenerationRuntime,
+    private readonly history: ProtectedBrowserTurn[]
+  ) {
+    super()
+    validateHistory(history)
+  }
+
+  private ensureActive(): void {
+    if (this.destroyed) {
+      throw new DOMException(
+        "The compatibility session has been destroyed",
+        "InvalidStateError"
+      )
+    }
+  }
+
+  private requestFor(input: LanguageModelPrompt): {
+    history: ProtectedBrowserTurn[]
+    current: string
+  } {
+    const turns = promptTurns(input)
+    const final = turns.at(-1)
+    if (
+      !final ||
+      final.role !== "user" ||
+      final.protectedContent.trim() === ""
+    ) {
+      throw new TypeError(
+        "The final compatibility prompt must be non-empty user text"
+      )
+    }
+    const history = [...this.history, ...turns.slice(0, -1)]
+    validateConversation(history)
+    validateHistory([...history, final])
+    return { history, current: final.protectedContent }
+  }
+
+  promptStreaming(
+    input: LanguageModelPrompt,
+    options: LanguageModelPromptOptions = {}
+  ): ReadableStream<string> {
+    this.ensureActive()
+    options.signal?.throwIfAborted()
+    const { history, current } = this.requestFor(input)
+    const composed = composeAbortSignals(
+      this.sessionAbort.signal,
+      options.signal
+    )
+    let iterator: AsyncIterator<string>
+    try {
+      const request = createProtectedBrowserRequest({
+        protectedHistory: history,
+        protectedContent: current,
+        signal: composed.signal,
+      })
+      iterator = this.runtime.generate(request)[Symbol.asyncIterator]()
+      this.activeIterators.add(iterator)
+    } catch (error) {
+      composed.cleanup()
+      throw error
+    }
+
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      composed.cleanup()
+      this.activeIterators.delete(iterator)
+      this.activeReleases.delete(iterator)
+    }
+    this.activeReleases.set(iterator, release)
+    return new ReadableStream<string>({
+      async pull(controller) {
+        try {
+          const next = await iterator.next()
+          if (next.done) {
+            release()
+            controller.close()
+          } else controller.enqueue(next.value)
+        } catch (error) {
+          try {
+            await iterator.return?.()
+          } catch {
+            // Preserve the generation or abort error as the primary stream error.
+          }
+          release()
+          controller.error(error)
+        }
+      },
+      async cancel(reason) {
+        try {
+          await iterator.return?.(reason)
+        } finally {
+          release()
+        }
+      },
+    })
+  }
+
+  async prompt(
+    input: LanguageModelPrompt,
+    options: LanguageModelPromptOptions = {}
+  ): Promise<string> {
+    const stream = this.promptStreaming(input, options)
+    const reader = stream.getReader()
+    let output = ""
+    while (true) {
+      const next = await reader.read()
+      if (next.done) return output
+      output += next.value
+    }
+  }
+
+  async append(
+    input: LanguageModelPrompt,
+    options: LanguageModelAppendOptions = {}
+  ): Promise<undefined> {
+    this.ensureActive()
+    options.signal?.throwIfAborted()
+    const turns = promptTurns(input)
+    validateHistory([...this.history, ...turns])
+    this.history.push(...turns)
+    return undefined
+  }
+
+  async measureContextUsage(
+    input: LanguageModelPrompt,
+    options: LanguageModelPromptOptions = {}
+  ): Promise<number> {
+    this.ensureActive()
+    options.signal?.throwIfAborted()
+    const { history, current } = this.requestFor(input)
+    return [...history, { role: "user", protectedContent: current }].reduce(
+      (total, turn) => total + turn.protectedContent.length,
+      0
+    )
+  }
+
+  async measureInputUsage(
+    input: LanguageModelPrompt,
+    options: LanguageModelPromptOptions = {}
+  ): Promise<number> {
+    return this.measureContextUsage(input, options)
+  }
+
+  async clone(options: LanguageModelCloneOptions = {}): Promise<LanguageModel> {
+    this.ensureActive()
+    options.signal?.throwIfAborted()
+    return new GemmaCompatibilitySession(this.runtime, [...this.history])
+  }
+
+  destroy(): undefined {
+    if (this.destroyed) return undefined
+    this.destroyed = true
+    this.sessionAbort.abort(this.sessionAbortReason)
+    for (const iterator of this.activeIterators) {
+      this.activeReleases.get(iterator)?.()
+      void Promise.resolve()
+        .then(() => iterator.throw?.(this.sessionAbortReason))
+        .catch(() => undefined)
+        .then(() => iterator.return?.(this.sessionAbortReason))
+        .catch(() => undefined)
+        .finally(() => this.activeIterators.delete(iterator))
+    }
+    return undefined
   }
 }
 
@@ -388,101 +642,12 @@ export async function createGemmaLanguageModelFactory(
     },
     async create(options = {}) {
       options.signal?.throwIfAborted()
-      let destroyed = false
-      const activeIterators = new Set<AsyncIterator<string>>()
       const history = (options.initialPrompts ?? []).map((message) => ({
         role: compatibleRole(message.role),
-        protectedContent:
-          typeof message.content === "string"
-            ? message.content
-            : message.content
-                .map((part) => {
-                  if (part.type !== "text")
-                    throw new DOMException(
-                      "The Gemma fallback supports text content only",
-                      "NotSupportedError"
-                    )
-                  return part.value
-                })
-                .join(""),
+        protectedContent: promptMessageContent(message.content),
       })) as ProtectedBrowserTurn[]
-      const session = {
-        async promptStreaming(
-          input: LanguageModelPrompt,
-          promptOptions: LanguageModelPromptOptions = {}
-        ) {
-          if (destroyed) {
-            throw new DOMException(
-              "The compatibility session has been destroyed",
-              "InvalidStateError"
-            )
-          }
-          const content =
-            typeof input === "string"
-              ? input
-              : (input
-                  .map((message) => ({
-                    role: compatibleRole(message.role as unknown),
-                    content:
-                      typeof message.content === "string"
-                        ? message.content
-                        : message.content
-                            .map((part) => {
-                              if (part.type !== "text")
-                                throw new DOMException(
-                                  "The Gemma fallback supports text content only",
-                                  "NotSupportedError"
-                                )
-                              return part.value
-                            })
-                            .join(""),
-                  }))
-                  .at(-1)?.content ?? "")
-          const request = createProtectedBrowserRequest({
-            protectedHistory: history,
-            protectedContent: content,
-            signal: promptOptions.signal,
-          })
-          const iterator = runtime.generate(request)[Symbol.asyncIterator]()
-          activeIterators.add(iterator)
-          const release = () => activeIterators.delete(iterator)
-          return new ReadableStream<string>({
-            async pull(controller) {
-              try {
-                const next = await iterator.next()
-                if (next.done) {
-                  release()
-                  controller.close()
-                } else controller.enqueue(next.value)
-              } catch (error) {
-                try {
-                  await iterator.return?.()
-                } catch {
-                  // Preserve the generation error as the primary stream error.
-                }
-                release()
-                controller.error(error)
-              }
-            },
-            async cancel(reason) {
-              try {
-                await iterator.return?.(reason)
-              } finally {
-                release()
-              }
-            },
-          })
-        },
-        destroy() {
-          destroyed = true
-          for (const iterator of activeIterators) {
-            void Promise.resolve(iterator.return?.())
-              .catch(() => undefined)
-              .finally(() => activeIterators.delete(iterator))
-          }
-        },
-      }
-      return session as unknown as LanguageModel
+      validateHistory(history)
+      return new GemmaCompatibilitySession(runtime, history)
     },
   }
 }

@@ -380,6 +380,54 @@ describe("Gemma browser-generation runtime", () => {
     ])
   })
 
+  it("preserves every preceding array-form turn in the compatibility bridge", async () => {
+    const fake = fakeTransformers(["ok"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const stream = session.promptStreaming([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "Current question" },
+    ])
+    expect(stream).toBeInstanceOf(ReadableStream)
+    const reader = stream.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the compatibility stream so the tokenizer is invoked.
+    }
+
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "Current question" },
+    ])
+  })
+
+  it("exposes the synchronous native LanguageModel session surface", async () => {
+    const fake = fakeTransformers(["ok"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+
+    expect(session.promptStreaming("Current")).toBeInstanceOf(ReadableStream)
+    await expect(session.prompt("Current")).resolves.toBe("ok")
+    await expect(
+      session.measureContextUsage("Current")
+    ).resolves.toBeGreaterThan(0)
+    await expect(session.measureInputUsage("Current")).resolves.toBeGreaterThan(
+      0
+    )
+    await expect(session.append("Earlier")).resolves.toBeUndefined()
+    await expect(session.clone()).resolves.toMatchObject({
+      prompt: expect.any(Function),
+      promptStreaming: expect.any(Function),
+      measureContextUsage: expect.any(Function),
+    })
+    session.destroy()
+  })
+
   it("keeps the compatibility runtime alive after a warm session is destroyed", async () => {
     const fake = fakeTransformers(["ok"])
     const factory = await createGemmaLanguageModelFactory({
@@ -420,6 +468,94 @@ describe("Gemma browser-generation runtime", () => {
       // The second session remains usable while the first is being destroyed.
     }
     expect(fake.dispose).not.toHaveBeenCalled()
+  })
+
+  it("aborts an active compatibility reader when its session is destroyed", async () => {
+    const fake = fakeTransformers(["one ", "two ", "three"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const stream = await session.promptStreaming("Current")
+    const reader = stream.getReader()
+
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    const pending = reader.read()
+
+    session.destroy()
+
+    await expect(pending).rejects.toMatchObject({
+      name: "AbortError",
+    })
+  })
+
+  it("keeps a not-yet-pulled compatibility reader aborted after destroy", async () => {
+    const fake = fakeTransformers(["one "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const stream = session.promptStreaming("Current")
+
+    session.destroy()
+
+    await expect(stream.getReader().read()).rejects.toMatchObject({
+      name: "AbortError",
+    })
+  })
+
+  it("keeps a sibling compatibility session usable after one is destroyed", async () => {
+    const fake = fakeTransformers(["one ", "two ", "three"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const first = await factory.create()
+    const second = await factory.create()
+    const firstStream = await first.promptStreaming("First")
+    const firstReader = firstStream.getReader()
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    const firstPending = firstReader.read()
+
+    const secondStream = await second.promptStreaming("Second")
+    const secondReader = secondStream.getReader()
+    first.destroy()
+
+    await expect(firstPending).rejects.toMatchObject({ name: "AbortError" })
+    await expect(secondReader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    second.destroy()
+  })
+
+  it("preserves the caller abort reason through compatibility composition", async () => {
+    const fake = fakeTransformers(["one ", "two ", "three"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const abort = new AbortController()
+    const stream = await session.promptStreaming("Current", {
+      signal: abort.signal,
+    })
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    const pending = reader.read()
+    const reason = new DOMException("Caller stopped", "AbortError")
+
+    abort.abort(reason)
+
+    await expect(pending).rejects.toBe(reason)
+    session.destroy()
   })
 })
 
