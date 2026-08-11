@@ -188,14 +188,22 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       usage: { total_tokens: 12, metadata: "ana@acme.com" },
       custom: { preserve: "ana@acme.com" },
     }
-    const original = structuredClone(response)
-    const choicesReference = response.choices
-    const messageReference = response.choices[0]!.message
+    let providerSnapshot: typeof response | undefined
+    let choicesReference: typeof response.choices | undefined
+    let messageReference: typeof response.choices[0]["message"] | undefined
     const client = {
       chat: {
         completions: {
           create: async (params: Record<string, unknown>) => {
-            void params
+            const protectedContent = (params.messages as ChatMessage[])[0]!
+              .content as string
+            const placeholder = protectedContent.match(TOKEN)![0]
+            response.choices[0]!.message.content = `Contact ${placeholder}`
+            response.choices[0]!.message.tool_calls![0]!.function.arguments =
+              JSON.stringify({ email: placeholder })
+            choicesReference = response.choices
+            messageReference = response.choices[0]!.message
+            providerSnapshot = structuredClone(response)
             return response
           },
         },
@@ -234,9 +242,14 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       metadata: "ana@acme.com",
     })
     expect(restored.custom).toEqual({ preserve: "ana@acme.com" })
-    expect(response).toEqual(original)
+    expect(providerSnapshot).toBeDefined()
+    expect(response).toEqual(providerSnapshot)
     expect(response.choices).toBe(choicesReference)
     expect(response.choices[0]!.message).toBe(messageReference)
+    expect(response.choices[0]!.message.content).toMatch(TOKEN)
+    expect(response.choices[0]!.message.tool_calls![0]!.function.arguments).toMatch(
+      TOKEN
+    )
   })
 
   it("falls back to lenient text restoration for invalid tool JSON", async () => {
@@ -490,6 +503,53 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     })
   })
 
+  it("does not pull upstream again after flushing normal-completion tails", async () => {
+    let pulls = 0
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: Record<string, unknown>) => {
+            const protectedContent = (params.messages as ChatMessage[])[0]!
+              .content as string
+            const placeholder = protectedContent.match(TOKEN)![0]
+            const source: AsyncIterable<unknown> = {
+              [Symbol.asyncIterator]() {
+                return {
+                  async next() {
+                    pulls++
+                    if (pulls === 1)
+                      return {
+                        done: false,
+                        value: {
+                          choices: [
+                            { index: 0, delta: { content: placeholder } },
+                          ],
+                        },
+                      }
+                    if (pulls === 2) return { done: true, value: undefined }
+                    throw new Error("forbidden pull after flush")
+                  },
+                }
+              },
+            }
+            return source
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const stream = (await wrapped.chat.completions.create({
+      model: "gpt-test",
+      stream: true,
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    })) as AsyncIterable<{ choices?: Array<{ delta?: { content?: string } }> }>
+    let restored = ""
+    for await (const chunk of stream)
+      restored += chunk.choices?.[0]?.delta?.content ?? ""
+    expect(restored).toBe("ana@acme.com")
+    expect(pulls).toBe(2)
+  })
+
   it("honors abort identity before protection and again before provider invocation", async () => {
     const reason = new Error("caller cancelled")
     const controller = new AbortController()
@@ -537,6 +597,30 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
         signal: secondController.signal,
       })
     ).rejects.toBe(secondReason)
+    expect(providerCalls).toBe(0)
+  })
+
+  it("uses an AbortError fallback when an aborted structural signal has no reason", async () => {
+    let providerCalls = 0
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: Record<string, unknown>) => {
+            void params
+            providerCalls++
+            return { choices: [] }
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const signal = { aborted: true } as AbortSignal
+    const rejection = wrapped.chat.completions.create({
+      model: "gpt-test",
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+      signal,
+    })
+    await expect(rejection).rejects.toMatchObject({ name: "AbortError" })
     expect(providerCalls).toBe(0)
   })
 
@@ -600,6 +684,68 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     expect(nextCalls).toBe(1)
     await iterator.return?.()
     expect(returnCalls).toBe(1)
+  })
+
+  it("discards buffered text and tool tails on consumer early return", async () => {
+    let placeholder = ""
+    let returnCalls = 0
+    const source: AsyncIterable<unknown> = {
+      [Symbol.asyncIterator]() {
+        return {
+          async next() {
+            return {
+              done: false,
+              value: {
+                choices: [
+                  {
+                    index: 0,
+                    delta: {
+                      content: placeholder.slice(0, 4),
+                      tool_calls: [
+                        {
+                          index: 0,
+                          function: {
+                            arguments: `{"email":"${placeholder.slice(0, 4)}`,
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              },
+            }
+          },
+          async return() {
+            returnCalls++
+            return { done: true, value: undefined }
+          },
+        }
+      },
+    }
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: Record<string, unknown>) => {
+            const protectedContent = (params.messages as ChatMessage[])[0]!
+              .content as string
+            placeholder = protectedContent.match(TOKEN)![0]
+            return source
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const stream = (await wrapped.chat.completions.create({
+      model: "gpt-test",
+      stream: true,
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    })) as AsyncIterable<unknown>
+    const iterator = stream[Symbol.asyncIterator]()
+    const first = await iterator.next()
+    expect(JSON.stringify(first.value)).not.toContain(placeholder)
+    await iterator.return?.()
+    expect(returnCalls).toBe(1)
+    expect(await iterator.next()).toEqual({ done: true, value: undefined })
   })
 
   it("discards incomplete stream tails and lets the primary source failure win cleanup failure", async () => {

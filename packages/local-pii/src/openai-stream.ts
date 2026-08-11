@@ -194,6 +194,10 @@ export function restoreOpenAIStream(
           if (done) return { done: true, value: undefined }
           if (flushQueue.length > 0)
             return { done: false, value: flushQueue.shift() }
+          if (upstreamDone) {
+            done = true
+            return { done: true, value: undefined }
+          }
 
           try {
             throwIfOpenAIAborted(signal)
