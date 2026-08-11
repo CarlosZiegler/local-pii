@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest"
+import { createAnonymizer } from "./anonymizer"
+import { protectOpenAIMessages } from "./openai-content"
 import { createPiiChat, withPiiOpenAI, type ChatMessage } from "./openai"
+import { sequential } from "./placeholder/strategies"
 
 const TOKEN = /PII[0-9A-HJKMNP-TV-Z]+/
 
@@ -12,7 +15,42 @@ function deepFreeze<T>(value: T): T {
   return value
 }
 
+interface TestWithResponse<T> {
+  data: T
+  response: object
+  request_id: string
+  [key: string]: unknown
+}
+
+type TestApiPromise<T> = Promise<T> & {
+  asResponse(): Promise<object>
+  withResponse(): Promise<TestWithResponse<T>>
+}
+
+function testApiPromise<T>(value: T, response: object): TestApiPromise<T> {
+  const promise = Promise.resolve(value)
+  return Object.assign(promise, {
+    asResponse: async () => response,
+    withResponse: async () => ({
+      data: value,
+      response,
+      request_id: "request-1",
+      envelopeControl: "preserved",
+    }),
+  }) as TestApiPromise<T>
+}
+
 describe("createPiiChat (tool-call cycle)", () => {
+  it("retains the original message array when no semantic field changes", async () => {
+    const chat = createPiiChat()
+    const messages = [{ role: "assistant", content: "nothing private" }]
+    const protectedMessages = await protectOpenAIMessages(
+      chat.session,
+      messages
+    )
+    expect(protectedMessages).toBe(messages)
+  })
+
   it("redacts content, restores it, and never leaks the raw value", async () => {
     const chat = createPiiChat()
     const [system, user] = await chat.anonymizeMessages([
@@ -74,6 +112,263 @@ describe("createPiiChat (tool-call cycle)", () => {
   })
 })
 
+class PrivateCompletions {
+  #secret = "private-completions"
+  parseBody: Record<string, unknown> | undefined
+  parseOptions: object | undefined
+  streamCalls = 0
+  runToolsCalls = 0
+
+  create(body: Record<string, unknown>, options?: object) {
+    return this.parse(body, options)
+  }
+
+  parse(body: Record<string, unknown>, options?: object) {
+    this.parseBody = body
+    this.parseOptions = options
+    const content = (body.messages as ChatMessage[])[0]!.content as string
+    return testApiPromise(
+      { choices: [{ message: { role: "assistant", content } }] },
+      { status: 200 }
+    )
+  }
+
+  stream(body: Record<string, unknown>) {
+    void body
+    this.streamCalls++
+    return undefined
+  }
+
+  runTools(body: Record<string, unknown>) {
+    void body
+    this.runToolsCalls++
+    return undefined
+  }
+
+  privateValue() {
+    return this.#secret
+  }
+}
+
+class SurfaceStream implements AsyncIterable<unknown> {
+  #secret = "private-stream"
+  readonly controller = { state: "active" }
+  readonly chunks: unknown[]
+  rawReadableCalls = 0
+
+  constructor(chunks: unknown[]) {
+    this.chunks = chunks
+  }
+
+  privateValue() {
+    return this.#secret
+  }
+
+  [Symbol.asyncIterator]() {
+    let index = 0
+    return {
+      next: async () =>
+        index < this.chunks.length
+          ? { done: false, value: this.chunks[index++] }
+          : { done: true, value: undefined },
+    }
+  }
+
+  tee() {
+    return [new SurfaceStream(this.chunks), new SurfaceStream(this.chunks)]
+  }
+
+  toReadableStream(): ReadableStream<Uint8Array> {
+    this.rawReadableCalls++
+    throw new Error("raw stream helper must not bypass restoration")
+  }
+}
+
+describe("withPiiOpenAI client surface compatibility", () => {
+  it("protects parse, preserves options, and binds delegated private methods", async () => {
+    const completions = new PrivateCompletions()
+    const client = { chat: { completions } }
+    const wrapped = withPiiOpenAI(client)
+    const options = { headers: { "x-test": "preserved" }, timeout: 123 }
+    const restored = (await wrapped.chat.completions.parse(
+      {
+        model: "gpt-test",
+        messages: [{ role: "user", content: "email ana@acme.com" }],
+      },
+      options
+    )) as { choices: Array<{ message: ChatMessage }> }
+    expect(completions.parseOptions).toBe(options)
+    expect(completions.parseBody!.messages).toBeDefined()
+    expect(
+      (completions.parseBody!.messages as ChatMessage[])[0]!.content
+    ).not.toContain("ana@acme.com")
+    expect(restored.choices[0]!.message.content).toBe("email ana@acme.com")
+    expect(wrapped.chat.completions.privateValue()).toBe("private-completions")
+  })
+
+  it("fails closed for raw stream and runTools helpers", () => {
+    const completions = new PrivateCompletions()
+    const wrapped = withPiiOpenAI({ chat: { completions } })
+    expect(() =>
+      wrapped.chat.completions.stream({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "email ana@acme.com" }],
+      })
+    ).toThrow(/completions\.create/i)
+    expect(() =>
+      wrapped.chat.completions.runTools({
+        model: "gpt-test",
+        messages: [{ role: "user", content: "email ana@acme.com" }],
+      })
+    ).toThrow(/completions\.create/i)
+    expect(completions.streamCalls).toBe(0)
+    expect(completions.runToolsCalls).toBe(0)
+  })
+
+  it("forwards RequestOptions by identity and honors its signal", async () => {
+    let providerCalls = 0
+    let providerOptions: unknown
+    const client = {
+      chat: {
+        completions: {
+          create: (body: Record<string, unknown>, options?: unknown) => {
+            providerCalls++
+            providerOptions = options
+            return { choices: [], body }
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const options = {
+      headers: { "x-request": "preserved" },
+      timeout: 321,
+    }
+    await wrapped.chat.completions.create(
+      {
+        model: "gpt-test",
+        messages: [{ role: "user", content: "email ana@acme.com" }],
+      },
+      options
+    )
+    expect(providerOptions).toBe(options)
+
+    const reason = new Error("options cancelled")
+    const signalController = new AbortController()
+    signalController.abort(reason)
+    await expect(
+      wrapped.chat.completions.create(
+        {
+          model: "gpt-test",
+          messages: [{ role: "user", content: "email ana@acme.com" }],
+        },
+        { ...options, signal: signalController.signal }
+      )
+    ).rejects.toBe(reason)
+    expect(providerCalls).toBe(1)
+  })
+
+  it("preserves APIPromise helpers and restores withResponse data", async () => {
+    const response = { status: 201, request_id: "raw-request" }
+    let rawPromise: TestApiPromise<unknown> | undefined
+    const client = {
+      chat: {
+        completions: {
+          create: (params: Record<string, unknown>, options?: object) => {
+            void options
+            const protectedContent = (params.messages as ChatMessage[])[0]!
+              .content as string
+            rawPromise = testApiPromise(
+              {
+                choices: [
+                  { message: { role: "assistant", content: protectedContent } },
+                ],
+              },
+              response
+            )
+            return rawPromise
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const options = { headers: { "x-request": "value" } }
+    const result = wrapped.chat.completions.create(
+      {
+        model: "gpt-test",
+        messages: [{ role: "user", content: "email ana@acme.com" }],
+      },
+      options
+    ) as TestApiPromise<{
+      choices: Array<{ message: ChatMessage }>
+    }>
+    expect(typeof result.then).toBe("function")
+    expect(typeof result.asResponse).toBe("function")
+    expect(typeof result.withResponse).toBe("function")
+    expect(await result).toMatchObject({
+      choices: [{ message: { content: "email ana@acme.com" } }],
+    })
+    expect(await result.asResponse()).toBe(response)
+    const envelope = await result.withResponse()
+    expect(envelope.response).toBe(response)
+    expect(envelope.request_id).toBe("request-1")
+    expect(envelope.envelopeControl).toBe("preserved")
+    expect(envelope.data.choices[0]!.message.content).toBe("email ana@acme.com")
+    expect(rawPromise).toBeDefined()
+  })
+
+  it("preserves stream surfaces while wrapping tee and readable-stream output", async () => {
+    let rawStream: SurfaceStream | undefined
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: Record<string, unknown>) => {
+            const placeholder = (
+              (params.messages as ChatMessage[])[0]!.content as string
+            ).match(TOKEN)![0]
+            rawStream = new SurfaceStream([
+              { choices: [{ index: 0, delta: { content: placeholder } }] },
+            ])
+            return rawStream
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const stream = (await wrapped.chat.completions.create({
+      model: "gpt-test",
+      stream: true,
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    })) as SurfaceStream & AsyncIterable<unknown>
+    expect(stream.controller).toBe(rawStream!.controller)
+    expect(stream.privateValue()).toBe("private-stream")
+    const tee = stream.tee()
+    expect(tee).toHaveLength(2)
+    for (const branch of tee) {
+      let restored = ""
+      for await (const chunk of branch as AsyncIterable<{
+        choices?: Array<{ delta?: { content?: string } }>
+      }>)
+        restored += chunk.choices?.[0]?.delta?.content ?? ""
+      expect(restored).toBe("ana@acme.com")
+    }
+    const readable = stream.toReadableStream()
+    const reader = readable.getReader()
+    const lines: unknown[] = []
+    for (;;) {
+      const next = await reader.read()
+      if (next.done) break
+      const text = new TextDecoder().decode(next.value)
+      expect(text.endsWith("\n")).toBe(true)
+      lines.push(JSON.parse(text.trim()))
+    }
+    expect(lines).toContainEqual({
+      choices: [{ index: 0, delta: { content: "ana@acme.com" } }],
+    })
+    expect(rawStream!.rawReadableCalls).toBe(0)
+  })
+})
+
 describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
   it("protects only semantic message fields while preserving frozen input and controls", async () => {
     const captured: Array<Record<string, unknown>> = []
@@ -82,7 +377,11 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
         completions: {
           create: async (params: Record<string, unknown>) => {
             captured.push(params)
-            return { id: "completion-1", choices: [], custom: { untouched: true } }
+            return {
+              id: "completion-1",
+              choices: [],
+              custom: { untouched: true },
+            }
           },
         },
       },
@@ -130,7 +429,9 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     await wrapped.chat.completions.create(params)
 
     expect(messages[0]!.content).toBe("email ana@acme.com")
-    expect(messages[0]!.tool_calls![0]!.function.arguments).toContain("ana@acme.com")
+    expect(messages[0]!.tool_calls![0]!.function.arguments).toContain(
+      "ana@acme.com"
+    )
     expect(captured).toHaveLength(1)
     expect(captured[0]!.model).toBe("gpt-test")
     expect(captured[0]!.tools).toBe(params.tools)
@@ -147,11 +448,15 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       control: "ana@acme.com",
     })
     expect(sent[0]!.tool_calls![0]!.function.name).toBe("ana@acme.com")
-    expect(sent[0]!.tool_calls![0]!.function.arguments).not.toContain("ana@acme.com")
+    expect(sent[0]!.tool_calls![0]!.function.arguments).not.toContain(
+      "ana@acme.com"
+    )
     expect(captured[0]!.tools).toBe(params.tools)
     expect(captured[0]!.metadata).toBe(params.metadata)
     expect(captured[0]!.unknownOption).toBe("ana@acme.com")
-    expect((captured[0]!.tools as Array<Record<string, unknown>>)[0]!.unknown).toEqual({
+    expect(
+      (captured[0]!.tools as Array<Record<string, unknown>>)[0]!.unknown
+    ).toEqual({
       value: "ana@acme.com",
     })
   })
@@ -190,7 +495,7 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     }
     let providerSnapshot: typeof response | undefined
     let choicesReference: typeof response.choices | undefined
-    let messageReference: typeof response.choices[0]["message"] | undefined
+    let messageReference: (typeof response.choices)[0]["message"] | undefined
     const client = {
       chat: {
         completions: {
@@ -216,7 +521,11 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     })) as typeof response
 
     expect(restored.choices[0]!.message.content).toBe("Contact ana@acme.com")
-    expect(JSON.parse(restored.choices[0]!.message.tool_calls![0]!.function.arguments)).toEqual({
+    expect(
+      JSON.parse(
+        restored.choices[0]!.message.tool_calls![0]!.function.arguments
+      )
+    ).toEqual({
       email: "ana@acme.com",
     })
     expect(restored.choices[0]!.finish_reason).toBe("ana@acme.com")
@@ -227,7 +536,9 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     })
     expect(restored.choices[0]!.message.control).toBe("ana@acme.com")
     expect(restored.choices[0]!.message.tool_calls![0]!.id).toBe("ana@acme.com")
-    expect(restored.choices[0]!.message.tool_calls![0]!.type).toBe("ana@acme.com")
+    expect(restored.choices[0]!.message.tool_calls![0]!.type).toBe(
+      "ana@acme.com"
+    )
     expect(restored.choices[0]!.message.tool_calls![0]!.function.name).toBe(
       "ana@acme.com"
     )
@@ -247,9 +558,9 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     expect(response.choices).toBe(choicesReference)
     expect(response.choices[0]!.message).toBe(messageReference)
     expect(response.choices[0]!.message.content).toMatch(TOKEN)
-    expect(response.choices[0]!.message.tool_calls![0]!.function.arguments).toMatch(
-      TOKEN
-    )
+    expect(
+      response.choices[0]!.message.tool_calls![0]!.function.arguments
+    ).toMatch(TOKEN)
   })
 
   it("falls back to lenient text restoration for invalid tool JSON", async () => {
@@ -288,9 +599,118 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       model: "gpt-test",
       messages: [{ role: "user", content: "email ana@acme.com" }],
     })) as { choices: Array<{ message: ChatMessage }> }
-    expect(restored.choices[0]!.message.tool_calls![0]!.function.arguments).toBe(
-      "lookup ana@acme.com"
+    expect(
+      restored.choices[0]!.message.tool_calls![0]!.function.arguments
+    ).toBe("lookup ana@acme.com")
+  })
+
+  it("restores complete tool JSON values without rewriting untouched lexemes", async () => {
+    const privateValue = 'Alice "Ace"\\line\nnext'
+    const anonymizer = createAnonymizer({
+      detectors: "none",
+      dictionary: [{ value: privateValue }],
+      placeholders: sequential(),
+    })
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: Record<string, unknown>) => {
+            const protectedContent = (params.messages as ChatMessage[])[0]!
+              .content as string
+            const placeholder = protectedContent.match(/\[[A-Z_]+_\d+\]/)![0]
+            return {
+              choices: [
+                {
+                  message: {
+                    role: "assistant",
+                    tool_calls: [
+                      {
+                        id: "call-lexemes",
+                        type: "function",
+                        function: {
+                          name: "lookup",
+                          arguments: `{  "big":9007199254740993, "name" : "${placeholder}", "untouched": "raw" }`,
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            }
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client, { anonymizer })
+    const restored = (await wrapped.chat.completions.create({
+      model: "gpt-test",
+      messages: [{ role: "user", content: privateValue }],
+    })) as { choices: Array<{ message: ChatMessage }> }
+    const argumentsValue =
+      restored.choices[0]!.message.tool_calls![0]!.function.arguments
+    expect(argumentsValue).toBe(
+      `{  "big":9007199254740993, "name" : ${JSON.stringify(privateValue)}, "untouched": "raw" }`
     )
+    expect(JSON.parse(argumentsValue).name).toBe(privateValue)
+    expect(argumentsValue).toContain("9007199254740993")
+  })
+
+  it("JSON-escapes restored values in incremental tool channels", async () => {
+    const privateValue = 'Alice "Ace"\\line\nnext'
+    const anonymizer = createAnonymizer({
+      detectors: "none",
+      dictionary: [{ value: privateValue }],
+      placeholders: sequential(),
+    })
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: Record<string, unknown>) => {
+            const protectedContent = (params.messages as ChatMessage[])[0]!
+              .content as string
+            const placeholder = protectedContent.match(/\[[A-Z_]+_\d+\]/)![0]
+            const argument = JSON.stringify({
+              name: placeholder,
+              note: "progressive prefix",
+            })
+            async function* source() {
+              for (const character of argument)
+                yield {
+                  choices: [
+                    {
+                      index: 0,
+                      delta: {
+                        tool_calls: [
+                          {
+                            index: 0,
+                            function: { arguments: character },
+                          },
+                        ],
+                      },
+                    },
+                  ],
+                }
+            }
+            return source()
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client, { anonymizer })
+    const stream = (await wrapped.chat.completions.create({
+      model: "gpt-test",
+      stream: true,
+      messages: [{ role: "user", content: privateValue }],
+    })) as AsyncIterable<{
+      choices?: Array<{
+        delta?: { tool_calls?: Array<{ function?: { arguments?: string } }> }
+      }>
+    }>
+    let argumentsValue = ""
+    for await (const chunk of stream)
+      argumentsValue +=
+        chunk.choices?.[0]?.delta?.tool_calls?.[0]?.function?.arguments ?? ""
+    expect(JSON.parse(argumentsValue).name).toBe(privateValue)
   })
 
   it("restores interleaved text and tool channels independently at every split boundary", async () => {
@@ -308,7 +728,12 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
               const text1 = `C${placeholder}D`
               const tool0 = JSON.stringify({ email: placeholder, channel: 0 })
               const tool1 = JSON.stringify({ email: placeholder, channel: 1 })
-              const max = Math.max(text0.length, text1.length, tool0.length, tool1.length)
+              const max = Math.max(
+                text0.length,
+                text1.length,
+                tool0.length,
+                tool1.length
+              )
               for (let i = 0; i < max; i++) {
                 const choices: unknown[] = []
                 if (i < text0.length)
@@ -343,8 +768,8 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
                     {
                       index: 0,
                       delta: {
-                        tool_calls: toolCalls.filter((call) =>
-                          (call as { id?: string }).id === "tool-0"
+                        tool_calls: toolCalls.filter(
+                          (call) => (call as { id?: string }).id === "tool-0"
                         ),
                         sibling: "tools-0",
                       },
@@ -352,8 +777,8 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
                     {
                       index: 1,
                       delta: {
-                        tool_calls: toolCalls.filter((call) =>
-                          (call as { id?: string }).id === "tool-1"
+                        tool_calls: toolCalls.filter(
+                          (call) => (call as { id?: string }).id === "tool-1"
                         ),
                         sibling: "tools-1",
                       },
@@ -414,22 +839,41 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       for (const choice of chunk.value.choices ?? []) {
         const choiceIndex = choice.index ?? 0
         if (choice.delta?.content !== undefined)
-          text.set(choiceIndex, `${text.get(choiceIndex) ?? ""}${choice.delta.content}`)
+          text.set(
+            choiceIndex,
+            `${text.get(choiceIndex) ?? ""}${choice.delta.content}`
+          )
         for (const call of choice.delta?.tool_calls ?? []) {
           const key = `${choiceIndex}:${call.index ?? 0}`
-          args.set(key, `${args.get(key) ?? ""}${call.function?.arguments ?? ""}`)
+          args.set(
+            key,
+            `${args.get(key) ?? ""}${call.function?.arguments ?? ""}`
+          )
         }
       }
     }
     expect(text.get(0)).toBe("Aana@acme.comB")
     expect(text.get(1)).toBe("Cana@acme.comD")
-    expect(JSON.parse(args.get("0:0")!)).toEqual({ email: "ana@acme.com", channel: 0 })
-    expect(JSON.parse(args.get("1:0")!)).toEqual({ email: "ana@acme.com", channel: 1 })
+    expect(JSON.parse(args.get("0:0")!)).toEqual({
+      email: "ana@acme.com",
+      channel: 0,
+    })
+    expect(JSON.parse(args.get("1:0")!)).toEqual({
+      email: "ana@acme.com",
+      channel: 1,
+    })
     expect(chunks.some((chunk) => chunk.value.sibling?.i === 0)).toBe(true)
-    expect(chunks.some((chunk) => chunk.value.choices?.some((choice) =>
-      choice.delta?.sibling === "choice-0" && choice.delta.content === ""
-    ))).toBe(true)
-    expect(chunks.every((chunk) => !JSON.stringify(chunk).includes(placeholderSeen))).toBe(true)
+    expect(
+      chunks.some((chunk) =>
+        chunk.value.choices?.some(
+          (choice) =>
+            choice.delta?.sibling === "choice-0" && choice.delta.content === ""
+        )
+      )
+    ).toBe(true)
+    expect(
+      chunks.every((chunk) => !JSON.stringify(chunk).includes(placeholderSeen))
+    ).toBe(true)
   })
 
   it("restores long tool arguments progressively before the final source chunk", async () => {
@@ -457,7 +901,10 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
                         tool_calls: [
                           {
                             index: 0,
-                            function: { name: "lookup", arguments: argument[index] },
+                            function: {
+                              name: "lookup",
+                              arguments: argument[index],
+                            },
                             sibling: "preserve-me",
                           },
                         ],
@@ -482,7 +929,10 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       choices?: Array<{
         delta?: {
           position?: number
-          tool_calls?: Array<{ function?: { arguments?: string }; sibling?: string }>
+          tool_calls?: Array<{
+            function?: { arguments?: string }
+            sibling?: string
+          }>
         }
       }>
     }>
@@ -491,7 +941,11 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       const call = chunk.choices?.[0]?.delta?.tool_calls?.[0]
       const piece = call?.function?.arguments ?? ""
       const position = chunk.choices?.[0]?.delta?.position
-      if (position !== undefined && position < argumentLength - 1 && piece.length > 0)
+      if (
+        position !== undefined &&
+        position < argumentLength - 1 &&
+        piece.length > 0
+      )
         observedProgressiveArgument = true
       if (call?.sibling) expect(call.sibling).toBe("preserve-me")
       restoredArguments += piece
@@ -548,6 +1002,42 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       restored += chunk.choices?.[0]?.delta?.content ?? ""
     expect(restored).toBe("ana@acme.com")
     expect(pulls).toBe(2)
+  })
+
+  it("rechecks abort signals before each queued flush item", async () => {
+    const reason = new Error("aborted during flush")
+    const controller = new AbortController()
+    const client = {
+      chat: {
+        completions: {
+          create: async (params: Record<string, unknown>) => {
+            const protectedContent = (params.messages as ChatMessage[])[0]!
+              .content as string
+            const placeholder = protectedContent.match(TOKEN)![0]
+            async function* source() {
+              yield {
+                choices: [
+                  { index: 0, delta: { content: placeholder } },
+                  { index: 1, delta: { content: placeholder } },
+                ],
+              }
+            }
+            return source()
+          },
+        },
+      },
+    }
+    const wrapped = withPiiOpenAI(client)
+    const stream = (await wrapped.chat.completions.create({
+      model: "gpt-test",
+      stream: true,
+      signal: controller.signal,
+      messages: [{ role: "user", content: "email ana@acme.com" }],
+    })) as AsyncIterable<unknown>
+    const iterator = stream[Symbol.asyncIterator]()
+    await iterator.next()
+    controller.abort(reason)
+    await expect(iterator.next()).rejects.toBe(reason)
   })
 
   it("honors abort identity before protection and again before provider invocation", async () => {
@@ -787,7 +1277,7 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       model: "gpt-test",
       stream: true,
       messages: [{ role: "user", content: "email ana@acme.com" }],
-    })) as AsyncIterable<{ choices?: Array<{ delta?: { content?: string }}> }>
+    })) as AsyncIterable<{ choices?: Array<{ delta?: { content?: string } }> }>
     const iterator = stream[Symbol.asyncIterator]()
     const first = await iterator.next()
     expect(JSON.stringify(first.value)).not.toContain("PII")
@@ -1006,12 +1496,21 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
       chat: {
         completions: {
           create: async (params: Record<string, unknown>) => {
-            const content = (params.messages as ChatMessage[])[0]!.content as string
+            const content = (params.messages as ChatMessage[])[0]!
+              .content as string
             const placeholder = content.match(TOKEN)![0]
             async function* source() {
-              yield { choices: [{ index: 0, delta: { content: placeholder.slice(0, 2) } }] }
+              yield {
+                choices: [
+                  { index: 0, delta: { content: placeholder.slice(0, 2) } },
+                ],
+              }
               await Promise.resolve()
-              yield { choices: [{ index: 0, delta: { content: placeholder.slice(2) } }] }
+              yield {
+                choices: [
+                  { index: 0, delta: { content: placeholder.slice(2) } },
+                ],
+              }
             }
             return source()
           },
@@ -1033,11 +1532,16 @@ describe("withPiiOpenAI (full tool loop + leak sweep)", () => {
     ])
     const collect = async (stream: unknown) => {
       let text = ""
-      for await (const chunk of stream as AsyncIterable<{ choices?: Array<{ delta?: { content?: string }}> }>)
+      for await (const chunk of stream as AsyncIterable<{
+        choices?: Array<{ delta?: { content?: string } }>
+      }>)
         text += chunk.choices?.[0]?.delta?.content ?? ""
       return text
     }
-    const [firstText, secondText] = await Promise.all([collect(first), collect(second)])
+    const [firstText, secondText] = await Promise.all([
+      collect(first),
+      collect(second),
+    ])
     expect(firstText).toBe("ana@acme.com")
     expect(secondText).toBe("bob@example.com")
   })

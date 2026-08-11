@@ -80,10 +80,21 @@ export function createPiiChat(opts: PiiChatOptions = {}): PiiChat {
 // --- Drop-in client wrapper --------------------------------------------------
 
 interface CompletionsLike {
-  create(params: Record<string, unknown>): unknown
+  create(params: Record<string, unknown>, options?: unknown): unknown
 }
+type ParseLike = (params: Record<string, unknown>, options?: unknown) => unknown
 interface OpenAILike {
   chat: { completions: CompletionsLike }
+}
+
+/** Thrown when an SDK helper would bypass the protected create path. */
+export class PiiOpenAIHelperError extends Error {
+  constructor(helper: string) {
+    super(
+      `OpenAI ${helper}() cannot be wrapped safely; call chat.completions.create({ stream: true }) through the protected client`
+    )
+    this.name = "PiiOpenAIHelperError"
+  }
 }
 
 function isAbortSignal(value: unknown): value is AbortSignal {
@@ -92,6 +103,82 @@ function isAbortSignal(value: unknown): value is AbortSignal {
     typeof value === "object" &&
     typeof (value as { aborted?: unknown }).aborted === "boolean"
   )
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object"
+}
+
+function requestSignal(
+  body: Record<string, unknown>,
+  options: unknown
+): AbortSignal | undefined {
+  const optionsSignal = isRecord(options) ? options.signal : undefined
+  return isAbortSignal(optionsSignal)
+    ? optionsSignal
+    : isAbortSignal(body.signal)
+      ? body.signal
+      : undefined
+}
+
+type ApiInvocation<T> = Promise<T> & {
+  asResponse?: (...args: unknown[]) => Promise<unknown>
+  withResponse?: (...args: unknown[]) => Promise<unknown>
+}
+
+function deferredApiPromise<T>(
+  operation: Promise<T>,
+  rawResult: () => unknown
+): ApiInvocation<T> {
+  const helper =
+    (name: "asResponse" | "withResponse") =>
+    (...args: unknown[]): Promise<unknown> =>
+      operation.then(async (restored) => {
+        const raw = rawResult() as ApiInvocation<unknown> | undefined
+        const method = raw?.[name]
+        if (typeof method !== "function") {
+          if (name === "withResponse") return { data: restored }
+          throw new TypeError(`OpenAI APIPromise does not support ${name}()`)
+        }
+        const envelope = await method.apply(raw, args)
+        if (name === "asResponse") return envelope
+        if (isRecord(envelope)) return { ...envelope, data: restored }
+        return { data: restored, envelope }
+      })
+
+  return new Proxy(operation as ApiInvocation<T>, {
+    get(target, property) {
+      if (property === "then" || property === "catch" || property === "finally")
+        return Reflect.get(target, property, target).bind(target)
+      if (property === "asResponse" || property === "withResponse")
+        return helper(property)
+      return Reflect.get(target, property, target)
+    },
+  })
+}
+
+function protectedInvocation<T>(
+  session: PiiSession,
+  body: Record<string, unknown>,
+  options: unknown,
+  invoke: (body: Record<string, unknown>, options?: unknown) => unknown,
+  restore: (result: unknown) => T
+): ApiInvocation<T> {
+  let rawResult: unknown
+  const operation = (async () => {
+    const signal = requestSignal(body, options)
+    // Check before protection and before invoking the provider.
+    throwIfOpenAIAborted(signal)
+    const originalMessages = Array.isArray(body.messages) ? body.messages : []
+    const messages = await protectOpenAIMessages(session, originalMessages)
+    throwIfOpenAIAborted(signal)
+    rawResult =
+      options === undefined
+        ? invoke({ ...body, messages })
+        : invoke({ ...body, messages }, options)
+    return restore(await rawResult)
+  })()
+  return deferredApiPromise(operation, () => rawResult)
 }
 
 /**
@@ -112,43 +199,61 @@ export function withPiiOpenAI<T extends OpenAILike>(
   opts: PiiChatOptions = {}
 ): T {
   const session = resolveSession(opts)
-  const create = client.chat.completions.create.bind(client.chat.completions)
+  const targetCompletions = client.chat.completions
+  const create = targetCompletions.create.bind(targetCompletions)
+  const parse =
+    typeof (targetCompletions as unknown as { parse?: unknown }).parse ===
+    "function"
+      ? (targetCompletions as unknown as { parse: ParseLike }).parse.bind(
+          targetCompletions
+        )
+      : undefined
 
-  const wrappedCreate = async (params: Record<string, unknown>) => {
-    const signal = isAbortSignal(params.signal) ? params.signal : undefined
-    // This check must happen before touching the session or provider.
-    throwIfOpenAIAborted(signal)
-    const originalMessages = Array.isArray(params.messages)
-      ? params.messages
-      : []
-    const messages = await protectOpenAIMessages(session, originalMessages)
-    // Protection may itself be asynchronous; aborting during it must prevent
-    // the provider call and preserve the signal's reason identity.
-    throwIfOpenAIAborted(signal)
+  const wrappedCreate = (params: Record<string, unknown>, options?: unknown) =>
+    protectedInvocation(session, params, options, create, (result) =>
+      params.stream
+        ? (restoreOpenAIStream(
+            session,
+            result as AsyncIterable<unknown>,
+            requestSignal(params, options)
+          ) as never)
+        : restoreOpenAICompletion(session, result)
+    )
 
-    const result = await create({ ...params, messages })
-    if (params.stream) {
-      return restoreOpenAIStream(
-        session,
-        result as AsyncIterable<unknown>,
-        signal
-      )
-    }
-    return restoreOpenAICompletion(session, result)
+  const wrappedParse = parse
+    ? (params: Record<string, unknown>, options?: unknown) =>
+        protectedInvocation(session, params, options, parse, (result) =>
+          restoreOpenAICompletion(session, result)
+        )
+    : undefined
+
+  const failClosed = (helper: string) => () => {
+    throw new PiiOpenAIHelperError(helper)
   }
 
-  const proxyPath = (target: unknown, key: string, value: unknown): unknown =>
-    new Proxy(target as object, {
-      get(t, p) {
-        return p === key ? value : Reflect.get(t, p)
-      },
-    })
+  const completions = new Proxy(targetCompletions as object, {
+    get(target, property) {
+      if (property === "create") return wrappedCreate
+      if (property === "parse" && wrappedParse) return wrappedParse
+      if (property === "stream" || property === "runTools")
+        return failClosed(String(property))
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
 
-  const completions = proxyPath(
-    client.chat.completions,
-    "create",
-    wrappedCreate
-  )
-  const chat = proxyPath(client.chat, "completions", completions)
-  return proxyPath(client, "chat", chat) as T
+  const chat = new Proxy(client.chat as object, {
+    get(target, property) {
+      if (property === "completions") return completions
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  })
+  return new Proxy(client as object, {
+    get(target, property) {
+      if (property === "chat") return chat
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  }) as T
 }

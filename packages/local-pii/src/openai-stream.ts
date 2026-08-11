@@ -1,11 +1,19 @@
 import { createStreamingRehydrator } from "./rehydrate"
 import type { PiiSession } from "./session"
 import type { OpenAIRecord } from "./openai-content"
+import type { Mapping } from "./types"
 
 type TextState = ReturnType<typeof createStreamingRehydrator>
 
 interface ToolState {
   rehydrator: TextState
+}
+
+function escapedToolMapping(session: PiiSession): Mapping {
+  const mapping: Mapping = {}
+  for (const [placeholder, value] of Object.entries(session.mapping))
+    mapping[placeholder] = JSON.stringify(value).slice(1, -1)
+  return mapping
 }
 
 const NO_PRIMARY_ERROR = Symbol("no primary error")
@@ -54,7 +62,7 @@ function toolStateFor(
   let state = states.get(key)
   if (!state) {
     state = {
-      rehydrator: createStreamingRehydrator(() => session.mapping),
+      rehydrator: createStreamingRehydrator(() => escapedToolMapping(session)),
     }
     states.set(key, state)
   }
@@ -136,9 +144,7 @@ function flushStates(
         {
           index: choiceIndex,
           delta: {
-            tool_calls: [
-              { index: toolIndex, function: { arguments: tail } },
-            ],
+            tool_calls: [{ index: toolIndex, function: { arguments: tail } }],
           },
         },
       ],
@@ -158,106 +164,158 @@ export function restoreOpenAIStream(
   source: AsyncIterable<unknown>,
   signal?: AbortSignal
 ): AsyncIterable<unknown> {
-  return {
-    [Symbol.asyncIterator]() {
-      let upstream: AsyncIterator<unknown> | undefined
-      const textStates = new Map<number, TextState>()
-      const toolStates = new Map<string, ToolState>()
-      let upstreamDone = false
-      let returned = false
-      let done = false
-      let flushQueue: unknown[] = []
-      let primaryError: unknown = NO_PRIMARY_ERROR
+  const iteratorFactory = (): AsyncIterator<unknown> => {
+    let upstream: AsyncIterator<unknown> | undefined
+    const textStates = new Map<number, TextState>()
+    const toolStates = new Map<string, ToolState>()
+    let upstreamDone = false
+    let returned = false
+    let done = false
+    let flushQueue: unknown[] = []
+    let primaryError: unknown = NO_PRIMARY_ERROR
 
-      const cleanup = async (): Promise<void> => {
-        if (upstreamDone || returned || !upstream) return
-        returned = true
-        await upstream.return?.()
+    const cleanup = async (): Promise<void> => {
+      if (upstreamDone || returned || !upstream) return
+      returned = true
+      await upstream.return?.()
+    }
+
+    const fail = async (error: unknown): Promise<never> => {
+      primaryError = error
+      done = true
+      textStates.clear()
+      toolStates.clear()
+      flushQueue = []
+      try {
+        await cleanup()
+      } catch {
+        // A generation/iteration/consumer failure always wins cleanup failure.
       }
+      throw error
+    }
 
-      const fail = async (error: unknown): Promise<never> => {
-        primaryError = error
+    const iterator: AsyncIterator<unknown> = {
+      async next() {
+        if (done) return { done: true, value: undefined }
+        if (flushQueue.length > 0) {
+          try {
+            throwIfOpenAIAborted(signal)
+            return { done: false, value: flushQueue.shift() }
+          } catch (error) {
+            return fail(error)
+          }
+        }
+        if (upstreamDone) {
+          done = true
+          return { done: true, value: undefined }
+        }
+
+        try {
+          throwIfOpenAIAborted(signal)
+          if (!upstream) upstream = source[Symbol.asyncIterator]()
+          const next = await upstream.next()
+          throwIfOpenAIAborted(signal)
+          if (next.done) {
+            upstreamDone = true
+            flushQueue = flushStates(session, textStates, toolStates)
+            if (flushQueue.length > 0) {
+              throwIfOpenAIAborted(signal)
+              return { done: false, value: flushQueue.shift() }
+            }
+            done = true
+            return { done: true, value: undefined }
+          }
+          if (!isRecord(next.value) || !Array.isArray(next.value.choices)) {
+            return { done: false, value: next.value }
+          }
+          let choicesChanged = false
+          const choices = next.value.choices.map((choice) => {
+            const restored = restoreChoice(
+              session,
+              textStates,
+              toolStates,
+              choice
+            )
+            choicesChanged ||= restored !== choice
+            return restored
+          })
+          return {
+            done: false,
+            value: choicesChanged ? { ...next.value, choices } : next.value,
+          }
+        } catch (error) {
+          return fail(error)
+        }
+      },
+
+      async return(value?: unknown) {
+        if (done) return { done: true, value }
         done = true
         textStates.clear()
         toolStates.clear()
         flushQueue = []
         try {
           await cleanup()
-        } catch {
-          // A generation/iteration/consumer failure always wins cleanup failure.
+        } catch (error) {
+          if (primaryError === NO_PRIMARY_ERROR) throw error
         }
-        throw error
-      }
+        return { done: true, value }
+      },
 
-      const iterator: AsyncIterator<unknown> = {
-        async next() {
-          if (done) return { done: true, value: undefined }
-          if (flushQueue.length > 0)
-            return { done: false, value: flushQueue.shift() }
-          if (upstreamDone) {
-            done = true
-            return { done: true, value: undefined }
-          }
-
-          try {
-            throwIfOpenAIAborted(signal)
-            if (!upstream) upstream = source[Symbol.asyncIterator]()
-            const next = await upstream.next()
-            throwIfOpenAIAborted(signal)
-            if (next.done) {
-              upstreamDone = true
-              flushQueue = flushStates(session, textStates, toolStates)
-              if (flushQueue.length > 0)
-                return { done: false, value: flushQueue.shift() }
-              done = true
-              return { done: true, value: undefined }
-            }
-            if (!isRecord(next.value) || !Array.isArray(next.value.choices)) {
-              return { done: false, value: next.value }
-            }
-            let choicesChanged = false
-            const choices = next.value.choices.map((choice) => {
-              const restored = restoreChoice(
-                session,
-                textStates,
-                toolStates,
-                choice
-              )
-              choicesChanged ||= restored !== choice
-              return restored
-            })
-            return {
-              done: false,
-              value: choicesChanged
-                ? { ...next.value, choices }
-                : next.value,
-            }
-          } catch (error) {
-            return fail(error)
-          }
-        },
-
-        async return(value?: unknown) {
-          if (done) return { done: true, value }
-          done = true
-          textStates.clear()
-          toolStates.clear()
-          flushQueue = []
-          try {
-            await cleanup()
-          } catch (error) {
-            if (primaryError === NO_PRIMARY_ERROR) throw error
-          }
-          return { done: true, value }
-        },
-
-        async throw(error?: unknown) {
-          if (done) throw error
-          done = true
-          return fail(error)
-        },
-      }
-      return iterator
-    },
+      async throw(error?: unknown) {
+        if (done) throw error
+        done = true
+        return fail(error)
+      },
+    }
+    return iterator
   }
+
+  const toReadableStream = (): ReadableStream<Uint8Array> => {
+    const encoder = new TextEncoder()
+    let iterator: AsyncIterator<unknown> | undefined
+    return new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        try {
+          iterator ??= iteratorFactory()
+          const next = await iterator.next()
+          if (next.done) {
+            controller.close()
+            return
+          }
+          controller.enqueue(encoder.encode(`${JSON.stringify(next.value)}\n`))
+        } catch (error) {
+          controller.error(error)
+        }
+      },
+      async cancel() {
+        await iterator?.return?.()
+      },
+    })
+  }
+
+  return new Proxy(source as object, {
+    get(target, property) {
+      if (property === Symbol.asyncIterator) return () => iteratorFactory()
+      if (property === "tee") {
+        return (...args: unknown[]) => {
+          const tee = Reflect.get(target, property, target)
+          if (typeof tee !== "function")
+            throw new TypeError("OpenAI stream does not support tee()")
+          const branches = tee.apply(target, args)
+          if (!Array.isArray(branches)) return branches
+          return branches.map((branch) =>
+            restoreOpenAIStream(
+              session,
+              branch as AsyncIterable<unknown>,
+              signal
+            )
+          )
+        }
+      }
+      if (property === "toReadableStream") return toReadableStream
+      const value = Reflect.get(target, property, target)
+      return typeof value === "function" ? value.bind(target) : value
+    },
+  }) as unknown as AsyncIterable<unknown>
 }
