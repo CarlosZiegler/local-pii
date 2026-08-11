@@ -1,14 +1,11 @@
 import { createStreamingRehydrator } from "./rehydrate"
 import type { PiiSession } from "./session"
-import {
-  type OpenAIRecord,
-  restoreOpenAIToolArguments,
-} from "./openai-content"
+import type { OpenAIRecord } from "./openai-content"
 
 type TextState = ReturnType<typeof createStreamingRehydrator>
 
 interface ToolState {
-  protectedArguments: string
+  rehydrator: TextState
 }
 
 const NO_PRIMARY_ERROR = Symbol("no primary error")
@@ -49,13 +46,16 @@ function textStateFor(
 
 function toolStateFor(
   states: Map<string, ToolState>,
+  session: PiiSession,
   choiceIndex: number,
   toolIndex: number
 ): ToolState {
   const key = `${choiceIndex}:${toolIndex}`
   let state = states.get(key)
   if (!state) {
-    state = { protectedArguments: "" }
+    state = {
+      rehydrator: createStreamingRehydrator(() => session.mapping),
+    }
     states.set(key, state)
   }
   return state
@@ -93,11 +93,15 @@ function restoreChoice(
         continue
       }
       const toolIndex = numericIndex(toolCall.index, 0)
-      toolStateFor(toolStates, choiceIndex, toolIndex).protectedArguments +=
-        fn.arguments
+      const restoredArguments = toolStateFor(
+        toolStates,
+        session,
+        choiceIndex,
+        toolIndex
+      ).rehydrator.push(fn.arguments)
       toolCalls.push({
         ...toolCall,
-        function: { ...fn, arguments: "" },
+        function: { ...fn, arguments: restoredArguments },
       })
       changed = true
     }
@@ -122,22 +126,18 @@ function flushStates(
     }
   }
   for (const [key, state] of toolStates) {
-    if (!state.protectedArguments) continue
+    const tail = state.rehydrator.flush()
+    if (!tail) continue
     const separator = key.indexOf(":")
     const choiceIndex = Number(key.slice(0, separator))
     const toolIndex = Number(key.slice(separator + 1))
-    const argumentsValue = restoreOpenAIToolArguments(
-      session,
-      state.protectedArguments
-    )
-    if (!argumentsValue) continue
     output.push({
       choices: [
         {
           index: choiceIndex,
           delta: {
             tool_calls: [
-              { index: toolIndex, function: { arguments: argumentsValue } },
+              { index: toolIndex, function: { arguments: tail } },
             ],
           },
         },
