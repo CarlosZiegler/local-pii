@@ -184,6 +184,119 @@ describe("createBrowserLanguageModel", () => {
     expect(returned).toHaveBeenCalledWith("stop")
     expect(settled).toHaveBeenCalledOnce()
   })
+
+  it("awaits managed cleanup before exposing a doGenerate abort", async () => {
+    const abort = new AbortController()
+    const releaseCleanup = deferred<void>()
+    const returned = vi.fn(async () => ({
+      done: true as const,
+      value: undefined,
+    }))
+    const settled = vi.fn(async () => {
+      await releaseCleanup.promise
+    })
+    const runtime: BrowserGenerationRuntime = {
+      id: "generate-abort-cleanup",
+      disclosure: {
+        label: "test",
+        model: "test",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate(input) {
+        return managedGeneration(
+          async () => ({
+            next: () => new Promise<IteratorResult<string>>(() => {}),
+            return: returned,
+          }),
+          input.signal,
+          settled
+        )
+      },
+      dispose: async () => {},
+    }
+    const model = createBrowserLanguageModel(runtime)
+    const generation = model.doGenerate({
+      ...options(),
+      abortSignal: abort.signal,
+    })
+    const reason = new DOMException("Stopped", "AbortError")
+    abort.abort(reason)
+    await vi.waitFor(() => expect(returned).toHaveBeenCalledWith(reason))
+
+    let exposed = false
+    void generation.then(
+      () => {
+        exposed = true
+      },
+      () => {
+        exposed = true
+      }
+    )
+    await Promise.resolve()
+    expect(exposed).toBe(false)
+    expect(settled).toHaveBeenCalledOnce()
+
+    releaseCleanup.resolve()
+    await expect(generation).rejects.toBe(reason)
+  })
+
+  it("awaits managed cleanup before exposing a doStream generation error", async () => {
+    const primary = new Error("generation failed")
+    const releaseCleanup = deferred<void>()
+    const returned = vi.fn(async () => ({
+      done: true as const,
+      value: undefined,
+    }))
+    const settled = vi.fn(async () => {
+      await releaseCleanup.promise
+    })
+    const runtime: BrowserGenerationRuntime = {
+      id: "stream-error-cleanup",
+      disclosure: {
+        label: "test",
+        model: "test",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate() {
+        return managedGeneration(
+          async () => ({
+            next: async () => {
+              throw primary
+            },
+            return: returned,
+          }),
+          undefined,
+          settled
+        )
+      },
+      dispose: async () => {},
+    }
+    const model = createBrowserLanguageModel(runtime)
+    const stream = (await model.doStream(options())).stream
+    const reader = stream.getReader()
+    await reader.read()
+    await reader.read()
+    const terminal = reader.read()
+    await vi.waitFor(() => expect(returned).toHaveBeenCalledOnce())
+
+    let exposed = false
+    void terminal.then(
+      () => {
+        exposed = true
+      },
+      () => {
+        exposed = true
+      }
+    )
+    await Promise.resolve()
+    expect(exposed).toBe(false)
+    expect(settled).toHaveBeenCalledOnce()
+
+    releaseCleanup.resolve()
+    await expect(terminal).rejects.toBe(primary)
+  })
 })
 
 function deferred<T>() {

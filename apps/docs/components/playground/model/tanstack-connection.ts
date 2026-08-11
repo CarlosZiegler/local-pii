@@ -100,71 +100,91 @@ export function createBrowserConnection(
         const iterator = generation[Symbol.asyncIterator]()
         let completed = false
         let started = false
+        let hasPrimaryError = false
+        let primaryError: unknown
+        let hasCleanupError = false
+        let cleanupError: unknown
         const threadId = runContext?.threadId ?? fallbackId("thread")
         const runId = runContext?.runId ?? fallbackId("run")
         const messageId = fallbackId("message")
 
         try {
-          started = true
-          yield {
-            type: EventType.RUN_STARTED,
-            threadId,
-            runId,
-            ...(runContext?.parentRunId === undefined
-              ? {}
-              : { parentRunId: runContext.parentRunId }),
-            model: runtime.id,
-          } satisfies StreamChunk
-          yield {
-            type: EventType.TEXT_MESSAGE_START,
-            messageId,
-            role: "assistant",
-            model: runtime.id,
-          } satisfies StreamChunk
-
-          while (true) {
-            const next = await iterator.next()
-            if (next.done) break
-            signal?.throwIfAborted()
+          try {
+            started = true
             yield {
-              type: EventType.TEXT_MESSAGE_CONTENT,
-              messageId,
-              delta: next.value,
+              type: EventType.RUN_STARTED,
+              threadId,
+              runId,
+              ...(runContext?.parentRunId === undefined
+                ? {}
+                : { parentRunId: runContext.parentRunId }),
               model: runtime.id,
             } satisfies StreamChunk
+            yield {
+              type: EventType.TEXT_MESSAGE_START,
+              messageId,
+              role: "assistant",
+              model: runtime.id,
+            } satisfies StreamChunk
+
+            while (true) {
+              const next = await iterator.next()
+              if (next.done) break
+              signal?.throwIfAborted()
+              yield {
+                type: EventType.TEXT_MESSAGE_CONTENT,
+                messageId,
+                delta: next.value,
+                model: runtime.id,
+              } satisfies StreamChunk
+            }
+            completed = true
+            yield {
+              type: EventType.TEXT_MESSAGE_END,
+              messageId,
+              model: runtime.id,
+            } satisfies StreamChunk
+            yield {
+              type: EventType.RUN_FINISHED,
+              threadId,
+              runId,
+              finishReason: "stop",
+              model: runtime.id,
+            } satisfies StreamChunk
+          } catch (cause) {
+            if (!started) throw cause
+            hasPrimaryError = true
+            primaryError = cause
           }
-          completed = true
-          yield {
-            type: EventType.TEXT_MESSAGE_END,
-            messageId,
-            model: runtime.id,
-          } satisfies StreamChunk
-          yield {
-            type: EventType.RUN_FINISHED,
-            threadId,
-            runId,
-            finishReason: "stop",
-            model: runtime.id,
-          } satisfies StreamChunk
-        } catch (cause) {
-          if (!started) throw cause
-          yield {
-            type: EventType.RUN_ERROR,
-            threadId,
-            runId,
-            message: errorMessage(cause),
-            model: runtime.id,
-          } satisfies StreamChunk
         } finally {
           if (!completed) {
             try {
               await iterator.return?.(
                 signal?.aborted ? signal.reason : undefined
               )
-            } catch {
-              // A source error/abort remains the primary AG-UI outcome.
+            } catch (cause) {
+              if (!hasPrimaryError) {
+                hasCleanupError = true
+                cleanupError = cause
+                throw cause
+              }
             }
           }
+        }
+        if (!started) return
+        const terminalError = hasPrimaryError
+          ? primaryError
+          : hasCleanupError
+            ? cleanupError
+            : undefined
+        if (hasPrimaryError || hasCleanupError) {
+          yield {
+            type: EventType.RUN_ERROR,
+            threadId,
+            runId,
+            message: errorMessage(terminalError),
+            model: runtime.id,
+          } satisfies StreamChunk
         }
       })()
     },

@@ -6,8 +6,9 @@ import {
 import type { RunAgentInputContext } from "@tanstack/ai-client"
 import { createAnonymizer } from "local-pii"
 import { piiConnection } from "local-pii/tanstack"
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import { createFakeBrowserRuntime } from "./fake-runtime"
+import { managedGeneration } from "./browser-generation-runtime"
 import {
   createBrowserConnection,
   UnsupportedPromptMessageError,
@@ -145,4 +146,122 @@ describe("createBrowserConnection", () => {
       runId: "run-error",
     })
   })
+
+  it("waits for generation cleanup before publishing an abort error", async () => {
+    const abort = new AbortController()
+    const releaseCleanup = deferred<void>()
+    const returned = vi.fn(async () => ({
+      done: true as const,
+      value: undefined,
+    }))
+    const settled = vi.fn(async () => {
+      await releaseCleanup.promise
+    })
+    const runtime: BrowserGenerationRuntime = {
+      id: "abort-cleanup",
+      disclosure: {
+        label: "test",
+        model: "test",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate(input) {
+        return managedGeneration(
+          async () => ({
+            next: () => new Promise<IteratorResult<string>>(() => {}),
+            return: returned,
+          }),
+          input.signal,
+          settled
+        )
+      },
+      dispose: async () => {},
+    }
+    const signal = abort.signal
+    const source = createBrowserConnection(runtime).connect(
+      [{ role: "user", content: "Current" }],
+      undefined,
+      signal,
+      { threadId: "thread-abort", runId: "run-abort" }
+    )
+    const iterator = source[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: EventType.RUN_STARTED },
+    })
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: EventType.TEXT_MESSAGE_START },
+    })
+
+    const terminal = iterator.next()
+    const reason = new DOMException("Stopped", "AbortError")
+    abort.abort(reason)
+    await vi.waitFor(() => expect(returned).toHaveBeenCalledWith(reason))
+
+    let published = false
+    void terminal.then(() => {
+      published = true
+    })
+    await Promise.resolve()
+    expect(published).toBe(false)
+    expect(settled).toHaveBeenCalledOnce()
+
+    releaseCleanup.resolve()
+    await expect(terminal).resolves.toMatchObject({
+      value: {
+        type: EventType.RUN_ERROR,
+        threadId: "thread-abort",
+        runId: "run-abort",
+        message: "AbortError: Stopped",
+      },
+    })
+  })
+
+  it("propagates inner cleanup failure when the consumer returns early", async () => {
+    const cleanupError = new Error("early cleanup")
+    let pulls = 0
+    const runtime: BrowserGenerationRuntime = {
+      id: "early-return-cleanup",
+      disclosure: {
+        label: "test",
+        model: "test",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate() {
+        return managedGeneration(
+          async () => ({
+            next: async () => {
+              pulls += 1
+              if (pulls === 1) return { done: false, value: "chunk" }
+              return new Promise<IteratorResult<string>>(() => {})
+            },
+            return: async () => ({ done: true as const, value: undefined }),
+          }),
+          undefined,
+          () => {
+            throw cleanupError
+          }
+        )
+      },
+      dispose: async () => {},
+    }
+    const iterator = createBrowserConnection(runtime)
+      .connect([{ role: "user", content: "Current" }])
+      [Symbol.asyncIterator]()
+    await iterator.next()
+    await iterator.next()
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { type: EventType.TEXT_MESSAGE_CONTENT, delta: "chunk" },
+    })
+
+    await expect(iterator.return?.()).rejects.toBe(cleanupError)
+  })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}

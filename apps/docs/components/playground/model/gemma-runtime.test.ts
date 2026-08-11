@@ -222,7 +222,7 @@ describe("Gemma browser-generation runtime", () => {
     expect(fake.dispose).toHaveBeenCalledOnce()
   })
 
-  it("observes compatibility destroy disposal failures without unhandled rejection", async () => {
+  it("does not dispose shared artifacts when compatibility destroy closes a session", async () => {
     const fake = fakeTransformers(["ok"])
     const disposalError = new Error("destroy disposal")
     const factory = await createGemmaLanguageModelFactory({
@@ -248,7 +248,7 @@ describe("Gemma browser-generation runtime", () => {
       process.off("unhandledRejection", onUnhandled)
     }
 
-    expect(fake.dispose).toHaveBeenCalledOnce()
+    expect(fake.dispose).not.toHaveBeenCalled()
     expect(unhandled).toEqual([])
   })
 
@@ -378,6 +378,48 @@ describe("Gemma browser-generation runtime", () => {
       { role: "system", content: "Follow these rules" },
       { role: "user", content: "Current question" },
     ])
+  })
+
+  it("keeps the compatibility runtime alive after a warm session is destroyed", async () => {
+    const fake = fakeTransformers(["ok"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const warmSession = await factory.create()
+    warmSession.destroy()
+
+    const session = await factory.create()
+    const stream = await session.promptStreaming("Current question")
+    const reader = stream.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the later session after activation's warm session is destroyed.
+    }
+
+    expect(fake.dispose).not.toHaveBeenCalled()
+  })
+
+  it("destroys only the compatibility session's active iterator", async () => {
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const firstSession = await factory.create()
+    const secondSession = await factory.create()
+    const firstStream = await firstSession.promptStreaming("First")
+    const firstReader = firstStream.getReader()
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+
+    firstSession.destroy()
+
+    const secondStream = await secondSession.promptStreaming("Second")
+    const secondReader = secondStream.getReader()
+    while (!(await secondReader.read()).done) {
+      // The second session remains usable while the first is being destroyed.
+    }
+    expect(fake.dispose).not.toHaveBeenCalled()
   })
 })
 

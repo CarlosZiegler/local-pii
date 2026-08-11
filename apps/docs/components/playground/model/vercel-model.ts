@@ -117,8 +117,37 @@ export function createBrowserLanguageModel(
 
     async doGenerate(options: V4CallOptions): Promise<V4GenerateResult> {
       const request = protectedRequest(options)
+      const source = runtime.generate(request)[Symbol.asyncIterator]()
       let text = ""
-      for await (const chunk of runtime.generate(request)) text += chunk
+      let completed = false
+      let hasPrimaryError = false
+      let primaryError: unknown
+      try {
+        while (true) {
+          const next = await source.next()
+          if (next.done) break
+          text += next.value
+        }
+        completed = true
+      } catch (error) {
+        hasPrimaryError = true
+        primaryError = error
+      }
+
+      let hasCleanupError = false
+      let cleanupError: unknown
+      if (!completed) {
+        try {
+          await source.return?.(
+            request.signal?.aborted ? request.signal.reason : undefined
+          )
+        } catch (error) {
+          hasCleanupError = true
+          cleanupError = error
+        }
+      }
+      if (hasPrimaryError) throw primaryError
+      if (hasCleanupError) throw cleanupError
       return {
         content: [{ type: "text", text }],
         finishReason: finishReason(),
@@ -139,11 +168,15 @@ export function createBrowserLanguageModel(
           void (async () => {
             controller.enqueue({ type: "stream-start", warnings: [] })
             controller.enqueue({ type: "text-start", id })
+            let hasPrimaryError = false
+            let primaryError: unknown
+            let hasCleanupError = false
+            let cleanupError: unknown
             try {
               while (true) {
                 const next = await source.next()
                 if (next.done) break
-                if (cancelled) return
+                if (cancelled) break
                 controller.enqueue({
                   type: "text-delta",
                   id,
@@ -158,11 +191,28 @@ export function createBrowserLanguageModel(
                 usage: usage(),
               })
               finished = true
-              controller.close()
             } catch (error) {
-              if (!cancelled) controller.error(error)
-            } finally {
-              if (!finished && !cancelled) await source.return?.()
+              hasPrimaryError = true
+              primaryError = error
+            }
+
+            if (!finished && !cancelled) {
+              try {
+                await source.return?.(
+                  request.signal?.aborted ? request.signal.reason : undefined
+                )
+              } catch (error) {
+                hasCleanupError = true
+                cleanupError = error
+              }
+            }
+            if (cancelled) return
+            if (hasPrimaryError) {
+              controller.error(primaryError)
+            } else if (hasCleanupError) {
+              controller.error(cleanupError)
+            } else if (finished) {
+              controller.close()
             }
           })()
         },

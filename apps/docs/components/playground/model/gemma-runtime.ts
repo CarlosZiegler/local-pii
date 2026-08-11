@@ -388,6 +388,8 @@ export async function createGemmaLanguageModelFactory(
     },
     async create(options = {}) {
       options.signal?.throwIfAborted()
+      let destroyed = false
+      const activeIterators = new Set<AsyncIterator<string>>()
       const history = (options.initialPrompts ?? []).map((message) => ({
         role: compatibleRole(message.role),
         protectedContent:
@@ -409,6 +411,12 @@ export async function createGemmaLanguageModelFactory(
           input: LanguageModelPrompt,
           promptOptions: LanguageModelPromptOptions = {}
         ) {
+          if (destroyed) {
+            throw new DOMException(
+              "The compatibility session has been destroyed",
+              "InvalidStateError"
+            )
+          }
           const content =
             typeof input === "string"
               ? input
@@ -436,23 +444,42 @@ export async function createGemmaLanguageModelFactory(
             signal: promptOptions.signal,
           })
           const iterator = runtime.generate(request)[Symbol.asyncIterator]()
+          activeIterators.add(iterator)
+          const release = () => activeIterators.delete(iterator)
           return new ReadableStream<string>({
             async pull(controller) {
               try {
                 const next = await iterator.next()
-                if (next.done) controller.close()
-                else controller.enqueue(next.value)
+                if (next.done) {
+                  release()
+                  controller.close()
+                } else controller.enqueue(next.value)
               } catch (error) {
+                try {
+                  await iterator.return?.()
+                } catch {
+                  // Preserve the generation error as the primary stream error.
+                }
+                release()
                 controller.error(error)
               }
             },
             async cancel(reason) {
-              await iterator.return?.(reason)
+              try {
+                await iterator.return?.(reason)
+              } finally {
+                release()
+              }
             },
           })
         },
         destroy() {
-          void runtime.dispose().catch(() => undefined)
+          destroyed = true
+          for (const iterator of activeIterators) {
+            void Promise.resolve(iterator.return?.())
+              .catch(() => undefined)
+              .finally(() => activeIterators.delete(iterator))
+          }
         },
       }
       return session as unknown as LanguageModel
