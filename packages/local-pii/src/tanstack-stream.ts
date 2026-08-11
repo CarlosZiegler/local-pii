@@ -330,11 +330,12 @@ export function restoreTanStackStream(
       let closed = false
       let nextInFlight = false
       let cancelPendingNext = () => {}
-      const pendingNext = new Set<{
+      type PendingNext = {
         settled: boolean
         resolve: (result: IteratorResult<StreamChunk>) => void
         reject: (error: unknown) => void
-      }>()
+      }
+      const pendingNext = new Set<PendingNext>()
       type QueuedOutcome =
         | { kind: "result"; result: IteratorResult<StreamChunk> }
         | { kind: "error"; error: unknown }
@@ -386,6 +387,8 @@ export function restoreTanStackStream(
       let preemptedNext: NextOperation | undefined
       let losingNext: NextOperation | undefined
       let allowConcurrentThrow = false
+      let errorCloseStarted = false
+      let errorCleanup: Promise<IteratorResult<StreamChunk>> | undefined
       let pump = () => {}
 
       const settleDelegatedThrows = (
@@ -411,9 +414,11 @@ export function restoreTanStackStream(
       const settlePending = (
         kind: "return" | "abort" | "throw",
         value?: unknown,
-        recoverable = false
+        recoverable = false,
+        skip?: PendingNext
       ) => {
         for (const pending of pendingNext) {
+          if (pending === skip) continue
           pending.settled = true
           if (kind === "return")
             pending.resolve({ done: true, value: undefined })
@@ -720,13 +725,16 @@ export function restoreTanStackStream(
           )
       }
 
-      const closeAfterError = (error: unknown) => {
+      const closeAfterError = (error: unknown, skip?: PendingNext) => {
+        if (errorCloseStarted) return errorCleanup
+        errorCloseStarted = true
         clear()
         discardQueuedOperations()
         closed = true
         const cleanup = beginReturn(error)
+        errorCleanup = cleanup
         settlePreemptedNext("throw", error)
-        settlePending("throw", error)
+        settlePending("throw", error, false, skip)
         settleDelegatedThrows("throw", error, cleanup)
         void cleanup?.catch(() => undefined)
         const closing = generator.return?.(error)
@@ -835,8 +843,10 @@ export function restoreTanStackStream(
 
       const failNext = (operation: NextOperation, error: unknown) => {
         if (operation.pending.settled) return
-        closeAfterError(error)
-        rejectNext(operation, error)
+        const cleanup = closeAfterError(error, operation.pending)
+        const reject = () => rejectNext(operation, error)
+        if (cleanup) void cleanup.then(reject, reject).catch(() => undefined)
+        else reject()
       }
 
       const failThrow = (operation: ThrowOperation, error: unknown) => {

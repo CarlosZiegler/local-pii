@@ -4555,13 +4555,17 @@ describe("piiConnection text streaming", () => {
   )
 
   it.each([
-    ["connect", "sync"],
-    ["connect", "async"],
-    ["joinRun", "sync"],
-    ["joinRun", "async"],
+    ["connect", "sync", "resolve"],
+    ["connect", "sync", "reject"],
+    ["connect", "async", "resolve"],
+    ["connect", "async", "reject"],
+    ["joinRun", "sync", "resolve"],
+    ["joinRun", "sync", "reject"],
+    ["joinRun", "async", "resolve"],
+    ["joinRun", "async", "reject"],
   ] as const)(
-    "orders a concurrent %s throw %s rejection after queued output",
-    async (entrypoint, rejectionKind) => {
+    "orders a concurrent %s throw %s rejection after queued output with %s cleanup",
+    async (entrypoint, rejectionKind, cleanupKind) => {
       const session = createAnonymizer({
         placeholders: token(),
       }).createSession()
@@ -4572,6 +4576,10 @@ describe("piiConnection text streaming", () => {
       let throwCalls = 0
       let returnCalls = 0
       let returnValue: unknown
+      let cleanupStarted = false
+      let finishCleanup!: () => void
+      let failCleanup!: (error: unknown) => void
+      const cleanupError = new Error(`${entrypoint} rejection cleanup`)
       const source: AsyncIterable<StreamChunk> = {
         [Symbol.asyncIterator]() {
           return {
@@ -4603,10 +4611,17 @@ describe("piiConnection text streaming", () => {
               if (rejectionKind === "sync") throw secondError
               return Promise.reject(secondError)
             },
-            async return(value?: unknown) {
+            return(value?: unknown) {
               returnCalls += 1
               returnValue = value
-              return { done: true as const, value: undefined }
+              cleanupStarted = true
+              return new Promise<IteratorResult<StreamChunk>>(
+                (resolve, reject) => {
+                  finishCleanup = () =>
+                    resolve({ done: true as const, value: undefined })
+                  failCleanup = reject
+                }
+              )
             },
           }
         },
@@ -4635,7 +4650,25 @@ describe("piiConnection text streaming", () => {
         value: { type: EventType.TEXT_MESSAGE_END },
       })
       expect(throwCalls).toBe(2)
-      await expect(iterator.next()).rejects.toBe(secondError)
+      const pendingError = iterator.next()
+      for (let attempt = 0; !cleanupStarted && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(cleanupStarted).toBe(true)
+      const timedOut = Symbol("timed out")
+      await expect(
+        Promise.race([
+          pendingError.then(
+            () => Symbol("settled"),
+            () => Symbol("settled")
+          ),
+          new Promise<typeof timedOut>((resolve) =>
+            setTimeout(() => resolve(timedOut), 20)
+          ),
+        ])
+      ).resolves.toBe(timedOut)
+      if (cleanupKind === "resolve") finishCleanup()
+      else failCleanup(cleanupError)
+      await expect(pendingError).rejects.toBe(secondError)
       expect(returnCalls).toBe(1)
       expect(returnValue).toBe(secondError)
     }
@@ -4658,6 +4691,8 @@ describe("piiConnection text streaming", () => {
       let throwCalls = 0
       let returnCalls = 0
       let returnValue: unknown
+      let cleanupStarted = false
+      let finishCleanup!: () => void
       const source: AsyncIterable<StreamChunk> = {
         [Symbol.asyncIterator]() {
           return {
@@ -4696,7 +4731,11 @@ describe("piiConnection text streaming", () => {
             async return(value?: unknown) {
               returnCalls += 1
               returnValue = value
-              return { done: true as const, value: undefined }
+              cleanupStarted = true
+              return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                finishCleanup = () =>
+                  resolve({ done: true as const, value: undefined })
+              })
             },
           }
         },
@@ -4725,7 +4764,24 @@ describe("piiConnection text streaming", () => {
         value: { type: EventType.TEXT_MESSAGE_END },
       })
       expect(throwCalls).toBe(2)
-      await expect(iterator.next()).rejects.toBe(restoreError)
+      const pendingError = iterator.next()
+      for (let attempt = 0; !cleanupStarted && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(cleanupStarted).toBe(true)
+      const timedOut = Symbol("timed out")
+      await expect(
+        Promise.race([
+          pendingError.then(
+            () => Symbol("settled"),
+            () => Symbol("settled")
+          ),
+          new Promise<typeof timedOut>((resolve) =>
+            setTimeout(() => resolve(timedOut), 20)
+          ),
+        ])
+      ).resolves.toBe(timedOut)
+      finishCleanup()
+      await expect(pendingError).rejects.toBe(restoreError)
       expect(returnCalls).toBe(1)
       expect(returnValue).toBe(restoreError)
     }
