@@ -154,6 +154,8 @@ function capture(value: unknown, path: Path): Captured {
     for (const key of Reflect.ownKeys(raw)) {
       const descriptor = descriptorMap[key]
       if (!descriptor) return fail(path, "<invalid>")
+      if (!("value" in descriptor))
+        return fail(descriptorPath(path, key), "<accessor>")
       descriptors.push([key, Object.freeze({ ...descriptor })])
     }
     if (
@@ -178,6 +180,26 @@ function capture(value: unknown, path: Path): Captured {
 
 function keyOf(key: PropertyKey): PropertyKey {
   return typeof key === "number" ? String(key) : key
+}
+
+function descriptorPath(path: Path, key: PropertyKey): Path {
+  if (typeof key === "string" && SAFE_SEGMENTS.has(key)) return [...path, key]
+  if (typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key)) {
+    const index = Number(key)
+    if (Number.isSafeInteger(index) && index >= 0) return [...path, index]
+  }
+  return [...path, "<field>"]
+}
+
+function appendPath(
+  path: Path,
+  ...segments: readonly (string | number)[]
+): Path {
+  const result: Array<string | number> = []
+  for (let index = 0; index < path.length; index += 1) result.push(path[index]!)
+  for (let index = 0; index < segments.length; index += 1)
+    result.push(segments[index]!)
+  return result
 }
 
 function descriptor(
@@ -210,6 +232,29 @@ function optional(record: Captured, key: PropertyKey, path: Path): Field {
   return field(record, key, path)
 }
 
+const SAFE_ARRAY_PROTOTYPE = (() => {
+  const prototype = Object.create(Array.prototype) as object
+  for (const key of Reflect.ownKeys(Array.prototype)) {
+    if (key === "length") continue
+    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, key)
+    if (!descriptor || !("value" in descriptor)) continue
+    if (typeof descriptor.value !== "function") continue
+    Object.defineProperty(prototype, key, {
+      configurable: false,
+      enumerable: descriptor.enumerable,
+      writable: false,
+      value: descriptor.value,
+    })
+  }
+  Object.defineProperty(prototype, "toJSON", {
+    configurable: false,
+    enumerable: false,
+    writable: false,
+    value: undefined,
+  })
+  return Object.freeze(prototype)
+})()
+
 function cloneRecord(
   record: Captured,
   overrides: ReadonlyMap<PropertyKey, unknown>,
@@ -217,7 +262,7 @@ function cloneRecord(
 ): object {
   try {
     const target = record.array ? [] : Object.create(null)
-    if (record.array) Object.setPrototypeOf(target, Array.prototype)
+    if (record.array) Object.setPrototypeOf(target, SAFE_ARRAY_PROTOTYPE)
     const define = (key: PropertyKey, original: PropertyDescriptor) => {
       const normalized = keyOf(key)
       const replacement = overrides.has(normalized)
@@ -225,7 +270,10 @@ function cloneRecord(
         : original
       Object.defineProperty(target, key, replacement)
     }
-    for (const [key, original] of record.descriptors) {
+    for (let index = 0; index < record.descriptors.length; index += 1) {
+      const entry = record.descriptors[index]!
+      const key = entry[0]
+      const original = entry[1]
       if (record.array && key === "length") continue
       define(key, original)
     }
@@ -253,6 +301,17 @@ function captureArray(value: unknown, path: Path): CapturedArray {
     length.value < 0
   )
     return fail(path, "<invalid>")
+  for (const [key, item] of record.descriptors) {
+    if (key === "length") continue
+    if (
+      typeof key !== "string" ||
+      !/^(?:0|[1-9]\d*)$/.test(key) ||
+      Number(key) >= length.value ||
+      !Number.isSafeInteger(Number(key)) ||
+      !("value" in item)
+    )
+      return fail(descriptorPath(path, key), "<invalid>")
+  }
   const values: unknown[] = []
   for (let index = 0; index < length.value; index += 1) {
     const item = descriptor(record, index)
@@ -365,6 +424,21 @@ function strictJson(text: string, path: Path): PreparedJson {
   return captureJson(parsed, path)
 }
 
+type PreparedToolArguments =
+  | { readonly kind: "json"; readonly value: PreparedJson }
+  | { readonly kind: "partial" }
+
+function partialJson(text: string, path: Path): PreparedToolArguments {
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(text)
+  } catch (error) {
+    if (error instanceof SyntaxError) return { kind: "partial" }
+    throw error
+  }
+  return { kind: "json", value: captureJson(parsed, path) }
+}
+
 type Freeform =
   | { readonly kind: "text"; readonly value: string }
   | { readonly kind: "json"; readonly value: PreparedJson }
@@ -401,7 +475,7 @@ type PreparedPart =
   | {
       readonly kind: "tool-call"
       readonly template: Captured
-      readonly args: PreparedJson
+      readonly args: PreparedToolArguments
       readonly input?: PreparedJson
       readonly output?: PreparedJson
     }
@@ -510,10 +584,17 @@ function preparePart(
       output.kind === "data" && output.value !== undefined
         ? captureJson(output.value, [...path, "output"])
         : undefined
+    const partialState =
+      state === "awaiting-input" || state === "input-streaming"
     return {
       kind,
       template,
-      args: strictJson(argumentsValue, [...path, "arguments"]),
+      args: partialState
+        ? partialJson(argumentsValue, [...path, "arguments"])
+        : {
+            kind: "json",
+            value: strictJson(argumentsValue, [...path, "arguments"]),
+          },
       ...(preparedInput !== undefined ? { input: preparedInput } : {}),
       ...(preparedOutput !== undefined ? { output: preparedOutput } : {}),
     }
@@ -713,19 +794,23 @@ async function protectPreparedJson(
   if (typeof value === "string") return protectText(session, value)
   if (Array.isArray(value)) {
     const output: PreparedJson[] = []
+    Object.setPrototypeOf(output, SAFE_ARRAY_PROTOTYPE)
     for (let index = 0; index < value.length; index += 1)
       output.push(await protectPreparedJson(session, value[index]!))
     return Object.freeze(output) as JsonArray
   }
   const output = Object.create(null) as JsonObject
   const objectValue = value as JsonObject
-  for (const key of Object.keys(objectValue))
+  const keys = Object.keys(objectValue)
+  for (let index = 0; index < keys.length; index += 1) {
+    const key = keys[index]!
     Object.defineProperty(output, key, {
       configurable: true,
       enumerable: true,
       writable: false,
       value: await protectPreparedJson(session, objectValue[key]!),
     })
+  }
   return Object.freeze(output)
 }
 
@@ -751,7 +836,7 @@ async function renderParts(
   for (let index = 0; index < plan.items.length; index += 1)
     overrides.set(
       String(index),
-      await renderPart(session, plan.items[index]!, [...path, index])
+      await renderPart(session, plan.items[index]!, appendPath(path, index))
     )
   return cloneRecord(plan.template, overrides, path)
 }
@@ -762,33 +847,32 @@ async function renderPart(
   path: Path
 ): Promise<object> {
   if (plan.kind === "opaque") return cloneRecord(plan.template, new Map(), path)
-  if (plan.kind === "text")
-    return cloneRecord(
-      plan.template,
-      new Map([["content", await protectText(session, plan.text)]]),
-      path
+  if (plan.kind === "text") {
+    const overrides = new Map<PropertyKey, unknown>()
+    overrides.set("content", await protectText(session, plan.text))
+    return cloneRecord(plan.template, overrides, path)
+  }
+  if (plan.kind === "freeform-text") {
+    const overrides = new Map<PropertyKey, unknown>()
+    overrides.set("content", await renderFreeform(session, plan.value))
+    return cloneRecord(plan.template, overrides, path)
+  }
+  if (plan.kind === "structured-fallback") {
+    const overrides = new Map<PropertyKey, unknown>()
+    overrides.set(
+      "raw",
+      JSON.stringify(await protectPreparedJson(session, plan.json))
     )
-  if (plan.kind === "freeform-text")
-    return cloneRecord(
-      plan.template,
-      new Map([["content", await renderFreeform(session, plan.value)]]),
-      path
-    )
-  if (plan.kind === "structured-fallback")
-    return cloneRecord(
-      plan.template,
-      new Map([
-        ["raw", JSON.stringify(await protectPreparedJson(session, plan.json))],
-      ]),
-      path
-    )
+    return cloneRecord(plan.template, overrides, path)
+  }
   if (plan.kind === "tool-call") {
-    const overrides = new Map<PropertyKey, unknown>([
-      [
-        "arguments",
-        JSON.stringify(await protectPreparedJson(session, plan.args)),
-      ],
-    ])
+    const overrides = new Map<PropertyKey, unknown>()
+    overrides.set(
+      "arguments",
+      plan.args.kind === "partial"
+        ? ""
+        : JSON.stringify(await protectPreparedJson(session, plan.args.value))
+    )
     if (plan.input !== undefined)
       overrides.set("input", await protectPreparedJson(session, plan.input))
     if (plan.output !== undefined)
@@ -797,8 +881,9 @@ async function renderPart(
   }
   const content = isFreeform(plan.content)
     ? await renderFreeform(session, plan.content)
-    : await renderParts(session, plan.content, [...path, "content"])
-  const overrides = new Map<PropertyKey, unknown>([["content", content]])
+    : await renderParts(session, plan.content, appendPath(path, "content"))
+  const overrides = new Map<PropertyKey, unknown>()
+  overrides.set("content", content)
   if (plan.error !== undefined)
     overrides.set("error", await protectText(session, plan.error))
   return cloneRecord(plan.template, overrides, path)
@@ -812,22 +897,21 @@ async function renderToolCalls(
   const overrides = new Map<PropertyKey, unknown>()
   for (let index = 0; index < plan.items.length; index += 1) {
     const item = plan.items[index]!
+    const functionOverrides = new Map<PropertyKey, unknown>()
+    functionOverrides.set(
+      "arguments",
+      JSON.stringify(await protectPreparedJson(session, item.args))
+    )
     const functionValue = cloneRecord(
       item.functionTemplate,
-      new Map([
-        [
-          "arguments",
-          JSON.stringify(await protectPreparedJson(session, item.args)),
-        ],
-      ]),
-      [...path, index, "function"]
+      functionOverrides,
+      appendPath(path, index, "function")
     )
+    const itemOverrides = new Map<PropertyKey, unknown>()
+    itemOverrides.set("function", functionValue)
     overrides.set(
       String(index),
-      cloneRecord(item.template, new Map([["function", functionValue]]), [
-        ...path,
-        index,
-      ])
+      cloneRecord(item.template, itemOverrides, appendPath(path, index))
     )
   }
   return cloneRecord(plan.template, overrides, path)
@@ -838,14 +922,14 @@ async function renderMessage(
   plan: PreparedMessage,
   index: number
 ): Promise<object> {
-  if (plan.family === "ui")
-    return cloneRecord(
-      plan.template,
-      new Map([
-        ["parts", await renderParts(session, plan.parts, [index, "parts"])],
-      ]),
-      [index]
+  if (plan.family === "ui") {
+    const overrides = new Map<PropertyKey, unknown>()
+    overrides.set(
+      "parts",
+      await renderParts(session, plan.parts, [index, "parts"])
     )
+    return cloneRecord(plan.template, overrides, [index])
+  }
   const overrides = new Map<PropertyKey, unknown>()
   if (typeof plan.content === "string")
     overrides.set("content", await protectText(session, plan.content))

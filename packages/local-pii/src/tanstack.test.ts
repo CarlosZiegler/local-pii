@@ -1,5 +1,6 @@
 import {
   EventType,
+  uiMessagesToWire,
   type ContentPart,
   type MessagePart,
   type ModelMessage,
@@ -194,6 +195,139 @@ describe("piiConnection message protection", () => {
     expect(Object.keys(session.mapping)).toHaveLength(0)
   })
 
+  it("rejects an unknown sibling accessor without invoking it", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const connect = vi.fn(() => emptyStream())
+    let siblingGets = 0
+    const part = {
+      type: "text" as const,
+      content: "ana@acme.com",
+    } as Record<string, unknown>
+    Object.defineProperty(part, "futureField", {
+      enumerable: true,
+      get() {
+        siblingGets += 1
+        throw new Error("future secret")
+      },
+    })
+
+    await expect(
+      collect(
+        piiConnection({ connect }, { session }).connect([
+          { id: "sibling-accessor", role: "user", parts: [part] },
+        ] as unknown as Array<UIMessage>)
+      )
+    ).rejects.toMatchObject({
+      path: [0, "parts", 0, "<field>"],
+      discriminant: "<accessor>",
+    })
+    expect(siblingGets).toBe(0)
+    expect(connect).not.toHaveBeenCalled()
+    expect(Object.keys(session.mapping)).toHaveLength(0)
+  })
+
+  it("rejects own array iteration hooks before session work", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const connect = vi.fn(() => emptyStream())
+    const parts = [{ type: "text" as const, content: "ana@acme.com" }] as Array<
+      Record<string, unknown>
+    >
+    Object.defineProperty(parts, Symbol.iterator, {
+      configurable: true,
+      value: function* () {
+        yield { type: "text", content: "leaked@acme.com" }
+      },
+    })
+
+    await expect(
+      collect(
+        piiConnection({ connect }, { session }).connect([
+          { id: "array-hook", role: "user", parts },
+        ] as unknown as Array<UIMessage>)
+      )
+    ).rejects.toMatchObject({
+      path: [0, "parts", "<field>"],
+      discriminant: "<invalid>",
+    })
+    expect(connect).not.toHaveBeenCalled()
+    expect(Object.keys(session.mapping)).toHaveLength(0)
+  })
+
+  it("uses stable array hooks after Array.prototype mutates during protection", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const originalAnonymize = session.anonymize.bind(session)
+    const arrayPrototype = Array.prototype as Array<unknown> & {
+      toJSON?: () => unknown
+    }
+    const toJsonDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      "toJSON"
+    )
+    const someDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      "some"
+    )
+    const iteratorDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      Symbol.iterator
+    )
+    vi.spyOn(session, "anonymize").mockImplementation(async (text) => {
+      const result = await originalAnonymize(text)
+      Object.defineProperty(arrayPrototype, "toJSON", {
+        configurable: true,
+        value: () => ({ leaked: "ana@acme.com" }),
+      })
+      Object.defineProperty(arrayPrototype, "some", {
+        configurable: true,
+        value: () => false,
+      })
+      Object.defineProperty(arrayPrototype, Symbol.iterator, {
+        configurable: true,
+        value: function* () {
+          yield { leaked: "ana@acme.com" }
+        },
+      })
+      return result
+    })
+    let received: Array<UIMessage> = []
+    try {
+      const wrapped = piiConnection(
+        {
+          connect(messages) {
+            received = messages as Array<UIMessage>
+            return emptyStream()
+          },
+        },
+        { session }
+      )
+      await collect(
+        wrapped.connect([
+          {
+            id: "stable-array-hooks",
+            role: "user",
+            parts: [{ type: "text", content: "ana@acme.com" }],
+          },
+        ])
+      )
+      expect(JSON.stringify(received)).not.toContain("ana@acme.com")
+      expect(received[0]!.parts.some((part) => part.type === "text")).toBe(true)
+      expect([...received[0]!.parts]).toHaveLength(1)
+    } finally {
+      if (toJsonDescriptor)
+        Object.defineProperty(Array.prototype, "toJSON", toJsonDescriptor)
+      else
+        delete (Array.prototype as Array<unknown> & { toJSON?: unknown }).toJSON
+      if (someDescriptor)
+        Object.defineProperty(Array.prototype, "some", someDescriptor)
+      if (iteratorDescriptor)
+        Object.defineProperty(
+          Array.prototype,
+          Symbol.iterator,
+          iteratorDescriptor
+        )
+    }
+  })
+
   it("captures a stateful proxy once without invoking ordinary get or rereading it", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const target = { type: "text", content: "ana@acme.com" }
@@ -317,8 +451,8 @@ describe("piiConnection message protection", () => {
     await expect(
       collect(piiConnection({ connect }, { session }).connect([message]))
     ).rejects.toMatchObject({
-      path: [0],
-      discriminant: "<ambiguous>",
+      path: [0, "content"],
+      discriminant: "<accessor>",
     })
     expect(contentGets).toBe(0)
     expect(anonymize).not.toHaveBeenCalled()
@@ -388,7 +522,7 @@ describe("piiConnection message protection", () => {
     expect(input.values[0]).toMatch(TOKEN)
   })
 
-  it("protects valid incomplete tool calls and rejects malformed ones", async () => {
+  it("protects valid incomplete tool calls and sanitizes malformed ones", async () => {
     const original = 'Ana "Boss"'
     const session = createAnonymizer({
       dictionary: [{ value: original, type: "CUSTOM" }],
@@ -427,11 +561,65 @@ describe("piiConnection message protection", () => {
       id: "malformed-streaming",
       parts: [{ ...valid.parts[0]!, arguments: '{"name":"Ana \\"Boss}' }],
     } satisfies UIMessage
-    await expect(collect(wrapped.connect([malformed]))).rejects.toMatchObject({
-      discriminant: "<invalid-json>",
-    })
-    expect(connect).toHaveBeenCalledOnce()
+    await collect(wrapped.connect([malformed]))
+    expect(connect).toHaveBeenCalledTimes(2)
+    const sanitized = (
+      connect.mock.calls as unknown as Array<unknown[]>
+    )[1]![0] as Array<UIMessage>
+    const sanitizedPart = sanitized[0]!.parts[0]!
+    if (sanitizedPart.type !== "tool-call")
+      throw new Error("expected tool call")
+    expect(sanitizedPart.arguments).toBe("")
+    expect(sanitizedPart.arguments).not.toContain("Ana")
   })
+
+  it.each(["awaiting-input", "input-streaming"] as const)(
+    "sanitizes empty and truncated %s arguments while protecting input",
+    async (state) => {
+      const original = 'Ana "Boss"'
+      const session = createAnonymizer({
+        dictionary: [{ value: original, type: "CUSTOM" }],
+        placeholders: token(),
+      }).createSession()
+      const connect = vi.fn(() => emptyStream())
+      const argument = state === "awaiting-input" ? "" : '{"name":"Ana'
+      const message = {
+        id: `partial-${state}`,
+        role: "assistant" as const,
+        parts: [
+          {
+            type: "tool-call" as const,
+            id: "call",
+            name: "lookup",
+            arguments: argument,
+            input: { name: original },
+            state,
+          },
+        ],
+      } satisfies UIMessage
+      const callerSnapshot = structuredClone(message)
+
+      await collect(piiConnection({ connect }, { session }).connect([message]))
+      const forwarded = (
+        connect.mock.calls as unknown as Array<unknown[]>
+      )[0]![0] as Array<UIMessage>
+      const forwardedPart = forwarded[0]!.parts[0]!
+      if (forwardedPart.type !== "tool-call")
+        throw new Error("expected tool call")
+      expect(forwardedPart.arguments).toBe("")
+      expect(forwardedPart.input).toEqual({
+        name: expect.stringMatching(TOKEN),
+      })
+      const wire = uiMessagesToWire(forwarded)
+      const wireCall = (wire[0] as { toolCalls?: Array<unknown> })
+        .toolCalls?.[0]
+      expect(
+        (wireCall as { function?: { arguments?: string } })?.function?.arguments
+      ).toBe("")
+      expect(JSON.stringify(wire)).not.toContain(original)
+      expect(message).toEqual(callerSnapshot)
+    }
+  )
 
   it("rejects an all-ambiguous message array before session work", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
@@ -666,7 +854,7 @@ describe("piiConnection message protection", () => {
     expect(session.mapping).toEqual(before)
   })
 
-  it("rejects malformed tool-call JSON in every serialized state", async () => {
+  it("rejects malformed tool-call JSON in included states", async () => {
     const original = 'Ana "Boss"'
     const session = createAnonymizer({
       dictionary: [{ value: original, type: "CUSTOM" }],
@@ -688,11 +876,16 @@ describe("piiConnection message protection", () => {
         },
       ],
     } satisfies UIMessage
-    await expect(collect(wrapped.connect([uiMessage]))).rejects.toMatchObject({
-      path: [0, "parts", 0, "arguments"],
-      discriminant: "<invalid-json>",
-    })
-    expect(connect).not.toHaveBeenCalled()
+    await collect(wrapped.connect([uiMessage]))
+    expect(connect).toHaveBeenCalledOnce()
+    const sanitized = (
+      connect.mock.calls as unknown as Array<unknown[]>
+    )[0]![0] as Array<UIMessage>
+    const sanitizedPart = sanitized[0]!.parts[0]!
+    if (sanitizedPart.type !== "tool-call")
+      throw new Error("expected tool call")
+    expect(sanitizedPart.arguments).toBe("")
+    expect(sanitizedPart.arguments).not.toContain("Ana")
     expect(Object.keys(session.mapping)).toHaveLength(0)
 
     const includedUiMessage = {
@@ -705,7 +898,7 @@ describe("piiConnection message protection", () => {
       path: [0, "parts", 0, "arguments"],
       discriminant: "<invalid-json>",
     })
-    expect(connect).not.toHaveBeenCalled()
+    expect(connect).toHaveBeenCalledOnce()
     expect(Object.keys(session.mapping)).toHaveLength(0)
 
     const modelMessage = {
@@ -725,7 +918,7 @@ describe("piiConnection message protection", () => {
       path: [0, "toolCalls", 0, "function", "arguments"],
       discriminant: "<invalid-json>",
     })
-    expect(connect).not.toHaveBeenCalled()
+    expect(connect).toHaveBeenCalledOnce()
 
     await collect(
       wrapped.connect([
@@ -745,7 +938,7 @@ describe("piiConnection message protection", () => {
     )
     const resultPart = (
       connect.mock.calls as unknown as Array<unknown[]>
-    )[0]![0] as Array<UIMessage>
+    )[1]![0] as Array<UIMessage>
     const result = resultPart[0]!.parts[0]!
     if (result.type !== "tool-result") throw new Error("expected tool result")
     expect(result.content).not.toContain(original)
