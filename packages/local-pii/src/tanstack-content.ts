@@ -76,27 +76,33 @@ function safeReason(reason: unknown): string {
 }
 
 function safePath(path: Path): Path {
-  return Object.freeze(
-    path.map((part) =>
+  const cleaned: Array<string | number> = []
+  Object.setPrototypeOf(cleaned, SAFE_ARRAY_PROTOTYPE)
+  for (let index = 0; index < path.length; index += 1) {
+    const part = path[index]
+    cleaned.push(
       typeof part === "number" && Number.isSafeInteger(part) && part >= 0
         ? part
         : typeof part === "string" && SAFE_SEGMENTS.has(part)
           ? part
           : "<field>"
     )
-  )
+  }
+  return Object.freeze(cleaned)
 }
 
 function printPath(path: Path): string {
-  return path.reduce<string>(
-    (result, part) =>
+  let result = "$"
+  for (let index = 0; index < path.length; index += 1) {
+    const part = path[index]
+    result =
       typeof part === "number"
         ? `${result}[${part}]`
-        : SAFE_SEGMENTS.has(part)
+        : typeof part === "string" && SAFE_SEGMENTS.has(part)
           ? `${result}.${part}`
-          : `${result}["<field>"]`,
-    "$"
-  )
+          : `${result}["<field>"]`
+  }
+  return result
 }
 
 /** Safe public error for unsupported semantic protocol input. */
@@ -191,17 +197,6 @@ function descriptorPath(path: Path, key: PropertyKey): Path {
   return [...path, "<field>"]
 }
 
-function appendPath(
-  path: Path,
-  ...segments: readonly (string | number)[]
-): Path {
-  const result: Array<string | number> = []
-  for (let index = 0; index < path.length; index += 1) result.push(path[index]!)
-  for (let index = 0; index < segments.length; index += 1)
-    result.push(segments[index]!)
-  return result
-}
-
 function descriptor(
   record: Captured,
   key: PropertyKey
@@ -212,40 +207,115 @@ function descriptor(
 
 type Field =
   | { readonly kind: "missing" }
-  | { readonly kind: "accessor" }
   | { readonly kind: "data"; readonly value: unknown }
 
-function field(record: Captured, key: PropertyKey, path: Path): Field {
+function field(record: Captured, key: PropertyKey): Field {
   const found = descriptor(record, key)
   if (!found) return { kind: "missing" }
-  if (!("value" in found)) return fail(path, "<accessor>")
   return { kind: "data", value: found.value }
 }
 
 function required(record: Captured, key: PropertyKey, path: Path): unknown {
-  const result = field(record, key, path)
+  const result = field(record, key)
   if (result.kind !== "data") return fail(path, "<missing>")
   return result.value
 }
 
-function optional(record: Captured, key: PropertyKey, path: Path): Field {
-  return field(record, key, path)
+function optional(record: Captured, key: PropertyKey): Field {
+  return field(record, key)
+}
+
+interface ArrayPrototypeFingerprint {
+  readonly prototype: object
+  readonly keys: readonly PropertyKey[]
+  readonly descriptors: ReadonlyMap<PropertyKey, PropertyDescriptor>
+}
+
+function snapshotArrayPrototype(): ArrayPrototypeFingerprint | null {
+  try {
+    const prototype = Array.prototype as object
+    const keys = Reflect.ownKeys(prototype)
+    const descriptors = new Map<PropertyKey, PropertyDescriptor>()
+    for (let index = 0; index < keys.length; index += 1) {
+      const key = keys[index]!
+      const descriptor = Object.getOwnPropertyDescriptor(prototype, key)
+      if (!descriptor) return null
+      descriptors.set(key, Object.freeze({ ...descriptor }))
+    }
+    return Object.freeze({
+      prototype,
+      keys: Object.freeze(keys),
+      descriptors,
+    })
+  } catch {
+    return null
+  }
+}
+
+const ARRAY_PROTOTYPE_BASELINE = snapshotArrayPrototype()
+
+function sameDescriptor(
+  left: PropertyDescriptor | undefined,
+  right: PropertyDescriptor | undefined
+): boolean {
+  if (!left || !right) return false
+  if (
+    left.configurable !== right.configurable ||
+    left.enumerable !== right.enumerable
+  )
+    return false
+  if ("value" in left !== "value" in right) return false
+  if ("value" in left && "value" in right)
+    return left.writable === right.writable && left.value === right.value
+  return left.get === right.get && left.set === right.set
+}
+
+function arrayPrototypeMatchesBaseline(): boolean {
+  const baseline = ARRAY_PROTOTYPE_BASELINE
+  const current = snapshotArrayPrototype()
+  if (!baseline || !current || baseline.prototype !== current.prototype)
+    return false
+  if (baseline.keys.length !== current.keys.length) return false
+  for (let index = 0; index < baseline.keys.length; index += 1) {
+    const key = baseline.keys[index]
+    if (key !== current.keys[index]) return false
+    if (
+      !sameDescriptor(
+        baseline.descriptors.get(key!),
+        current.descriptors.get(key!)
+      )
+    )
+      return false
+  }
+  return true
+}
+
+function assertArrayPrototypeStable(): void {
+  if (!arrayPrototypeMatchesBaseline()) fail([], "<invalid>")
+}
+
+export function assertTanStackArrayPrototypeStable(): void {
+  assertArrayPrototypeStable()
 }
 
 const SAFE_ARRAY_PROTOTYPE = (() => {
-  const prototype = Object.create(Array.prototype) as object
-  for (const key of Reflect.ownKeys(Array.prototype)) {
-    if (key === "length") continue
-    const descriptor = Object.getOwnPropertyDescriptor(Array.prototype, key)
-    if (!descriptor || !("value" in descriptor)) continue
-    if (typeof descriptor.value !== "function") continue
-    Object.defineProperty(prototype, key, {
-      configurable: false,
-      enumerable: descriptor.enumerable,
-      writable: false,
-      value: descriptor.value,
-    })
-  }
+  const prototype = Object.create(null) as object
+  const baseline = ARRAY_PROTOTYPE_BASELINE
+  if (baseline)
+    for (let index = 0; index < baseline.keys.length; index += 1) {
+      const key = baseline.keys[index]!
+      if (key === "length" || key === "toJSON") continue
+      const descriptor = baseline.descriptors.get(key)
+      if (!descriptor) continue
+      if (!("value" in descriptor)) continue
+      if (typeof descriptor.value !== "function") continue
+      Object.defineProperty(prototype, key, {
+        configurable: false,
+        enumerable: descriptor.enumerable,
+        writable: false,
+        value: descriptor.value,
+      })
+    }
   Object.defineProperty(prototype, "toJSON", {
     configurable: false,
     enumerable: false,
@@ -254,6 +324,18 @@ const SAFE_ARRAY_PROTOTYPE = (() => {
   })
   return Object.freeze(prototype)
 })()
+
+function appendPath(
+  path: Path,
+  ...segments: readonly (string | number)[]
+): Path {
+  const result: Array<string | number> = []
+  Object.setPrototypeOf(result, SAFE_ARRAY_PROTOTYPE)
+  for (let index = 0; index < path.length; index += 1) result.push(path[index]!)
+  for (let index = 0; index < segments.length; index += 1)
+    result.push(segments[index]!)
+  return result
+}
 
 function cloneRecord(
   record: Captured,
@@ -574,8 +656,8 @@ function preparePart(
       state === "complete" ||
       state === "error"
     if (!validState) return fail([...path, "state"], "<invalid>")
-    const input = optional(template, "input", [...path, "input"])
-    const output = optional(template, "output", [...path, "output"])
+    const input = optional(template, "input")
+    const output = optional(template, "output")
     const preparedInput =
       input.kind === "data" && input.value !== undefined
         ? captureJson(input.value, [...path, "input"])
@@ -606,7 +688,7 @@ function preparePart(
       : Array.isArray(content)
         ? prepareParts(content, [...path, "content"], "model", true)
         : fail([...path, "content"], "<invalid>")
-  const error = optional(template, "error", [...path, "error"])
+  const error = optional(template, "error")
   if (
     error.kind === "data" &&
     error.value !== undefined &&
@@ -752,7 +834,7 @@ function prepareMessage(
         : Array.isArray(content)
           ? prepareParts(content, [index, "content"], "model", role === "tool")
           : fail([index, "content"], "<invalid>")
-  const toolCalls = optional(record, "toolCalls", [index, "toolCalls"])
+  const toolCalls = optional(record, "toolCalls")
   return {
     family,
     template: record,
@@ -953,6 +1035,7 @@ export async function protectTanStackMessages(
   session: PiiSession,
   messages: TanStackMessages
 ): Promise<TanStackMessages> {
+  assertArrayPrototypeStable()
   const plan = captureMessages(messages)
   const overrides = new Map<PropertyKey, unknown>()
   for (let index = 0; index < plan.items.length; index += 1)
@@ -960,5 +1043,11 @@ export async function protectTanStackMessages(
       String(index),
       await renderMessage(session, plan.items[index]!, index)
     )
-  return cloneRecord(plan.template, overrides, []) as TanStackMessages
+  const protectedMessages = cloneRecord(
+    plan.template,
+    overrides,
+    []
+  ) as TanStackMessages
+  assertArrayPrototypeStable()
+  return protectedMessages
 }

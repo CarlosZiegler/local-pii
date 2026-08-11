@@ -253,7 +253,7 @@ describe("piiConnection message protection", () => {
     expect(Object.keys(session.mapping)).toHaveLength(0)
   })
 
-  it("uses stable array hooks after Array.prototype mutates during protection", async () => {
+  it("fails closed when Array.prototype mutates during protection", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const originalAnonymize = session.anonymize.bind(session)
     const arrayPrototype = Array.prototype as Array<unknown> & {
@@ -271,6 +271,14 @@ describe("piiConnection message protection", () => {
       Array.prototype,
       Symbol.iterator
     )
+    const numericDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      "0"
+    )
+    const arrayLengthDescriptor = Object.getOwnPropertyDescriptor(
+      Array.prototype,
+      "length"
+    )
     vi.spyOn(session, "anonymize").mockImplementation(async (text) => {
       const result = await originalAnonymize(text)
       Object.defineProperty(arrayPrototype, "toJSON", {
@@ -287,31 +295,29 @@ describe("piiConnection message protection", () => {
           yield { leaked: "ana@acme.com" }
         },
       })
+      Object.defineProperty(arrayPrototype, "0", {
+        configurable: true,
+        set() {},
+      })
       return result
     })
-    let received: Array<UIMessage> = []
+    const innerConnect = vi.fn(() => emptyStream())
+    let caught: unknown
     try {
-      const wrapped = piiConnection(
-        {
-          connect(messages) {
-            received = messages as Array<UIMessage>
-            return emptyStream()
-          },
-        },
-        { session }
-      )
-      await collect(
-        wrapped.connect([
-          {
-            id: "stable-array-hooks",
-            role: "user",
-            parts: [{ type: "text", content: "ana@acme.com" }],
-          },
-        ])
-      )
-      expect(JSON.stringify(received)).not.toContain("ana@acme.com")
-      expect(received[0]!.parts.some((part) => part.type === "text")).toBe(true)
-      expect([...received[0]!.parts]).toHaveLength(1)
+      const wrapped = piiConnection({ connect: innerConnect }, { session })
+      try {
+        await collect(
+          wrapped.connect([
+            {
+              id: "stable-array-hooks",
+              role: "user",
+              parts: [{ type: "text", content: "ana@acme.com" }],
+            },
+          ])
+        )
+      } catch (error) {
+        caught = error
+      }
     } finally {
       if (toJsonDescriptor)
         Object.defineProperty(Array.prototype, "toJSON", toJsonDescriptor)
@@ -325,7 +331,14 @@ describe("piiConnection message protection", () => {
           Symbol.iterator,
           iteratorDescriptor
         )
+      if (numericDescriptor)
+        Object.defineProperty(Array.prototype, "0", numericDescriptor)
+      else delete (Array.prototype as Array<unknown>)[0]
+      if (arrayLengthDescriptor)
+        Object.defineProperty(Array.prototype, "length", arrayLengthDescriptor)
     }
+    expect(innerConnect).not.toHaveBeenCalled()
+    expect(caught).toMatchObject({ path: [], discriminant: "<invalid>" })
   })
 
   it("captures a stateful proxy once without invoking ordinary get or rereading it", async () => {
@@ -1309,10 +1322,20 @@ describe("piiConnection message protection", () => {
 
     const firstCall = (connect.mock.calls as unknown as Array<unknown[]>)[0]!
     const protectedMessages = firstCall[0] as Array<UIMessage>
+    expect(
+      Object.getPrototypeOf(Object.getPrototypeOf(protectedMessages))
+    ).toBe(null)
+    expect(Object.getPrototypeOf(protectedMessages)).not.toBe(Array.prototype)
+    expect(protectedMessages).not.toBeInstanceOf(Array)
+    expect(protectedMessages.some((item) => item.id === "frozen")).toBe(true)
+    expect([...protectedMessages]).toHaveLength(1)
     const protectedPart = protectedMessages[0]!.parts[0] as unknown as Record<
       string,
       unknown
     >
+    expect(
+      Object.getPrototypeOf(Object.getPrototypeOf(protectedMessages[0]!.parts))
+    ).toBe(null)
     expect(protectedPart.content).toMatch(TOKEN)
     expect(Object.getPrototypeOf(protectedPart)).toBe(null)
     expect(

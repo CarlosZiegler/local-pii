@@ -2,6 +2,7 @@ import type { StreamChunk } from "@tanstack/ai/client"
 import type { ConnectConnectionAdapter } from "@tanstack/ai-client"
 import type { PiiSession } from "./session"
 import {
+  assertTanStackArrayPrototypeStable,
   protectTanStackMessages,
   UnsupportedTanStackSemanticContentError,
 } from "./tanstack-content"
@@ -35,6 +36,7 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
           messages
         )
         signal?.throwIfAborted()
+        assertTanStackArrayPrototypeStable()
         const upstream = inner.connect(
           protectedMessages,
           data,
