@@ -2,8 +2,8 @@ import { describe, expect, expectTypeOf, it, vi } from "vitest"
 import { createAnonymizer } from "./anonymizer"
 import { rehydrate } from "./rehydrate"
 import { hashed } from "./placeholder/strategies"
-import type { AnonymizerOptions } from "./anonymizer"
-import type { DetectionModel, Entity, NerBackend } from "./types"
+import type { AnonymizerOptions, DetectionModel, NerBackend } from "./index"
+import type { Entity } from "./types"
 
 expectTypeOf<DetectionModel>().toEqualTypeOf<NerBackend>()
 expectTypeOf<NerBackend>().toEqualTypeOf<DetectionModel>()

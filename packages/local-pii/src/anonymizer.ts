@@ -22,9 +22,9 @@ export interface AnonymizerOptions {
   /** Deterministic detectors. `"default"` (built-ins), `"none"`, or a custom list. */
   detectors?: Detector[] | "default" | "none"
   /** Detection model for names/addresses. `false`/omitted = regex + dictionary only. */
-  detection?: DetectionModel | false
+  detection?: DetectionModel | false | undefined
   /** Legacy name for the detection model. `false`/omitted = regex + dictionary only. */
-  ner?: NerBackend | false
+  ner?: NerBackend | false | undefined
   /** User terms to always redact (own name, family, employer…). */
   dictionary?: DictionaryEntry[]
   /** Placeholder scheme. Default {@link sequential}. */
