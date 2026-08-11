@@ -506,6 +506,7 @@ describe("withPiiOpenAI client surface compatibility", () => {
       messages: [{ role: "user", content: "email ana@acme.com" }],
     }) as Promise<unknown> & { asResponse(): Promise<Response> }
     expect(result).toBeInstanceOf(Promise)
+    void result.then
     const rawResponse = await result.asResponse()
     expect(providerCalls).toBe(1)
     expect(thenCalls).toBe(0)

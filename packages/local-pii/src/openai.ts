@@ -193,10 +193,15 @@ function deferredApiPromise<T>(
         property === "catch" ||
         property === "finally"
       ) {
-        const operationTarget = getOperation()
-        return Reflect.get(operationTarget, property, operationTarget).bind(
-          operationTarget
-        )
+        return (...args: unknown[]) => {
+          const operationTarget = getOperation()
+          const method = Reflect.get(
+            operationTarget,
+            property,
+            operationTarget
+          ) as (...methodArgs: unknown[]) => unknown
+          return method.apply(operationTarget, args)
+        }
       }
       if (property === "asResponse" || property === "withResponse")
         return helper(property)
