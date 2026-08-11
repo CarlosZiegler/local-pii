@@ -181,6 +181,23 @@ function restoreToolResultChunk(
   return { ...chunk, content: restoreJsonText(session, chunk.content) }
 }
 
+function nextWithAbort(
+  iterator: AsyncIterator<StreamChunk>,
+  signal?: AbortSignal
+): Promise<IteratorResult<StreamChunk>> {
+  if (!signal) return Promise.resolve(iterator.next())
+  signal.throwIfAborted()
+
+  let removeAbortListener = () => {}
+  const aborted = new Promise<never>((_, reject) => {
+    const onAbort = () => reject(signal.reason)
+    removeAbortListener = () => signal.removeEventListener("abort", onAbort)
+    signal.addEventListener("abort", onAbort, { once: true })
+  })
+  const next = Promise.resolve().then(() => iterator.next())
+  return Promise.race([next, aborted]).finally(removeAbortListener)
+}
+
 /** Restore one connection run with buffers isolated from every other run. */
 export function restoreTanStackStream(
   session: PiiSession,
@@ -195,7 +212,8 @@ export function restoreTanStackStream(
       const pending = new Map<string, { id: string; kind: "text" | "tool" }>()
       let upstreamDone = false
       let failed = false
-      let runError = false
+      let terminal: "finished" | "error" | undefined
+      let upstreamClosed = false
 
       const stateFor = (messageId: string) => {
         let state = text.get(messageId)
@@ -263,25 +281,23 @@ export function restoreTanStackStream(
       try {
         while (true) {
           signal?.throwIfAborted()
-          const next = await iterator.next()
+          const next = await nextWithAbort(iterator, signal)
           signal?.throwIfAborted()
 
           if (next.done) {
             upstreamDone = true
-            if (!runError) {
-              for (const chunk of flushAll({} as StreamChunk)) yield chunk
-            }
+            for (const chunk of flushAll({} as StreamChunk)) yield chunk
             return
           }
 
           const chunk = next.value
           if (chunk.type === "RUN_ERROR") {
-            runError = true
+            terminal = "error"
             text.clear()
             tools.clear()
             pending.clear()
             yield chunk
-            continue
+            return
           }
 
           if (chunk.type === "TEXT_MESSAGE_CONTENT") {
@@ -330,8 +346,9 @@ export function restoreTanStackStream(
 
           if (chunk.type === "RUN_FINISHED") {
             for (const tail of flushAll(chunk)) yield tail
+            terminal = "finished"
             yield chunk
-            continue
+            return
           }
 
           yield chunk
@@ -343,13 +360,16 @@ export function restoreTanStackStream(
         pending.clear()
         throw error
       } finally {
-        try {
-          if (!upstreamDone) await iterator.return?.()
-        } catch (cleanupError) {
-          if (!failed) {
-            // Cleanup is the primary failure only when stream processing succeeded.
-            // eslint-disable-next-line no-unsafe-finally -- preserve the cleanup error contract
-            throw cleanupError
+        if (!upstreamDone && !upstreamClosed) {
+          upstreamClosed = true
+          try {
+            await iterator.return?.()
+          } catch (cleanupError) {
+            if (!failed && terminal !== "error") {
+              // Cleanup is the primary failure only when stream processing succeeded.
+              // eslint-disable-next-line no-unsafe-finally -- preserve the cleanup error contract
+              throw cleanupError
+            }
           }
         }
       }

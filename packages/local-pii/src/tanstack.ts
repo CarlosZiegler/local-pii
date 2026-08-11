@@ -78,12 +78,19 @@ export function piiConnection<T extends ConnectConnectionAdapter>(
       TRUSTED_REFLECT_APPLY(pinnedHydrateGeneration, inner, args)
   }
   if (pinnedJoinRun) {
-    wrapped.joinRun = (runId, signal) =>
-      restoreTanStackStream(
-        options.session,
-        TRUSTED_REFLECT_APPLY(pinnedJoinRun, inner, [runId, signal]),
-        signal
-      )
+    wrapped.joinRun = (runId, signal) => {
+      const stream: AsyncIterable<StreamChunk> = {
+        async *[Symbol.asyncIterator]() {
+          signal?.throwIfAborted()
+          const upstream = TRUSTED_REFLECT_APPLY(pinnedJoinRun, inner, [
+            runId,
+            signal,
+          ])
+          yield* restoreTanStackStream(options.session, upstream, signal)
+        },
+      }
+      return stream
+    }
   }
 
   return wrapped

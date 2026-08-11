@@ -2434,6 +2434,50 @@ describe("piiConnection text streaming", () => {
     expect(JSON.parse(resultPart.content)).toEqual({ name: original })
   })
 
+  it("restores escaped tool JSON at every argument split boundary", async () => {
+    const original = 'Ana "Boss"\\Support\nLine'
+    const session = createAnonymizer({
+      dictionary: [{ value: original, type: "CUSTOM" }],
+      placeholders: token(),
+    }).createSession()
+    const protectedName = (await session.anonymize(original)).redactedText
+    const placeholder = protectedName.match(TOKEN)?.[0]
+    expect(placeholder).toBeDefined()
+    const args = JSON.stringify({ name: placeholder!.toLowerCase() })
+
+    for (let split = 0; split <= args.length; split += 1) {
+      const inner: ConnectConnectionAdapter = {
+        connect: () =>
+          (async function* () {
+            yield {
+              type: EventType.TOOL_CALL_ARGS,
+              toolCallId: "tool-split",
+              delta: args.slice(0, split),
+            } satisfies StreamChunk
+            yield {
+              type: EventType.TOOL_CALL_ARGS,
+              toolCallId: "tool-split",
+              delta: args.slice(split),
+            } satisfies StreamChunk
+            yield {
+              type: EventType.TOOL_CALL_END,
+              toolCallId: "tool-split",
+            } satisfies StreamChunk
+          })(),
+      }
+      const chunks = await collect(
+        piiConnection(inner, { session }).connect([
+          { role: "user", content: "Run tool" },
+        ])
+      )
+      const restoredArgs = chunks
+        .filter((chunk) => chunk.type === EventType.TOOL_CALL_ARGS)
+        .map((chunk) => chunk.delta)
+        .join("")
+      expect(JSON.parse(restoredArgs)).toEqual({ name: original })
+    }
+  })
+
   it("isolates overlapping message and tool buffers while retaining stable tokens", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const waitForText = barrier(2)
@@ -2794,5 +2838,458 @@ describe("piiConnection text streaming", () => {
     expect(hydrate).toHaveBeenCalledWith("thread-1")
     expect(hydrateGeneration).toHaveBeenCalledWith("thread-1")
     expect(joinRun).toHaveBeenCalledWith("run-1", controller.signal)
+  })
+
+  it.each([
+    ["connect", EventType.RUN_FINISHED],
+    ["connect", EventType.RUN_ERROR],
+    ["joinRun", EventType.RUN_FINISHED],
+    ["joinRun", EventType.RUN_ERROR],
+  ] as const)(
+    "%s stops consuming after terminal %s and awaits upstream return",
+    async (entrypoint, terminalType) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      let nextCalls = 0
+      let returnCalls = 0
+      let returnResolved = false
+      const terminal =
+        terminalType === EventType.RUN_FINISHED
+          ? ({
+              type: terminalType,
+              threadId: "thread-1",
+              runId: "run-1",
+            } satisfies StreamChunk)
+          : ({
+              type: terminalType,
+              message: "provider failed",
+            } satisfies StreamChunk)
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              nextCalls += 1
+              if (nextCalls === 1)
+                return { done: false as const, value: terminal }
+              if (nextCalls === 2)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "must-not-be-read",
+                    delta: "leaked after terminal",
+                  } satisfies StreamChunk,
+                }
+              return { done: true as const, value: undefined }
+            },
+            async return() {
+              returnCalls += 1
+              await Promise.resolve()
+              returnResolved = true
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+
+      const chunks = await collect(
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      )
+
+      expect(chunks).toEqual([terminal])
+      expect(nextCalls).toBe(1)
+      expect(returnCalls).toBe(1)
+      expect(returnResolved).toBe(true)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "cancels a pending upstream next when the caller aborts through %s",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const controller = new AbortController()
+      const abortReason = new Error("abort while waiting")
+      let resolveNext!: (result: IteratorResult<StreamChunk>) => void
+      let nextCalled = false
+      let nextResolved = false
+      let returnCalled = false
+      let returnBeforeNextResolved = false
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              nextCalled = true
+              return new Promise<IteratorResult<StreamChunk>>((resolve) => {
+                resolveNext = (result) => {
+                  nextResolved = true
+                  resolve(result)
+                }
+              })
+            },
+            async return() {
+              returnCalled = true
+              returnBeforeNextResolved = !nextResolved
+              resolveNext({ done: true, value: undefined })
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const wrapped = piiConnection(inner, { session })
+      const stream =
+        entrypoint === "connect"
+          ? wrapped.connect(
+              [{ role: "user", content: "hello" }],
+              undefined,
+              controller.signal
+            )
+          : wrapped.joinRun!("run-1", controller.signal)
+      const iterator = stream[Symbol.asyncIterator]()
+      const pending = iterator.next()
+      const observed = pending.catch((error: unknown) => error)
+
+      try {
+        for (let attempt = 0; !nextCalled && attempt < 10; attempt += 1)
+          await new Promise((resolve) => setTimeout(resolve, 0))
+        expect(nextCalled).toBe(true)
+        controller.abort(abortReason)
+        await new Promise((resolve) => setTimeout(resolve, 10))
+        expect(returnCalled).toBe(true)
+        expect(returnBeforeNextResolved).toBe(true)
+        await expect(observed).resolves.toBe(abortReason)
+      } finally {
+        resolveNext?.({ done: true, value: undefined })
+        await observed
+      }
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "preserves primary %s failure when upstream cleanup also fails",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const primary = new Error(`${entrypoint} primary`)
+      const cleanup = new Error(`${entrypoint} cleanup`)
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          let calls = 0
+          return {
+            async next() {
+              calls += 1
+              if (calls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "message-1",
+                    delta: "safe",
+                  } satisfies StreamChunk,
+                }
+              throw primary
+            },
+            async return() {
+              throw cleanup
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const wrappedStream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = wrappedStream[Symbol.asyncIterator]()
+      await expect(iterator.next()).resolves.toMatchObject({ done: false })
+      await expect(iterator.next()).rejects.toBe(primary)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "surfaces cleanup failure after successful %s terminal completion",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const cleanup = new Error(`${entrypoint} cleanup`)
+      const terminal = {
+        type: EventType.RUN_FINISHED,
+        threadId: "thread-1",
+        runId: "run-1",
+      } satisfies StreamChunk
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          let calls = 0
+          return {
+            async next() {
+              calls += 1
+              if (calls === 1) return { done: false as const, value: terminal }
+              return { done: true as const, value: undefined }
+            },
+            async return() {
+              throw cleanup
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const wrappedStream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+
+      await expect(collect(wrappedStream)).rejects.toBe(cleanup)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "does not replace protocol failure with cleanup failure through %s",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const cleanup = new Error(`${entrypoint} cleanup`)
+      const terminal = {
+        type: EventType.RUN_ERROR,
+        message: "provider failed",
+      } satisfies StreamChunk
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          let called = false
+          return {
+            async next() {
+              if (!called) {
+                called = true
+                return { done: false as const, value: terminal }
+              }
+              return { done: true as const, value: undefined }
+            },
+            async return() {
+              throw cleanup
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const wrappedStream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+
+      await expect(collect(wrappedStream)).resolves.toEqual([terminal])
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "awaits upstream cleanup on early iterator return through %s",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      let closed = false
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          let calls = 0
+          return {
+            async next() {
+              calls += 1
+              if (calls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "message-1",
+                    delta: "prefix",
+                  } satisfies StreamChunk,
+                }
+              return new Promise<IteratorResult<StreamChunk>>(() => {})
+            },
+            async return() {
+              closed = true
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const wrappedStream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = wrappedStream[Symbol.asyncIterator]()
+
+      await iterator.next()
+      await iterator.return?.()
+
+      expect(closed).toBe(true)
+    }
+  )
+
+  it("restores joined runs only through the same live caller-owned session", async () => {
+    const original = "ana@acme.com"
+    const liveSession = createAnonymizer({
+      placeholders: token(),
+    }).createSession()
+    const protectedText = (await liveSession.anonymize(original)).redactedText
+    const placeholder = protectedText.match(TOKEN)?.[0]
+    expect(placeholder).toBeDefined()
+    const source = () =>
+      (async function* () {
+        yield {
+          type: EventType.TEXT_MESSAGE_CONTENT,
+          messageId: "joined-message",
+          delta: `${placeholder!.slice(0, 4)}`,
+        } satisfies StreamChunk
+        yield {
+          type: EventType.TEXT_MESSAGE_CONTENT,
+          messageId: "joined-message",
+          delta: placeholder!.slice(4),
+        } satisfies StreamChunk
+        yield {
+          type: EventType.TEXT_MESSAGE_END,
+          messageId: "joined-message",
+        } satisfies StreamChunk
+      })()
+    const inner: ConnectConnectionAdapter = {
+      connect: () => emptyStream(),
+      joinRun: () => source(),
+    }
+
+    const restored = await collect(
+      piiConnection(inner, { session: liveSession }).joinRun!("run-1")
+    )
+    const newSession = createAnonymizer({
+      placeholders: token(),
+    }).createSession()
+    const unresolved = await collect(
+      piiConnection(inner, { session: newSession }).joinRun!("run-1")
+    )
+
+    expect(
+      restored
+        .filter((chunk) => chunk.type === EventType.TEXT_MESSAGE_CONTENT)
+        .map((chunk) => chunk.delta)
+        .join("")
+    ).toBe(original)
+    expect(
+      unresolved
+        .filter((chunk) => chunk.type === EventType.TEXT_MESSAGE_CONTENT)
+        .map((chunk) => chunk.delta)
+        .join("")
+    ).toBe(placeholder)
+  })
+
+  it.each(["connect", "joinRun"] as const)(
+    "rejects pre-aborted %s before acquiring the upstream stream",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const controller = new AbortController()
+      const reason = new Error(`${entrypoint} pre-abort`)
+      controller.abort(reason)
+      const connect = vi.fn(() => emptyStream())
+      const joinRun = vi.fn(() => emptyStream())
+      const inner: ConnectConnectionAdapter = { connect, joinRun }
+      const wrapped = piiConnection(inner, { session })
+      const stream =
+        entrypoint === "connect"
+          ? wrapped.connect(
+              [{ role: "user", content: "hello" }],
+              undefined,
+              controller.signal
+            )
+          : wrapped.joinRun!("run-1", controller.signal)
+
+      await expect(collect(stream)).rejects.toBe(reason)
+      expect(connect).not.toHaveBeenCalled()
+      expect(joinRun).not.toHaveBeenCalled()
+    }
+  )
+
+  it("restores every complete tool value and textual tool error", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const input = (await session.anonymize("ana@acme.com")).redactedText
+    const output = (await session.anonymize("bob@example.net")).redactedText
+    const metadata = { source: "control" }
+    const originalEnd = {
+      type: EventType.TOOL_CALL_END,
+      toolCallId: "tool-complete",
+      toolCallName: "lookup",
+      id: "end-id",
+      metadata,
+      input: { request: { email: input } },
+      output: { owner: output },
+      result: JSON.stringify({ message: `failed for ${input}` }),
+    } as unknown as StreamChunk
+    const inner: ConnectConnectionAdapter = {
+      connect: () =>
+        (async function* () {
+          yield originalEnd
+          yield {
+            type: EventType.TOOL_CALL_RESULT,
+            messageId: "message-a",
+            toolCallId: "tool-complete",
+            content: `tool failed for ${output}`,
+          } satisfies StreamChunk
+        })(),
+    }
+
+    const chunks = await collect(
+      piiConnection(inner, { session }).connect([
+        { role: "user", content: "Run lookup" },
+      ])
+    )
+    const end = chunks.find(
+      (chunk) => chunk.type === EventType.TOOL_CALL_END
+    ) as Extract<StreamChunk, { type: "TOOL_CALL_END" }>
+    const error = chunks.find(
+      (chunk) => chunk.type === EventType.TOOL_CALL_RESULT
+    ) as Extract<StreamChunk, { type: "TOOL_CALL_RESULT" }>
+
+    expect(end.input).toEqual({ request: { email: "ana@acme.com" } })
+    expect(end.output).toEqual({ owner: "bob@example.net" })
+    expect(JSON.parse(end.result as string)).toEqual({
+      message: "failed for ana@acme.com",
+    })
+    expect(error.content).toBe("tool failed for bob@example.net")
+    expect(end.toolCallId).toBe("tool-complete")
+    expect((end as unknown as { metadata: unknown }).metadata).toBe(metadata)
   })
 })
