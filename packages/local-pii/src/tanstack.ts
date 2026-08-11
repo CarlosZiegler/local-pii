@@ -53,6 +53,11 @@ function lazyStream<T>(
         reject: (error: unknown) => void
       }>()
       let removeAbortListener = () => {}
+      const detachAbortListener = () => {
+        const remove = removeAbortListener
+        removeAbortListener = () => {}
+        remove()
+      }
 
       const settlePending = (
         kind: "return" | "abort" | "throw",
@@ -81,10 +86,16 @@ function lazyStream<T>(
 
       const ensureDelegate = () => {
         if (!initialization) {
-          initialization = initialize(() => closed).then((current) => {
-            delegate = current
-            return current
-          })
+          initialization = initialize(() => closed).then(
+            (current) => {
+              delegate = current
+              return current
+            },
+            (error) => {
+              detachAbortListener()
+              throw error
+            }
+          )
         }
         return initialization
       }
@@ -124,6 +135,7 @@ function lazyStream<T>(
         closeKind = "abort"
         closeReason = signal?.reason
         settlePending("abort", closeReason)
+        detachAbortListener()
         void close(closeReason, "abort").catch(() => undefined)
       }
 
@@ -142,21 +154,32 @@ function lazyStream<T>(
               return Promise.reject(closeReason)
             return Promise.resolve(completed<T>())
           }
-          const operation = nextTail.then(async () => {
-            if (closed) {
-              if (closeKind === "abort" || closeKind === "throw")
-                throw closeReason
-              return completed<T>()
-            }
-            const current = await ensureDelegate()
-            if (closed) {
-              if (closeKind === "abort" || closeKind === "throw")
-                throw closeReason
-              return completed<T>()
-            }
-            if (!current) return completed<T>()
-            return current.next(value)
-          })
+          const operation = nextTail
+            .then(async () => {
+              if (closed) {
+                if (closeKind === "abort" || closeKind === "throw")
+                  throw closeReason
+                return completed<T>()
+              }
+              const current = await ensureDelegate()
+              if (closed) {
+                if (closeKind === "abort" || closeKind === "throw")
+                  throw closeReason
+                return completed<T>()
+              }
+              if (!current) return completed<T>()
+              return current.next(value)
+            })
+            .then(
+              (result) => {
+                if (result.done) detachAbortListener()
+                return result
+              },
+              (error) => {
+                detachAbortListener()
+                throw error
+              }
+            )
           nextTail = operation.then(
             () => undefined,
             () => undefined
@@ -169,26 +192,53 @@ function lazyStream<T>(
           closeKind = "return"
           closeReason = value
           settlePending("return")
-          removeAbortListener()
+          detachAbortListener()
           return close(value)
         },
         throw(error?: unknown) {
           if (closed) return Promise.reject(error)
+          const current = delegate
+          if (current?.throw) {
+            let result: PromiseLike<IteratorResult<T>>
+            try {
+              result = current.throw(error)
+            } catch (throwError) {
+              closed = true
+              closeKind = "throw"
+              closeReason = throwError
+              settlePending("throw", throwError)
+              detachAbortListener()
+              return Promise.reject(throwError)
+            }
+            const throwing = Promise.resolve(result).then(
+              (thrown) => {
+                if (thrown.done) {
+                  closed = true
+                  closeKind = "return"
+                  closeReason = thrown.value
+                  settlePending("return")
+                  detachAbortListener()
+                }
+                return thrown
+              },
+              (throwError) => {
+                closed = true
+                closeKind = "throw"
+                closeReason = throwError
+                settlePending("throw", throwError)
+                detachAbortListener()
+                throw throwError
+              }
+            )
+            void throwing.catch(() => undefined)
+            return throwing
+          }
+
           closed = true
           closeKind = "throw"
           closeReason = error
           settlePending("throw", error)
-          removeAbortListener()
-
-          const current = delegate
-          if (current?.throw) {
-            try {
-              return Promise.resolve(current.throw(error))
-            } catch (throwError) {
-              return Promise.reject(throwError)
-            }
-          }
-
+          detachAbortListener()
           if (current?.return) {
             let cleanup: PromiseLike<IteratorResult<T>>
             try {

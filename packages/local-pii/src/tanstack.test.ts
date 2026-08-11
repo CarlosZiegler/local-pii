@@ -3252,6 +3252,238 @@ describe("piiConnection text streaming", () => {
   )
 
   it.each(["connect", "joinRun"] as const)(
+    "restores and continues after %s upstream throw recovery",
+    async (entrypoint) => {
+      const original = "ana@acme.com"
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const protectedContent = (await session.anonymize(original)).redactedText
+      const split = Math.floor(protectedContent.length / 2)
+      const continuation = " continuation after recovery ".repeat(3)
+      const primary = new Error(`${entrypoint} recovery throw`)
+      let thrown: unknown
+      let pulls = 0
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            async next() {
+              pulls += 1
+              if (pulls === 1)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "recovered-message",
+                    delta: protectedContent.slice(0, split),
+                  } satisfies StreamChunk,
+                }
+              if (pulls === 2)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_CONTENT,
+                    messageId: "recovered-message",
+                    delta: " after next",
+                  } satisfies StreamChunk,
+                }
+              if (pulls === 3)
+                return {
+                  done: false as const,
+                  value: {
+                    type: EventType.TEXT_MESSAGE_END,
+                    messageId: "recovered-message",
+                  } satisfies StreamChunk,
+                }
+              return { done: true as const, value: undefined }
+            },
+            async throw(value?: unknown) {
+              thrown = value
+              return {
+                done: false as const,
+                value: {
+                  type: EventType.TEXT_MESSAGE_CONTENT,
+                  messageId: "recovered-message",
+                  delta: protectedContent.slice(split) + continuation,
+                } satisfies StreamChunk,
+              }
+            },
+            async return() {
+              return { done: true as const, value: undefined }
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      const first = await iterator.next()
+      expect(first).toMatchObject({ done: false })
+      const recovered = await iterator.throw?.(primary)
+      expect(recovered).toMatchObject({ done: false })
+      expect(
+        (
+          recovered?.value as Extract<
+            StreamChunk,
+            { type: "TEXT_MESSAGE_CONTENT" }
+          >
+        ).delta
+      ).toContain(original)
+      expect(
+        (
+          recovered?.value as Extract<
+            StreamChunk,
+            { type: "TEXT_MESSAGE_CONTENT" }
+          >
+        ).delta
+      ).not.toContain(protectedContent)
+      const rest: StreamChunk[] = []
+      while (true) {
+        const next = await iterator.next()
+        if (next.done) break
+        rest.push(next.value)
+      }
+      const restoredText = [
+        ...(first.done ? [] : [first.value]),
+        ...(recovered?.done ? [] : recovered ? [recovered.value] : []),
+        ...rest,
+      ]
+        .filter(
+          (
+            chunk
+          ): chunk is Extract<StreamChunk, { type: "TEXT_MESSAGE_CONTENT" }> =>
+            chunk?.type === EventType.TEXT_MESSAGE_CONTENT
+        )
+        .map((chunk) => chunk.delta)
+        .join("")
+      expect(restoredText).toContain(original)
+      expect(restoredText).toContain("after next")
+      expect(restoredText).toContain(continuation)
+      expect(restoredText).not.toContain(protectedContent)
+      expect(thrown).toBe(primary)
+    }
+  )
+
+  it.each(["connect", "joinRun"] as const)(
+    "settles a pending next before surfacing %s return cleanup failure",
+    async (entrypoint) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const reason = `${entrypoint} return reason`
+      const cleanup = new Error(`${entrypoint} return cleanup`)
+      let nextCalled = false
+      let returnValue: unknown
+      const source: AsyncIterable<StreamChunk> = {
+        [Symbol.asyncIterator]() {
+          return {
+            next() {
+              nextCalled = true
+              return new Promise<IteratorResult<StreamChunk>>(() => {})
+            },
+            async return(value?: unknown) {
+              returnValue = value
+              throw cleanup
+            },
+          }
+        },
+      }
+      const inner: ConnectConnectionAdapter = {
+        connect: () => source,
+        joinRun: () => source,
+      }
+      const stream =
+        entrypoint === "connect"
+          ? piiConnection(inner, { session }).connect([
+              { role: "user", content: "hello" },
+            ])
+          : piiConnection(inner, { session }).joinRun!("run-1")
+      const iterator = stream[Symbol.asyncIterator]()
+      const pending = iterator.next()
+      for (let attempt = 0; !nextCalled && attempt < 20; attempt += 1)
+        await new Promise((resolve) => setTimeout(resolve, 0))
+      expect(nextCalled).toBe(true)
+
+      const closing = iterator.return?.(reason)
+      await expect(pending).resolves.toMatchObject({ done: true })
+      await expect(closing).rejects.toBe(cleanup)
+      expect(returnValue).toBe(reason)
+    }
+  )
+
+  it("removes lazy abort listeners after completion and initialization failure", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const controller = new AbortController()
+    const add = vi.spyOn(controller.signal, "addEventListener")
+    const remove = vi.spyOn(controller.signal, "removeEventListener")
+    const inner: ConnectConnectionAdapter = {
+      connect: () => emptyStream(),
+    }
+    const wrapped = piiConnection(inner, { session })
+    for (let index = 0; index < 3; index += 1) {
+      const iterator = wrapped
+        .connect(
+          [{ role: "user", content: `message-${index}` }],
+          undefined,
+          controller.signal
+        )
+        [Symbol.asyncIterator]()
+      await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    }
+    const addedAbortListeners = add.mock.calls.filter(
+      ([type]) => type === "abort"
+    )
+    expect(addedAbortListeners).toHaveLength(6)
+    for (const [, listener] of addedAbortListeners)
+      expect(
+        remove.mock.calls.some(
+          ([type, removedListener]) =>
+            type === "abort" && removedListener === listener
+        )
+      ).toBe(true)
+
+    const initializationError = new Error("initialization failed")
+    const failingController = new AbortController()
+    const failingAdd = vi.spyOn(failingController.signal, "addEventListener")
+    const failingRemove = vi.spyOn(
+      failingController.signal,
+      "removeEventListener"
+    )
+    const failing = piiConnection(
+      {
+        connect: () => {
+          throw initializationError
+        },
+      },
+      { session }
+    )
+    const failingIterator = failing
+      .connect(
+        [{ role: "user", content: "initialization" }],
+        undefined,
+        failingController.signal
+      )
+      [Symbol.asyncIterator]()
+    await expect(failingIterator.next()).rejects.toBe(initializationError)
+    const [, listener] =
+      failingAdd.mock.calls.find(([type]) => type === "abort") ?? []
+    expect(
+      failingRemove.mock.calls.some(
+        ([type, removedListener]) =>
+          type === "abort" && removedListener === listener
+      )
+    ).toBe(true)
+  })
+
+  it.each(["connect", "joinRun"] as const)(
     "settles promptly when a native async generator ignores abort through %s",
     async (entrypoint) => {
       const session = createAnonymizer({

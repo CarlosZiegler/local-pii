@@ -279,6 +279,7 @@ export function restoreTanStackStream(
         resolve: (result: IteratorResult<StreamChunk>) => void
         reject: (error: unknown) => void
       }>()
+      const queued: StreamChunk[] = []
 
       const settlePending = (
         kind: "return" | "abort" | "throw",
@@ -310,6 +311,7 @@ export function restoreTanStackStream(
         text.clear()
         tools.clear()
         pending.clear()
+        queued.length = 0
       }
 
       const beginReturn = (
@@ -397,6 +399,68 @@ export function restoreTanStackStream(
         return output
       }
 
+      const restoreChunk = (chunk: StreamChunk): StreamChunk[] => {
+        if (chunk.type === "RUN_ERROR") {
+          // Agent loops can emit a failed turn and then continue with a tool
+          // result or a later answer. The failed turn's partial buffers are
+          // never valid tails, but the source must drain.
+          clear()
+          return [chunk]
+        }
+
+        if (chunk.type === "TEXT_MESSAGE_CONTENT") {
+          const content = chunk as TextContentChunk
+          const state = stateFor(content.messageId)
+          const protectedDelta = normalizeProtectedIncrement(
+            state,
+            content.delta,
+            content.content
+          )
+          const delta = state.rehydrator.push(protectedDelta)
+          return [incrementalTextChunk(content, delta)]
+        }
+
+        if (chunk.type === "TOOL_CALL_ARGS") {
+          const args = chunk as ToolArgsChunk
+          const state = toolStateFor(args.toolCallId)
+          normalizeProtectedIncrement(state, args.delta, args.args)
+          // Tool arguments are JSON. Buffer them until a successful boundary
+          // so JSON escaping and strategy-aware lenient restoration happen
+          // on parsed values, never on unsafe string fragments.
+          return [incrementalToolArgsChunk(args, "")]
+        }
+
+        if (chunk.type === "TEXT_MESSAGE_END") {
+          const tail = flushOne(chunk as TextEndChunk)
+          return [...(tail ? [tail] : []), chunk]
+        }
+
+        if (chunk.type === "TOOL_CALL_END") {
+          const end = chunk as ToolEndChunk
+          const tail = flushOneTool(end)
+          return [...(tail ? [tail] : []), restoreToolEndChunk(session, end)]
+        }
+
+        if (chunk.type === "TOOL_CALL_RESULT") {
+          return [restoreToolResultChunk(session, chunk as ToolResultChunk)]
+        }
+
+        if (chunk.type === "RUN_FINISHED") {
+          return [...flushAll(chunk), chunk]
+        }
+
+        if (chunk.type === "CUSTOM") {
+          return [
+            restoreCustomChunk(
+              session,
+              chunk as Extract<StreamChunk, { type: "CUSTOM" }>
+            ),
+          ]
+        }
+
+        return [chunk]
+      }
+
       const run = async function* (): AsyncGenerator<StreamChunk> {
         try {
           const upstream = source[Symbol.asyncIterator]()
@@ -428,77 +492,7 @@ export function restoreTanStackStream(
               return
             }
 
-            const chunk = next.value
-            if (chunk.type === "RUN_ERROR") {
-              // Agent loops can emit a failed turn and then continue with a
-              // tool result or a later answer. The failed turn's partial
-              // buffers are never valid tails, but the source must drain.
-              clear()
-              yield chunk
-              continue
-            }
-
-            if (chunk.type === "TEXT_MESSAGE_CONTENT") {
-              const content = chunk as TextContentChunk
-              const state = stateFor(content.messageId)
-              const protectedDelta = normalizeProtectedIncrement(
-                state,
-                content.delta,
-                content.content
-              )
-              const delta = state.rehydrator.push(protectedDelta)
-              yield incrementalTextChunk(content, delta)
-              continue
-            }
-
-            if (chunk.type === "TOOL_CALL_ARGS") {
-              const args = chunk as ToolArgsChunk
-              const state = toolStateFor(args.toolCallId)
-              normalizeProtectedIncrement(state, args.delta, args.args)
-              // Tool arguments are JSON. Buffer them until a successful boundary
-              // so JSON escaping and strategy-aware lenient restoration happen
-              // on parsed values, never on unsafe string fragments.
-              yield incrementalToolArgsChunk(args, "")
-              continue
-            }
-
-            if (chunk.type === "TEXT_MESSAGE_END") {
-              const tail = flushOne(chunk as TextEndChunk)
-              if (tail) yield tail
-              yield chunk
-              continue
-            }
-
-            if (chunk.type === "TOOL_CALL_END") {
-              const end = chunk as ToolEndChunk
-              const tail = flushOneTool(end)
-              if (tail) yield tail
-              yield restoreToolEndChunk(session, end)
-              continue
-            }
-
-            if (chunk.type === "TOOL_CALL_RESULT") {
-              yield restoreToolResultChunk(session, chunk as ToolResultChunk)
-              continue
-            }
-
-            if (chunk.type === "RUN_FINISHED") {
-              // RUN_FINISHED marks one agent turn, not necessarily the source
-              // lifetime. Flush a valid current tail, then keep consuming.
-              for (const tail of flushAll(chunk)) yield tail
-              yield chunk
-              continue
-            }
-
-            if (chunk.type === "CUSTOM") {
-              yield restoreCustomChunk(
-                session,
-                chunk as Extract<StreamChunk, { type: "CUSTOM" }>
-              )
-              continue
-            }
-
-            yield chunk
+            for (const output of restoreChunk(next.value)) yield output
           }
         } catch (error) {
           if (signal?.aborted && !aborted) {
@@ -542,7 +536,12 @@ export function restoreTanStackStream(
             if (aborted) return Promise.reject(signal?.reason)
             return Promise.resolve(done())
           }
-          const operation = nextTail.then(() => generator.next(value))
+          const operation = nextTail.then(() => {
+            const queuedChunk = queued.shift()
+            return queuedChunk
+              ? { done: false as const, value: queuedChunk }
+              : generator.next(value)
+          })
           nextTail = operation.then(
             () => undefined,
             () => undefined
@@ -557,33 +556,64 @@ export function restoreTanStackStream(
           const cleanup = beginReturn(value)
           const closing = generator.return?.(value)
           void Promise.resolve(closing).catch(() => undefined)
-          if (nextInFlight) return Promise.resolve(done(value))
           return cleanup
             ? cleanup.then(() => done(value))
             : Promise.resolve(done(value))
         },
         throw(error?: unknown) {
-          clear()
           if (closed) return Promise.reject(error)
-          closed = true
-          settlePending("throw", error)
           const upstream = iterator
           if (upstream?.throw) {
-            upstreamClosed = true
-            returnStarted = true
             let result: PromiseLike<IteratorResult<StreamChunk>>
             try {
               result = upstream.throw(error)
             } catch (throwError) {
+              clear()
+              closed = true
+              settlePending("throw", throwError)
+              const cleanup = beginReturn(throwError)
+              void cleanup?.catch(() => undefined)
+              const closing = generator.return?.(throwError)
+              void Promise.resolve(closing).catch(() => undefined)
               return Promise.reject(throwError)
             }
-            const throwing = Promise.resolve(result)
+            const throwing = Promise.resolve(result).then(
+              (thrown) => {
+                if (thrown.done) {
+                  clear()
+                  upstreamDone = true
+                  upstreamClosed = true
+                  closed = true
+                  settlePending("return")
+                  const closing = generator.return?.(thrown.value)
+                  void Promise.resolve(closing).catch(() => undefined)
+                  return thrown
+                }
+                const restored = restoreChunk(thrown.value)
+                const [first, ...rest] = restored
+                queued.push(...rest)
+                return first
+                  ? { done: false as const, value: first }
+                  : { done: false as const, value: thrown.value }
+              },
+              (throwError) => {
+                clear()
+                closed = true
+                settlePending("throw", throwError)
+                const cleanup = beginReturn(throwError)
+                void cleanup?.catch(() => undefined)
+                const closing = generator.return?.(throwError)
+                void Promise.resolve(closing).catch(() => undefined)
+                throw throwError
+              }
+            )
             void throwing.catch(() => undefined)
-            const closing = generator.return?.(error)
-            void Promise.resolve(closing).catch(() => undefined)
             return throwing
           }
 
+          closed = true
+          clear()
+          settlePending("throw", error)
           const cleanup = beginReturn(error)
           const throwing = generator.throw?.(error)
           void Promise.resolve(throwing).catch(() => undefined)
