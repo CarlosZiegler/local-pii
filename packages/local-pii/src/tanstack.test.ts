@@ -1,5 +1,7 @@
 import {
   EventType,
+  type ContentPart,
+  type MessagePart,
   type ModelMessage,
   type StreamChunk,
   type UIMessage,
@@ -11,7 +13,10 @@ import type {
 import { describe, expect, it, vi } from "vitest"
 import { createAnonymizer } from "./anonymizer"
 import { token } from "./placeholder/strategies"
-import { piiConnection } from "./tanstack"
+import {
+  piiConnection,
+  UnsupportedTanStackSemanticContentError,
+} from "./tanstack"
 
 const TOKEN = /PII[0-9A-HJKMNP-TV-Z]+/
 
@@ -54,6 +59,278 @@ function deepFreeze<T>(value: T): T {
 }
 
 describe("piiConnection message protection", () => {
+  it("protects every pinned semantic part while preserving opaque parts and controls", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const calls: Array<Parameters<ConnectConnectionAdapter["connect"]>> = []
+    const inner: ConnectConnectionAdapter = {
+      connect(messages, data, signal, runContext) {
+        calls.push([messages, data, signal, runContext])
+        return emptyStream()
+      },
+    }
+    const wrapped = piiConnection(inner, { session })
+    const uiParts: Array<MessagePart> = [
+      { type: "text", content: "ui ana@acme.com" },
+      {
+        type: "image",
+        source: { type: "url", value: "https://img.test/ana@acme.com" },
+      },
+      {
+        type: "audio",
+        source: { type: "url", value: "https://audio.test/ana@acme.com" },
+      },
+      {
+        type: "video",
+        source: { type: "url", value: "https://video.test/ana@acme.com" },
+      },
+      {
+        type: "document",
+        source: { type: "url", value: "https://docs.test/ana@acme.com" },
+      },
+      {
+        type: "tool-call",
+        id: "call-ana@acme.com",
+        name: "lookup-ana@acme.com",
+        arguments: '{"email":"ana@acme.com"}',
+        input: { email: "ana@acme.com" },
+        output: { owner: "ana@acme.com" },
+        state: "complete",
+      },
+      {
+        type: "tool-result",
+        toolCallId: "call-ana@acme.com",
+        content: '{"email":"ana@acme.com"}',
+        state: "complete",
+        error: "Unable to notify ana@acme.com",
+      },
+      {
+        type: "thinking",
+        content: "reasoning ana@acme.com stays opaque",
+        signature: "sig-ana@acme.com",
+      },
+      {
+        type: "structured-output",
+        status: "complete",
+        raw: '{"email":"ana@acme.com"}',
+        data: { email: "ana@acme.com" },
+        reasoning: "reasoning ana@acme.com stays opaque",
+      },
+      {
+        type: "ui-resource",
+        resource: {
+          uri: "ui://ana@acme.com/resource",
+          mimeType: "text/html",
+          text: "resource ana@acme.com stays opaque",
+        },
+        toolCallId: "call-ana@acme.com",
+        toolName: "render-ana@acme.com",
+      },
+    ]
+    const modelContent: Array<ContentPart> = [
+      { type: "text", content: "model ana@acme.com" },
+      {
+        type: "image",
+        source: { type: "url", value: "https://img.test/ana@acme.com" },
+      },
+      {
+        type: "audio",
+        source: { type: "url", value: "https://audio.test/ana@acme.com" },
+      },
+      {
+        type: "video",
+        source: { type: "url", value: "https://video.test/ana@acme.com" },
+      },
+      {
+        type: "document",
+        source: { type: "url", value: "https://docs.test/ana@acme.com" },
+      },
+    ]
+    const uiMessage = deepFreeze({
+      id: "ui-id-ana@acme.com",
+      role: "assistant",
+      parts: uiParts,
+      createdAt: new Date("2026-08-11T10:00:00.000Z"),
+      unknownControl: { secret: "ana@acme.com" },
+    } as UIMessage & { unknownControl: unknown })
+    const modelMessage = deepFreeze({
+      role: "assistant",
+      content: modelContent,
+      id: "model-id-ana@acme.com",
+      name: "name-ana@acme.com",
+      thinking: [{ content: "thinking ana@acme.com" }],
+      unknownControl: { secret: "ana@acme.com" },
+    } as ModelMessage & { unknownControl: unknown })
+    const originalUi = structuredClone(uiMessage)
+    const originalModel = structuredClone(modelMessage)
+
+    await collect(wrapped.connect([uiMessage]))
+    await collect(wrapped.connect([modelMessage]))
+
+    const protectedUi = calls[0]![0][0] as UIMessage & {
+      unknownControl: unknown
+    }
+    const protectedParts = protectedUi.parts
+    expect(protectedParts[0]).toMatchObject({
+      type: "text",
+      content: expect.stringMatching(TOKEN),
+    })
+    expect(protectedParts[1]).toBe(uiParts[1])
+    expect(protectedParts[2]).toBe(uiParts[2])
+    expect(protectedParts[3]).toBe(uiParts[3])
+    expect(protectedParts[4]).toBe(uiParts[4])
+    expect(protectedParts[5]).toMatchObject({
+      type: "tool-call",
+      id: "call-ana@acme.com",
+      name: "lookup-ana@acme.com",
+      arguments: expect.stringMatching(TOKEN),
+      input: { email: expect.stringMatching(TOKEN) },
+      output: { owner: expect.stringMatching(TOKEN) },
+    })
+    expect(protectedParts[6]).toMatchObject({
+      type: "tool-result",
+      toolCallId: "call-ana@acme.com",
+      content: expect.stringMatching(TOKEN),
+      error: expect.stringMatching(TOKEN),
+    })
+    expect(protectedParts[7]).toBe(uiParts[7])
+    expect(protectedParts[8]).toMatchObject({
+      type: "structured-output",
+      status: "complete",
+      raw: expect.stringMatching(TOKEN),
+    })
+    expect(protectedParts[9]).toBe(uiParts[9])
+    expect(protectedUi.unknownControl).toBe(uiMessage.unknownControl)
+
+    const protectedModel = calls[1]![0][0] as ModelMessage & {
+      unknownControl: unknown
+    }
+    expect(protectedModel.content).toMatchObject([
+      { type: "text", content: expect.stringMatching(TOKEN) },
+      modelContent[1],
+      modelContent[2],
+      modelContent[3],
+      modelContent[4],
+    ])
+    if (!Array.isArray(protectedModel.content))
+      throw new Error("expected parts")
+    expect(protectedModel.content[1]).toBe(modelContent[1])
+    expect(protectedModel.content[4]).toBe(modelContent[4])
+    expect(protectedModel.id).toBe(modelMessage.id)
+    expect(protectedModel.name).toBe(modelMessage.name)
+    expect(protectedModel.thinking).toBe(modelMessage.thinking)
+    expect(protectedModel.unknownControl).toBe(modelMessage.unknownControl)
+    expect(uiMessage).toEqual(originalUi)
+    expect(modelMessage).toEqual(originalModel)
+  })
+
+  it.each([
+    ["UI parts", "parts"],
+    ["Model content", "content"],
+  ] as const)(
+    "rejects an unknown %s discriminant before connect and redacts the error",
+    async (_label, location) => {
+      const session = createAnonymizer({
+        placeholders: token(),
+      }).createSession()
+      const connect = vi.fn(() => emptyStream())
+      const wrapped = piiConnection({ connect }, { session })
+      const futurePart = {
+        type: "future-secret-part",
+        content: "ana@acme.com must never enter this error",
+        sibling: { secret: "ana@acme.com" },
+      }
+      const messages =
+        location === "parts"
+          ? ([
+              {
+                id: "ui-message",
+                role: "user" as const,
+                parts: [{ type: "text" as const, content: "safe" }, futurePart],
+              },
+            ] as unknown as Array<UIMessage>)
+          : ([
+              {
+                role: "user" as const,
+                content: [
+                  { type: "text" as const, content: "safe" },
+                  futurePart,
+                ],
+              },
+            ] as unknown as Array<ModelMessage>)
+
+      let caught: unknown
+      try {
+        await collect(wrapped.connect(messages))
+      } catch (error) {
+        caught = error
+      }
+
+      expect(caught).toBeInstanceOf(UnsupportedTanStackSemanticContentError)
+      expect(caught).toMatchObject({
+        name: "UnsupportedTanStackSemanticContentError",
+        path: [0, location, 1],
+        discriminant: "future-secret-part",
+      })
+      expect(String(caught)).toBe(
+        `UnsupportedTanStackSemanticContentError: Unsupported TanStack semantic content at $[0].${location}[1]: future-secret-part`
+      )
+      expect(String(caught)).not.toContain("ana@acme.com")
+      expect(caught).not.toHaveProperty("part")
+      expect(caught).not.toHaveProperty("cause")
+      expect(connect).not.toHaveBeenCalled()
+    }
+  )
+
+  it("preserves prototype-sensitive sibling keys and descriptors while protecting frozen inputs", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const connect = vi.fn(() => emptyStream())
+    const wrapped = piiConnection({ connect }, { session })
+    const textPart = Object.create(null) as Record<string, unknown>
+    const descriptors = Object.create(null) as Record<
+      string,
+      PropertyDescriptor
+    >
+    descriptors.type = { value: "text", enumerable: true }
+    descriptors.content = {
+      value: "ana@acme.com",
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    }
+    descriptors["__proto__"] = {
+      value: "sibling-ana@acme.com",
+      enumerable: true,
+      writable: false,
+      configurable: false,
+    }
+    Object.defineProperties(textPart, descriptors)
+    const message = deepFreeze({
+      id: "frozen",
+      role: "user" as const,
+      parts: [textPart],
+    } as unknown as UIMessage)
+
+    await collect(wrapped.connect([message]))
+
+    const firstCall = (connect.mock.calls as unknown as Array<unknown[]>)[0]!
+    const protectedMessages = firstCall[0] as Array<UIMessage>
+    const protectedPart = protectedMessages[0]!.parts[0] as unknown as Record<
+      string,
+      unknown
+    >
+    expect(protectedPart.content).toMatch(TOKEN)
+    expect(Object.getPrototypeOf(protectedPart)).toBe(null)
+    expect(
+      Object.prototype.hasOwnProperty.call(protectedPart, "__proto__")
+    ).toBe(true)
+    expect(protectedPart["__proto__"]).toBe("sibling-ana@acme.com")
+    expect(
+      Object.getOwnPropertyDescriptor(protectedPart, "content")
+    ).toMatchObject({ enumerable: true, writable: false, configurable: false })
+    expect(message.parts[0]).toBe(textPart)
+    expect(textPart.content).toBe("ana@acme.com")
+  })
+
   it("protects semantic UI and model content without mutating control fields", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const calls: Array<Parameters<ConnectConnectionAdapter["connect"]>> = []

@@ -1,8 +1,13 @@
 import type { StreamChunk } from "@tanstack/ai/client"
 import type { ConnectConnectionAdapter } from "@tanstack/ai-client"
 import type { PiiSession } from "./session"
-import { protectTanStackMessages } from "./tanstack-content"
+import {
+  protectTanStackMessages,
+  UnsupportedTanStackSemanticContentError,
+} from "./tanstack-content"
 import { restoreTanStackStream } from "./tanstack-stream"
+
+export { UnsupportedTanStackSemanticContentError }
 
 export interface PiiConnectionOptions {
   /** One caller-owned session per conversation or thread. */
