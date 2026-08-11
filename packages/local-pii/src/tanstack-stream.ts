@@ -237,8 +237,15 @@ function nextWithAbort(
   iterator: AsyncIterator<StreamChunk>,
   signal: AbortSignal | undefined,
   onAbort: () => void
-): Promise<IteratorResult<StreamChunk>> {
-  if (!signal) return Promise.resolve(iterator.next())
+): {
+  promise: Promise<IteratorResult<StreamChunk>>
+  cancel: () => void
+} {
+  if (!signal)
+    return {
+      promise: Promise.resolve(iterator.next()),
+      cancel: () => {},
+    }
   signal.throwIfAborted()
 
   let removeAbortListener = () => {}
@@ -251,7 +258,16 @@ function nextWithAbort(
     signal.addEventListener("abort", handleAbort, { once: true })
   })
   const next = Promise.resolve().then(() => iterator.next())
-  return Promise.race([next, aborted]).finally(removeAbortListener)
+  let canceled = false
+  const cancel = () => {
+    if (canceled) return
+    canceled = true
+    removeAbortListener()
+  }
+  return {
+    promise: Promise.race([next, aborted]).finally(cancel),
+    cancel,
+  }
 }
 
 /** Restore one connection run with buffers isolated from every other run. */
@@ -274,12 +290,34 @@ export function restoreTanStackStream(
       let pendingReturn: Promise<IteratorResult<StreamChunk>> | undefined
       let closed = false
       let nextInFlight = false
+      let cancelPendingNext = () => {}
       let nextTail: Promise<unknown> = Promise.resolve()
       const pendingNext = new Set<{
         resolve: (result: IteratorResult<StreamChunk>) => void
         reject: (error: unknown) => void
       }>()
       const queued: StreamChunk[] = []
+
+      let activeThrow:
+        | {
+            canceled: boolean
+            resolve: (result: IteratorResult<StreamChunk>) => void
+            reject: (error: unknown) => void
+          }
+        | undefined
+
+      const settleDelegatedThrow = (
+        kind: "return" | "abort" | "throw",
+        value?: unknown
+      ) => {
+        const gate = activeThrow
+        if (!gate) return
+        activeThrow = undefined
+        gate.canceled = true
+        if (kind === "return")
+          gate.resolve({ done: true, value: value as StreamChunk })
+        else gate.reject(value)
+      }
 
       const settlePending = (
         kind: "return" | "abort" | "throw",
@@ -469,15 +507,21 @@ export function restoreTanStackStream(
             signal?.throwIfAborted()
             nextInFlight = true
             let next: IteratorResult<StreamChunk>
+            const pending = nextWithAbort(upstream, signal, () => {
+              aborted = true
+              closed = true
+              settleDelegatedThrow("abort", signal?.reason)
+              settlePending("abort", signal?.reason)
+              clear()
+              beginReturn(signal?.reason)
+            })
+            cancelPendingNext = pending.cancel
             try {
-              next = await nextWithAbort(upstream, signal, () => {
-                aborted = true
-                closed = true
-                settlePending("abort", signal?.reason)
-                clear()
-                beginReturn(signal?.reason)
-              })
+              next = await pending.promise
             } finally {
+              pending.cancel()
+              if (cancelPendingNext === pending.cancel)
+                cancelPendingNext = () => {}
               nextInFlight = false
             }
             signal?.throwIfAborted()
@@ -498,6 +542,7 @@ export function restoreTanStackStream(
           if (signal?.aborted && !aborted) {
             aborted = true
             closed = true
+            settleDelegatedThrow("abort", signal.reason)
             settlePending("abort", signal.reason)
             clear()
             beginReturn(signal.reason)
@@ -552,7 +597,10 @@ export function restoreTanStackStream(
           clear()
           if (closed) return Promise.resolve(done(value))
           closed = true
-          settlePending("return")
+          const aborting = signal?.aborted && signal.reason === value
+          cancelPendingNext()
+          settleDelegatedThrow(aborting ? "abort" : "return", value)
+          settlePending(aborting ? "abort" : "return", value)
           const cleanup = beginReturn(value)
           const closing = generator.return?.(value)
           void Promise.resolve(closing).catch(() => undefined)
@@ -562,12 +610,31 @@ export function restoreTanStackStream(
         },
         throw(error?: unknown) {
           if (closed) return Promise.reject(error)
+          cancelPendingNext()
+          settlePending("throw", error)
           const upstream = iterator
           if (upstream?.throw) {
+            let resolveGate!: (result: IteratorResult<StreamChunk>) => void
+            let rejectGate!: (error: unknown) => void
+            const gate = {
+              canceled: false,
+              resolve: (result: IteratorResult<StreamChunk>) =>
+                resolveGate(result),
+              reject: (throwError: unknown) => rejectGate(throwError),
+            }
+            const closeGate = new Promise<IteratorResult<StreamChunk>>(
+              (resolve, reject) => {
+                resolveGate = resolve
+                rejectGate = reject
+              }
+            )
+            activeThrow = gate
             let result: PromiseLike<IteratorResult<StreamChunk>>
             try {
               result = upstream.throw(error)
             } catch (throwError) {
+              if (activeThrow === gate) activeThrow = undefined
+              gate.canceled = true
               clear()
               closed = true
               settlePending("throw", throwError)
@@ -577,26 +644,41 @@ export function restoreTanStackStream(
               void Promise.resolve(closing).catch(() => undefined)
               return Promise.reject(throwError)
             }
-            const throwing = Promise.resolve(result).then(
+            const delegated = Promise.resolve(result).then(
               (thrown) => {
-                if (thrown.done) {
+                if (gate.canceled) return thrown
+                activeThrow = undefined
+                try {
+                  if (thrown.done) {
+                    clear()
+                    upstreamDone = true
+                    upstreamClosed = true
+                    closed = true
+                    settlePending("return")
+                    const closing = generator.return?.(thrown.value)
+                    void Promise.resolve(closing).catch(() => undefined)
+                    return thrown
+                  }
+                  const restored = restoreChunk(thrown.value)
+                  const [first, ...rest] = restored
+                  queued.push(...rest)
+                  return first
+                    ? { done: false as const, value: first }
+                    : { done: false as const, value: thrown.value }
+                } catch (restoreError) {
                   clear()
-                  upstreamDone = true
-                  upstreamClosed = true
                   closed = true
-                  settlePending("return")
-                  const closing = generator.return?.(thrown.value)
+                  settlePending("throw", restoreError)
+                  const cleanup = beginReturn(restoreError)
+                  void cleanup?.catch(() => undefined)
+                  const closing = generator.return?.(restoreError)
                   void Promise.resolve(closing).catch(() => undefined)
-                  return thrown
+                  throw restoreError
                 }
-                const restored = restoreChunk(thrown.value)
-                const [first, ...rest] = restored
-                queued.push(...rest)
-                return first
-                  ? { done: false as const, value: first }
-                  : { done: false as const, value: thrown.value }
               },
               (throwError) => {
+                if (gate.canceled) throw throwError
+                activeThrow = undefined
                 clear()
                 closed = true
                 settlePending("throw", throwError)
@@ -607,6 +689,9 @@ export function restoreTanStackStream(
                 throw throwError
               }
             )
+            void delegated.catch(() => undefined)
+            void closeGate.catch(() => undefined)
+            const throwing = Promise.race([delegated, closeGate])
             void throwing.catch(() => undefined)
             return throwing
           }
