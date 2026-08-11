@@ -392,6 +392,66 @@ describe("Gemma browser-generation runtime", () => {
     expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
   })
 
+  it("registers, replaces, and removes IDL overflow handlers without double dispatch", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const firstContextHandler = vi.fn()
+    let observedThis: LanguageModel | undefined
+    let observedTarget: EventTarget | null = null
+    let observedCurrentTarget: EventTarget | null = null
+    let observedPhase = 0
+    const secondContextHandler = vi.fn(function (
+      this: LanguageModel,
+      event: Event
+    ) {
+      observedThis = this
+      observedTarget = event.target
+      observedCurrentTarget = event.currentTarget
+      observedPhase = event.eventPhase
+    })
+    const firstQuotaHandler = vi.fn()
+    const secondQuotaHandler = vi.fn()
+    session.oncontextoverflow = firstContextHandler
+    expect(session.oncontextoverflow).toBe(firstContextHandler)
+    session.oncontextoverflow = secondContextHandler
+    expect(session.oncontextoverflow).toBe(secondContextHandler)
+    session.onquotaoverflow = firstQuotaHandler
+    session.onquotaoverflow = secondQuotaHandler
+    expect(session.onquotaoverflow).toBe(secondQuotaHandler)
+
+    const pair = [
+      { role: "user" as const, content: turn },
+      { role: "assistant" as const, content: answer },
+    ]
+    await session.append(pair)
+    await session.append(pair)
+    await session.append(pair)
+
+    expect(firstContextHandler).not.toHaveBeenCalled()
+    expect(secondContextHandler).toHaveBeenCalledOnce()
+    expect(firstQuotaHandler).not.toHaveBeenCalled()
+    expect(secondQuotaHandler).toHaveBeenCalledOnce()
+    expect(observedThis).toBe(session)
+    expect(observedTarget).toBe(session)
+    expect(observedCurrentTarget).toBe(session)
+    expect(observedPhase).toBe(Event.AT_TARGET)
+
+    session.oncontextoverflow = null
+    session.onquotaoverflow = null
+    expect(session.oncontextoverflow).toBeNull()
+    expect(session.onquotaoverflow).toBeNull()
+    await session.append(pair)
+    expect(secondContextHandler).toHaveBeenCalledOnce()
+    expect(secondQuotaHandler).toHaveBeenCalledOnce()
+  })
+
   it("retains the completion of a user-ended initial anchor during eviction", async () => {
     const turn = "u".repeat(8_000 * 4)
     const answer = "a".repeat(8_000 * 4)

@@ -334,8 +334,55 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
 
   topK = 0
   temperature = 0
-  oncontextoverflow: ((this: LanguageModel, ev: Event) => unknown) | null = null
-  onquotaoverflow: ((this: LanguageModel, ev: Event) => unknown) | null = null
+  private contextOverflowHandler:
+    ((this: LanguageModel, ev: Event) => unknown) | null = null
+  private contextOverflowListener: EventListener | null = null
+  private quotaOverflowHandler:
+    ((this: LanguageModel, ev: Event) => unknown) | null = null
+  private quotaOverflowListener: EventListener | null = null
+
+  get oncontextoverflow():
+    ((this: LanguageModel, ev: Event) => unknown) | null {
+    return this.contextOverflowHandler
+  }
+
+  set oncontextoverflow(
+    handler: ((this: LanguageModel, ev: Event) => unknown) | null
+  ) {
+    if (this.contextOverflowListener) {
+      this.removeEventListener("contextoverflow", this.contextOverflowListener)
+    }
+    this.contextOverflowHandler = handler
+    this.contextOverflowListener = null
+    if (handler) {
+      const listener: EventListener = (event) => {
+        handler.call(this, event)
+      }
+      this.contextOverflowListener = listener
+      this.addEventListener("contextoverflow", listener)
+    }
+  }
+
+  get onquotaoverflow(): ((this: LanguageModel, ev: Event) => unknown) | null {
+    return this.quotaOverflowHandler
+  }
+
+  set onquotaoverflow(
+    handler: ((this: LanguageModel, ev: Event) => unknown) | null
+  ) {
+    if (this.quotaOverflowListener) {
+      this.removeEventListener("quotaoverflow", this.quotaOverflowListener)
+    }
+    this.quotaOverflowHandler = handler
+    this.quotaOverflowListener = null
+    if (handler) {
+      const listener: EventListener = (event) => {
+        handler.call(this, event)
+      }
+      this.quotaOverflowListener = listener
+      this.addEventListener("quotaoverflow", listener)
+    }
+  }
 
   private readonly sessionAbort = new AbortController()
   private readonly sessionAbortReason = new DOMException(
@@ -429,26 +476,9 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     return { history: fitted, evicted }
   }
 
-  private dispatchOverflowEvent(
-    type: "contextoverflow" | "quotaoverflow",
-    handler: ((this: LanguageModel, ev: Event) => unknown) | null
-  ): void {
-    const event = new Event(type)
-    try {
-      this.dispatchEvent(event)
-    } catch {
-      // EventTarget listeners do not make the generation operation fail.
-    }
-    try {
-      handler?.call(this, event)
-    } catch {
-      // IDL event-handler exceptions are reported independently of the call.
-    }
-  }
-
   private notifyContextOverflow(): void {
-    this.dispatchOverflowEvent("contextoverflow", this.oncontextoverflow)
-    this.dispatchOverflowEvent("quotaoverflow", this.onquotaoverflow)
+    this.dispatchEvent(new Event("contextoverflow"))
+    this.dispatchEvent(new Event("quotaoverflow"))
   }
 
   private requestFor(input: LanguageModelPrompt): {
