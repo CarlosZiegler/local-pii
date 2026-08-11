@@ -197,6 +197,35 @@ describe("managedGeneration", () => {
     })
   })
 
+  it("awaits cleanup before rejecting an explicit throw", async () => {
+    const releaseReturn = deferred<void>()
+    const returned = vi.fn(async () => {
+      await releaseReturn.promise
+      return { done: true as const, value: undefined }
+    })
+    const reader = managedGeneration(async () => ({
+      next: () => new Promise<IteratorResult<string>>(() => {}),
+      return: returned,
+    }))[Symbol.asyncIterator]()
+    const pending = reader.next()
+    const reason = new Error("explicit throw cleanup")
+    const thrown = reader.throw?.(reason)
+
+    await expect(pending).rejects.toBe(reason)
+    await vi.waitFor(() => expect(returned).toHaveBeenCalledOnce())
+    let finished = false
+    void thrown
+      ?.finally(() => {
+        finished = true
+      })
+      .catch(() => undefined)
+    await Promise.resolve()
+    expect(finished).toBe(false)
+
+    releaseReturn.resolve()
+    await expect(thrown).rejects.toBe(reason)
+  })
+
   it("rejects promptly when abort interrupts a pending open", async () => {
     const abort = new AbortController()
     const opening = deferred<AsyncIterator<string>>()

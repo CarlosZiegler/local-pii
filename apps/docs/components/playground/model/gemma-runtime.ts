@@ -17,12 +17,16 @@ import type {
 
 const MODEL_ID = "onnx-community/gemma-3-270m-it-ONNX"
 const MODEL_REVISION = "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
-const CONTEXT_WINDOW = 4096
+// Pinned Gemma 3 270M config: max_position_embeddings is 32768.
+const CONTEXT_WINDOW = 32_768
 
 function compatibleRole(role: unknown): ProtectedBrowserTurn["role"] {
   if (role === "system") return "system"
+  if (role === "user") return "user"
   if (role === "assistant") return "assistant"
-  return "user"
+  throw new TypeError(
+    `The Gemma fallback does not support the ${String(role)} message role`
+  )
 }
 
 interface InterruptableCriteria {
@@ -257,6 +261,17 @@ function estimateUsage(history: readonly ProtectedBrowserTurn[]): number {
   return Math.ceil(characters / 4)
 }
 
+function ensureContextWithinWindow(
+  history: readonly ProtectedBrowserTurn[]
+): void {
+  const usage = estimateUsage(history)
+  if (usage > CONTEXT_WINDOW) {
+    throw new RangeError(
+      `The Gemma compatibility context exceeds its ${CONTEXT_WINDOW}-token window`
+    )
+  }
+}
+
 function composeAbortSignals(
   sessionSignal: AbortSignal,
   callerSignal?: AbortSignal
@@ -330,6 +345,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
   ) {
     super()
     validateHistory(history)
+    ensureContextWithinWindow(history)
   }
 
   private ensureActive(): void {
@@ -360,6 +376,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     const history = [...this.history, ...turns.slice(0, -1)]
     validateConversation(history)
     validateHistory([...history, final])
+    ensureContextWithinWindow([...history, final])
     return { history, current: final.protectedContent, incoming: turns }
   }
 
@@ -374,6 +391,7 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
       { role: "assistant", protectedContent: output },
     ]
     validateHistory(nextHistory)
+    ensureContextWithinWindow(nextHistory)
     this.history.splice(0, this.history.length, ...nextHistory)
   }
 
@@ -436,11 +454,11 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
             controller.enqueue(next.value)
           }
         } catch (error) {
-          try {
-            await iterator.return?.()
-          } catch {
-            // Preserve the generation or abort error as the primary stream error.
-          }
+          // The primary generation/abort error must reach the reader even when
+          // an upstream generator ignores interruption forever.
+          void Promise.resolve()
+            .then(() => iterator.return?.())
+            .catch(() => undefined)
           release()
           controller.error(error)
         }
@@ -477,7 +495,9 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
     this.ensureActive()
     options.signal?.throwIfAborted()
     const turns = promptTurns(input)
-    validateHistory([...this.history, ...turns])
+    const nextHistory = [...this.history, ...turns]
+    validateHistory(nextHistory)
+    ensureContextWithinWindow(nextHistory)
     this.history.push(...turns)
     return undefined
   }
@@ -619,6 +639,10 @@ export function createGemmaBrowserRuntime(
       // cast: an unprotected object must fail before model loading.
       assertProtectedBrowserRequest(request)
       validateConversation(request.protectedHistory)
+      ensureContextWithinWindow([
+        ...request.protectedHistory,
+        { role: "user", protectedContent: request.protectedContent },
+      ])
 
       const createGeneration = () =>
         managedGeneration(async () => {

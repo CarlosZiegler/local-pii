@@ -26,7 +26,8 @@ class FakeTextStreamer {
 
 function fakeTransformers(
   tokens: readonly string[] = ["one ", "two ", "three"],
-  failure?: Error
+  failure?: Error,
+  stuckAfterFirst = false
 ) {
   const env: { experimental_useCrossOriginStorage?: boolean } = {}
   const promptMessages: Array<{ role: string; content: string }> = []
@@ -47,10 +48,13 @@ function fakeTransformers(
       ) => {
         if (disposed) throw new Error("used disposed generator")
         criteria.push(options.stopping_criteria[0]!)
-        for (const value of tokens) {
+        for (const [index, value] of tokens.entries()) {
           await new Promise((resolve) => setTimeout(resolve, 0))
           if (options.stopping_criteria[0]?.interrupted) break
           options.streamer.emit(value)
+          if (stuckAfterFirst && index === 0) {
+            await new Promise<void>(() => {})
+          }
         }
         if (generationFailure) {
           const error = generationFailure
@@ -193,6 +197,48 @@ describe("Gemma browser-generation runtime", () => {
     })
 
     expect(() => runtime.generate(malformed)).toThrow("alternating")
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("rejects unsupported compatibility roles before loading artifacts", async () => {
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+
+    await expect(
+      factory.create({
+        initialPrompts: [{ role: "tool" as never, content: "Unsupported" }],
+      })
+    ).rejects.toThrow("tool")
+
+    const session = await factory.create()
+    expect(() =>
+      session.promptStreaming([
+        { role: "tool" as never, content: "Unsupported" },
+        { role: "user", content: "Current" },
+      ])
+    ).toThrow("tool")
+    await expect(
+      session.append([{ role: "tool" as never, content: "Unsupported" }])
+    ).rejects.toThrow("tool")
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("rejects oversized compatibility context before loading artifacts", async () => {
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const oversized = "x".repeat(32_768 * 4 + 1)
+
+    await expect(
+      factory.create({ initialPrompts: [{ role: "user", content: oversized }] })
+    ).rejects.toThrow("32768")
+
+    const session = await factory.create()
+    expect(() => session.promptStreaming(oversized)).toThrow("32768")
+    await expect(session.append(oversized)).rejects.toThrow("32768")
     expect(fake.loadTransformers).not.toHaveBeenCalled()
   })
 
@@ -419,8 +465,8 @@ describe("Gemma browser-generation runtime", () => {
     const session = await factory.create()
 
     await expect(session.prompt("First question")).resolves.toBe("answer ")
-    expect(session.contextWindow).toBe(4096)
-    expect(session.inputQuota).toBe(4096)
+    expect(session.contextWindow).toBe(32_768)
+    expect(session.inputQuota).toBe(32_768)
     expect(session.contextUsage).toBe(
       Math.ceil("First questionanswer ".length / 4)
     )
@@ -650,6 +696,36 @@ describe("Gemma browser-generation runtime", () => {
     expect(fake.promptMessages).toEqual([
       { role: "user", content: "Next question" },
     ])
+  })
+
+  it("surfaces an abort before an ignored generator cleanup settles", async () => {
+    const fake = fakeTransformers(["partial ", "never"], undefined, true)
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const abort = new AbortController()
+    const stream = session.promptStreaming("Stuck question", {
+      signal: abort.signal,
+    })
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "partial ",
+    })
+    const pending = reader.read()
+    const reason = new DOMException("Caller stopped", "AbortError")
+    abort.abort(reason)
+
+    const outcome = await Promise.race([
+      pending.then(
+        () => "resolved",
+        (error) => error
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
+    ])
+    expect(outcome).toBe(reason)
+    session.destroy()
   })
 
   it("does not commit a cancelled prompt to session history", async () => {

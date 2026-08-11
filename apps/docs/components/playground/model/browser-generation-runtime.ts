@@ -264,7 +264,10 @@ export function managedGeneration(
         throw(error?: unknown) {
           fail(error)
           pendingErrorDelivered = true
-          return Promise.reject(error)
+          return settle().then(
+            () => Promise.reject(error),
+            () => Promise.reject(error)
+          )
         },
       }
       return iterator
