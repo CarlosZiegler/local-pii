@@ -23,6 +23,17 @@ const TRUSTED = {
   ownKeys: Reflect.ownKeys,
   reflectApply: Reflect.apply,
   hasOwnProperty: Object.prototype.hasOwnProperty,
+  mapConstructor: Map,
+  mapSet: Map.prototype.set,
+  mapGet: Map.prototype.get,
+  mapHas: Map.prototype.has,
+  setConstructor: Set,
+  setHas: Set.prototype.has,
+  weakSetConstructor: WeakSet,
+  weakSetAdd: WeakSet.prototype.add,
+  weakSetHas: WeakSet.prototype.has,
+  weakSetDelete: WeakSet.prototype.delete,
+  string: String,
 } as const
 
 function trustedApply<T>(
@@ -33,7 +44,41 @@ function trustedApply<T>(
   return TRUSTED.reflectApply(fn, receiver, args) as T
 }
 
-function plan<T extends object>(value: T): T {
+function trustedMapSet<K, V>(map: Map<K, V>, key: K, value: V): void {
+  trustedApply(TRUSTED.mapSet, map, [key, value])
+}
+
+function trustedMapGet<K, V>(map: ReadonlyMap<K, V>, key: K): V | undefined {
+  return trustedApply(TRUSTED.mapGet, map, [key])
+}
+
+function trustedMapHas<K, V>(map: ReadonlyMap<K, V>, key: K): boolean {
+  return trustedApply(TRUSTED.mapHas, map, [key])
+}
+
+function trustedSetHas<T>(set: ReadonlySet<T>, value: T): boolean {
+  return trustedApply(TRUSTED.setHas, set, [value])
+}
+
+function trustedWeakSetAdd<T extends object>(set: WeakSet<T>, value: T): void {
+  trustedApply(TRUSTED.weakSetAdd, set, [value])
+}
+
+function trustedWeakSetHas<T extends object>(
+  set: WeakSet<T>,
+  value: T
+): boolean {
+  return trustedApply(TRUSTED.weakSetHas, set, [value])
+}
+
+function trustedWeakSetDelete<T extends object>(
+  set: WeakSet<T>,
+  value: T
+): void {
+  trustedApply(TRUSTED.weakSetDelete, set, [value])
+}
+
+function freezeDetachedRecord<T extends object>(value: T): T {
   const detached = TRUSTED.objectCreate(null) as T
   const descriptors = TRUSTED.objectGetOwnPropertyDescriptors(value)
   const keys = TRUSTED.ownKeys(descriptors)
@@ -82,7 +127,7 @@ const PART_POLICY = {
 }
 
 const MAX_JSON_DEPTH = 128
-const SAFE_SEGMENTS = new Set([
+const SAFE_SEGMENTS = new TRUSTED.setConstructor([
   "id",
   "role",
   "type",
@@ -99,7 +144,7 @@ const SAFE_SEGMENTS = new Set([
   "status",
   "state",
 ])
-const SAFE_REASONS = new Set([
+const SAFE_REASONS = new TRUSTED.setConstructor([
   "<accessor>",
   "<ambiguous>",
   "<cycle>",
@@ -112,7 +157,7 @@ const SAFE_REASONS = new Set([
 ])
 
 function safeReason(reason: unknown): string {
-  return typeof reason === "string" && SAFE_REASONS.has(reason)
+  return typeof reason === "string" && trustedSetHas(SAFE_REASONS, reason)
     ? reason
     : "<unsupported>"
 }
@@ -125,7 +170,7 @@ function safePath(path: Path): Path {
     cleaned[index] =
       typeof part === "number" && Number.isSafeInteger(part) && part >= 0
         ? part
-        : typeof part === "string" && SAFE_SEGMENTS.has(part)
+        : typeof part === "string" && trustedSetHas(SAFE_SEGMENTS, part)
           ? part
           : "<field>"
   }
@@ -139,7 +184,7 @@ function printPath(path: Path): string {
     result =
       typeof part === "number"
         ? `${result}[${part}]`
-        : typeof part === "string" && SAFE_SEGMENTS.has(part)
+        : typeof part === "string" && trustedSetHas(SAFE_SEGMENTS, part)
           ? `${result}.${part}`
           : `${result}["<field>"]`
   }
@@ -180,11 +225,11 @@ function objectLike(value: unknown): value is object {
 }
 
 function hasToJSON(prototype: object | null): boolean {
-  const seen = new WeakSet<object>()
+  const seen = new TRUSTED.weakSetConstructor<object>()
   let current = prototype
   while (current !== null) {
-    if (seen.has(current)) return true
-    seen.add(current)
+    if (trustedWeakSetHas(seen, current)) return true
+    trustedWeakSetAdd(seen, current)
     const descriptor = TRUSTED.objectGetOwnPropertyDescriptor(current, "toJSON")
     if (descriptor) {
       if (!("value" in descriptor) || typeof descriptor.value === "function")
@@ -222,17 +267,17 @@ function capture(value: unknown, path: Path): Captured {
       ? descriptorMap.toJSON
       : undefined
     if (
-      (ownToJSON &&
-        (!("value" in ownToJSON) || typeof ownToJSON.value === "function")) ||
-      hasToJSON(prototype)
+      ownToJSON
+        ? !("value" in ownToJSON) || typeof ownToJSON.value === "function"
+        : hasToJSON(prototype)
     )
       return fail(path, "<unsupported>")
-    const lookup = new Map<PropertyKey, PropertyDescriptor>()
+    const lookup = new TRUSTED.mapConstructor<PropertyKey, PropertyDescriptor>()
     for (let index = 0; index < descriptors.length; index += 1) {
       const entry = descriptors[index]!
-      lookup.set(keyOf(entry[0]), entry[1])
+      trustedMapSet(lookup, keyOf(entry[0]), entry[1])
     }
-    return plan({
+    return freezeDetachedRecord({
       prototype,
       array: TRUSTED.arrayIsArray(value),
       descriptors: TRUSTED.objectFreeze(descriptors),
@@ -245,11 +290,11 @@ function capture(value: unknown, path: Path): Captured {
 }
 
 function keyOf(key: PropertyKey): PropertyKey {
-  return typeof key === "number" ? String(key) : key
+  return typeof key === "number" ? TRUSTED.string(key) : key
 }
 
 function descriptorPath(path: Path, key: PropertyKey): Path {
-  if (typeof key === "string" && SAFE_SEGMENTS.has(key))
+  if (typeof key === "string" && trustedSetHas(SAFE_SEGMENTS, key))
     return appendPath(path, key)
   if (typeof key === "string" && /^(?:0|[1-9]\d*)$/.test(key)) {
     const index = Number(key)
@@ -264,7 +309,7 @@ function descriptor(
   key: PropertyKey
 ): PropertyDescriptor | undefined {
   const wanted = keyOf(key)
-  return record.lookup.get(wanted)
+  return trustedMapGet(record.lookup, wanted)
 }
 
 type Field =
@@ -273,8 +318,8 @@ type Field =
 
 function field(record: Captured, key: PropertyKey): Field {
   const found = descriptor(record, key)
-  if (!found) return plan({ kind: "missing" })
-  return plan({ kind: "data", value: found.value })
+  if (!found) return freezeDetachedRecord({ kind: "missing" })
+  return freezeDetachedRecord({ kind: "data", value: found.value })
 }
 
 function required(record: Captured, key: PropertyKey, path: Path): unknown {
@@ -302,17 +347,20 @@ function snapshotArrayPrototype(): ArrayPrototypeFingerprint | null {
   try {
     const nodes: Array<ArrayPrototypeChainNode> = []
     let current: object | null = TRUSTED.arrayPrototype as object
-    const seen = new WeakSet<object>()
+    const seen = new TRUSTED.weakSetConstructor<object>()
     while (current !== null) {
-      if (seen.has(current)) return null
-      seen.add(current)
+      if (trustedWeakSetHas(seen, current)) return null
+      trustedWeakSetAdd(seen, current)
       const keys = TRUSTED.ownKeys(current)
-      const descriptors = new Map<PropertyKey, PropertyDescriptor>()
+      const descriptors = new TRUSTED.mapConstructor<
+        PropertyKey,
+        PropertyDescriptor
+      >()
       for (let index = 0; index < keys.length; index += 1) {
         const key = keys[index]!
         const descriptor = TRUSTED.objectGetOwnPropertyDescriptor(current, key)
         if (!descriptor) return null
-        descriptors.set(key, TRUSTED.objectFreeze({ ...descriptor }))
+        trustedMapSet(descriptors, key, TRUSTED.objectFreeze({ ...descriptor }))
       }
       const parent = TRUSTED.objectGetPrototypeOf(current)
       const node = TRUSTED.objectFreeze({
@@ -321,7 +369,7 @@ function snapshotArrayPrototype(): ArrayPrototypeFingerprint | null {
         keys: TRUSTED.objectFreeze(keys),
         descriptors,
       })
-      TRUSTED.objectDefineProperty(nodes, String(nodes.length), {
+      TRUSTED.objectDefineProperty(nodes, TRUSTED.string(nodes.length), {
         configurable: true,
         enumerable: true,
         writable: true,
@@ -372,8 +420,8 @@ function arrayPrototypeMatchesBaseline(): boolean {
       if (key !== actual.keys[keyIndex]) return false
       if (
         !sameDescriptor(
-          expected.descriptors.get(key!),
-          actual.descriptors.get(key!)
+          trustedMapGet(expected.descriptors, key!),
+          trustedMapGet(actual.descriptors, key!)
         )
       )
         return false
@@ -398,7 +446,7 @@ const SAFE_ARRAY_PROTOTYPE = (() => {
     for (let index = 0; index < arrayNode.keys.length; index += 1) {
       const key = arrayNode.keys[index]!
       if (key === "length" || key === "toJSON") continue
-      const descriptor = arrayNode.descriptors.get(key)
+      const descriptor = trustedMapGet(arrayNode.descriptors, key)
       if (!descriptor) continue
       if (!("value" in descriptor)) continue
       if (typeof descriptor.value !== "function") continue
@@ -447,8 +495,8 @@ function cloneRecord(
     if (record.array) TRUSTED.objectSetPrototypeOf(target, SAFE_ARRAY_PROTOTYPE)
     const define = (key: PropertyKey, original: PropertyDescriptor) => {
       const normalized = keyOf(key)
-      const replacement = overrides.has(normalized)
-        ? { ...original, value: overrides.get(normalized) }
+      const replacement = trustedMapHas(overrides, normalized)
+        ? { ...original, value: trustedMapGet(overrides, normalized) }
         : original
       TRUSTED.objectDefineProperty(target, key, replacement)
     }
@@ -508,7 +556,7 @@ function captureArray(value: unknown, path: Path): CapturedArray {
     if (!("value" in item)) return fail(appendPath(path, index), "<accessor>")
     values[index] = item.value
   }
-  return plan({
+  return freezeDetachedRecord({
     record,
     values: TRUSTED.objectFreeze(values),
   })
@@ -535,7 +583,7 @@ function captureJson(
   value: unknown,
   path: Path,
   depth = 0,
-  active = new WeakSet<object>()
+  active = new TRUSTED.weakSetConstructor<object>()
 ): PreparedJson {
   if (value === null || typeof value === "string" || typeof value === "boolean")
     return value
@@ -545,8 +593,8 @@ function captureJson(
       : fail(jsonValuePath(path), "<invalid-json>")
   if (!objectLike(value)) return fail(jsonValuePath(path), "<invalid-json>")
   if (depth > MAX_JSON_DEPTH) return fail(path, "<depth>")
-  if (active.has(value)) return fail(path, "<cycle>")
-  active.add(value)
+  if (trustedWeakSetHas(active, value)) return fail(path, "<cycle>")
+  trustedWeakSetAdd(active, value)
   try {
     const record = capture(value, path)
     if (record.array) {
@@ -622,7 +670,7 @@ function captureJson(
     }
     return TRUSTED.objectFreeze(output)
   } finally {
-    active.delete(value)
+    trustedWeakSetDelete(active, value)
   }
 }
 
@@ -657,10 +705,14 @@ function partialJson(text: string, path: Path): PreparedToolArguments {
   try {
     parsed = TRUSTED.jsonParse(text)
   } catch (error) {
-    if (error instanceof SyntaxError) return plan({ kind: "partial" })
+    if (error instanceof SyntaxError)
+      return freezeDetachedRecord({ kind: "partial" })
     throw error
   }
-  return plan({ kind: "json", value: captureJson(parsed, path) })
+  return freezeDetachedRecord({
+    kind: "json",
+    value: captureJson(parsed, path),
+  })
 }
 
 type Freeform =
@@ -672,10 +724,14 @@ function freeform(text: string, path: Path): Freeform {
   try {
     parsed = TRUSTED.jsonParse(text)
   } catch (error) {
-    if (error instanceof SyntaxError) return plan({ kind: "text", value: text })
+    if (error instanceof SyntaxError)
+      return freezeDetachedRecord({ kind: "text", value: text })
     throw error
   }
-  return plan({ kind: "json", value: captureJson(parsed, path) })
+  return freezeDetachedRecord({
+    kind: "json",
+    value: captureJson(parsed, path),
+  })
 }
 
 type PreparedPart =
@@ -733,7 +789,7 @@ function prepareParts(
   const captured = captureArray(value, path)
   const items = safeArray<PreparedPart>()
   for (let index = 0; index < captured.values.length; index += 1)
-    items[index] = plan(
+    items[index] = freezeDetachedRecord(
       preparePart(
         captured.values[index],
         appendPath(path, index),
@@ -741,7 +797,7 @@ function prepareParts(
         jsonText
       )
     )
-  return plan({
+  return freezeDetachedRecord({
     template: captured.record,
     items: TRUSTED.objectFreeze(items),
   })
@@ -805,7 +861,7 @@ function preparePart(
               )
           : strictJson(raw, appendPath(path, "raw"))
         : lenientJson(raw, appendPath(path, "raw"))
-    return plan({
+    return freezeDetachedRecord({
       kind: "structured-fallback",
       template,
       ...(json !== undefined ? { json } : {}),
@@ -904,13 +960,13 @@ function prepareToolCalls(value: unknown, path: Path): PreparedToolCalls {
     const functionTemplate = capture(functionValue, functionPath)
     const args = required(functionTemplate, "arguments", argumentsPath)
     if (typeof args !== "string") return fail(argumentsPath, "<invalid>")
-    items[index] = plan({
+    items[index] = freezeDetachedRecord({
       template,
       functionTemplate,
       args: strictJson(args, argumentsPath),
     })
   }
-  return plan({
+  return freezeDetachedRecord({
     template: captured.record,
     items: TRUSTED.objectFreeze(items),
   })
@@ -1031,15 +1087,17 @@ function captureMessages(messages: TanStackMessages): PreparedMessages {
   for (let index = 0; index < root.values.length; index += 1)
     records[index] = capture(root.values[index], appendPath([], index))
   if (records.length === 0)
-    return plan({
+    return freezeDetachedRecord({
       template: root.record,
       items: TRUSTED.objectFreeze(safeArray<PreparedMessage>()),
     })
   const family = classify(records)
   const items = safeArray<PreparedMessage>()
   for (let index = 0; index < records.length; index += 1)
-    items[index] = plan(prepareMessage(records[index]!, index, family))
-  return plan({
+    items[index] = freezeDetachedRecord(
+      prepareMessage(records[index]!, index, family)
+    )
+  return freezeDetachedRecord({
     template: root.record,
     items: TRUSTED.objectFreeze(items),
   })
@@ -1101,10 +1159,11 @@ async function renderParts(
   plan: PreparedPartList,
   path: Path
 ): Promise<object> {
-  const overrides = new Map<PropertyKey, unknown>()
+  const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
   for (let index = 0; index < plan.items.length; index += 1)
-    overrides.set(
-      String(index),
+    trustedMapSet(
+      overrides,
+      TRUSTED.string(index),
       await renderPart(session, plan.items[index]!, appendPath(path, index))
     )
   return cloneRecord(plan.template, overrides, path)
@@ -1115,39 +1174,59 @@ async function renderPart(
   plan: PreparedPart,
   path: Path
 ): Promise<object> {
-  if (plan.kind === "opaque") return cloneRecord(plan.template, new Map(), path)
+  if (plan.kind === "opaque")
+    return cloneRecord(
+      plan.template,
+      new TRUSTED.mapConstructor<PropertyKey, unknown>(),
+      path
+    )
   if (plan.kind === "text") {
-    const overrides = new Map<PropertyKey, unknown>()
-    overrides.set("content", await protectText(session, plan.text))
+    const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
+    trustedMapSet(overrides, "content", await protectText(session, plan.text))
     return cloneRecord(plan.template, overrides, path)
   }
   if (plan.kind === "freeform-text") {
-    const overrides = new Map<PropertyKey, unknown>()
-    overrides.set("content", await renderFreeform(session, plan.value))
+    const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
+    trustedMapSet(
+      overrides,
+      "content",
+      await renderFreeform(session, plan.value)
+    )
     return cloneRecord(plan.template, overrides, path)
   }
   if (plan.kind === "structured-fallback") {
-    const overrides = new Map<PropertyKey, unknown>()
-    overrides.set(
+    const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
+    trustedMapSet(
+      overrides,
       "raw",
       plan.json === undefined
         ? ""
         : TRUSTED.jsonStringify(await protectPreparedJson(session, plan.json))
     )
     if (plan.data !== undefined)
-      overrides.set("data", await protectPreparedJson(session, plan.data))
+      trustedMapSet(
+        overrides,
+        "data",
+        await protectPreparedJson(session, plan.data)
+      )
     if (plan.partial !== undefined)
-      overrides.set("partial", await protectPreparedJson(session, plan.partial))
+      trustedMapSet(
+        overrides,
+        "partial",
+        await protectPreparedJson(session, plan.partial)
+      )
     if (plan.errorMessage !== undefined)
-      overrides.set(
+      trustedMapSet(
+        overrides,
         "errorMessage",
         await protectText(session, plan.errorMessage)
       )
     return cloneRecord(plan.template, overrides, path)
   }
   if (plan.kind === "tool-call") {
-    const overrides = new Map<PropertyKey, unknown>()
-    overrides.set(
+    const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
+    trustedMapSet(
+      overrides,
       "arguments",
       plan.args.kind === "partial"
         ? ""
@@ -1156,18 +1235,26 @@ async function renderPart(
           )
     )
     if (plan.input !== undefined)
-      overrides.set("input", await protectPreparedJson(session, plan.input))
+      trustedMapSet(
+        overrides,
+        "input",
+        await protectPreparedJson(session, plan.input)
+      )
     if (plan.output !== undefined)
-      overrides.set("output", await protectPreparedJson(session, plan.output))
+      trustedMapSet(
+        overrides,
+        "output",
+        await protectPreparedJson(session, plan.output)
+      )
     return cloneRecord(plan.template, overrides, path)
   }
   const content = isFreeform(plan.content)
     ? await renderFreeform(session, plan.content)
     : await renderParts(session, plan.content, appendPath(path, "content"))
-  const overrides = new Map<PropertyKey, unknown>()
-  overrides.set("content", content)
+  const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
+  trustedMapSet(overrides, "content", content)
   if (plan.error !== undefined)
-    overrides.set("error", await protectText(session, plan.error))
+    trustedMapSet(overrides, "error", await protectText(session, plan.error))
   return cloneRecord(plan.template, overrides, path)
 }
 
@@ -1176,11 +1263,12 @@ async function renderToolCalls(
   plan: PreparedToolCalls,
   path: Path
 ): Promise<object> {
-  const overrides = new Map<PropertyKey, unknown>()
+  const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
   for (let index = 0; index < plan.items.length; index += 1) {
     const item = plan.items[index]!
-    const functionOverrides = new Map<PropertyKey, unknown>()
-    functionOverrides.set(
+    const functionOverrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
+    trustedMapSet(
+      functionOverrides,
       "arguments",
       TRUSTED.jsonStringify(await protectPreparedJson(session, item.args))
     )
@@ -1189,10 +1277,11 @@ async function renderToolCalls(
       functionOverrides,
       appendPath(path, index, "function")
     )
-    const itemOverrides = new Map<PropertyKey, unknown>()
-    itemOverrides.set("function", functionValue)
-    overrides.set(
-      String(index),
+    const itemOverrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
+    trustedMapSet(itemOverrides, "function", functionValue)
+    trustedMapSet(
+      overrides,
+      TRUSTED.string(index),
       cloneRecord(item.template, itemOverrides, appendPath(path, index))
     )
   }
@@ -1205,26 +1294,37 @@ async function renderMessage(
   index: number
 ): Promise<object> {
   if (plan.family === "ui") {
-    const overrides = new Map<PropertyKey, unknown>()
-    overrides.set(
+    const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
+    trustedMapSet(
+      overrides,
       "parts",
       await renderParts(session, plan.parts, appendPath([], index, "parts"))
     )
     return cloneRecord(plan.template, overrides, appendPath([], index))
   }
-  const overrides = new Map<PropertyKey, unknown>()
+  const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
   if (typeof plan.content === "string")
-    overrides.set("content", await protectText(session, plan.content))
-  else if (plan.content === null) overrides.set("content", null)
+    trustedMapSet(
+      overrides,
+      "content",
+      await protectText(session, plan.content)
+    )
+  else if (plan.content === null) trustedMapSet(overrides, "content", null)
   else if (isFreeform(plan.content))
-    overrides.set("content", await renderFreeform(session, plan.content))
+    trustedMapSet(
+      overrides,
+      "content",
+      await renderFreeform(session, plan.content)
+    )
   else
-    overrides.set(
+    trustedMapSet(
+      overrides,
       "content",
       await renderParts(session, plan.content, appendPath([], index, "content"))
     )
   if (plan.toolCalls)
-    overrides.set(
+    trustedMapSet(
+      overrides,
       "toolCalls",
       await renderToolCalls(
         session,
@@ -1241,10 +1341,11 @@ export async function protectTanStackMessages(
 ): Promise<TanStackMessages> {
   assertArrayPrototypeStable()
   const plan = captureMessages(messages)
-  const overrides = new Map<PropertyKey, unknown>()
+  const overrides = new TRUSTED.mapConstructor<PropertyKey, unknown>()
   for (let index = 0; index < plan.items.length; index += 1)
-    overrides.set(
-      String(index),
+    trustedMapSet(
+      overrides,
+      TRUSTED.string(index),
       await renderMessage(session, plan.items[index]!, index)
     )
   const protectedMessages = cloneRecord(

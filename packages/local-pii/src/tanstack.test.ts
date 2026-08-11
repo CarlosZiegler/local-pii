@@ -1148,19 +1148,22 @@ describe("piiConnection message protection", () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const connect = vi.fn(() => emptyStream())
     const wrapped = piiConnection({ connect }, { session })
-    const message = Object.assign(Object.create({ toJSON: "control" }), {
-      id: "non-callable-toJSON",
-      role: "assistant" as const,
-      toJSON: "control",
-      parts: [
-        {
-          type: "structured-output" as const,
-          status: "complete" as const,
-          raw: "",
-          data: { toJSON: "ana@acme.com" },
-        },
-      ],
-    }) as unknown as UIMessage
+    const message = Object.assign(
+      Object.create({ toJSON: () => "inherited raw" }),
+      {
+        id: "non-callable-toJSON",
+        role: "assistant" as const,
+        toJSON: "control",
+        parts: [
+          {
+            type: "structured-output" as const,
+            status: "complete" as const,
+            raw: "",
+            data: { toJSON: "ana@acme.com" },
+          },
+        ],
+      }
+    ) as unknown as UIMessage
 
     await collect(wrapped.connect([message]))
     const forwarded = (
@@ -1170,10 +1173,95 @@ describe("piiConnection message protection", () => {
     expect(
       (forwardedMessage as unknown as Record<string, unknown>).toJSON
     ).toBe("control")
+    expect(JSON.stringify(forwarded)).not.toContain("ana@acme.com")
     const part = forwardedMessage.parts[0]!
     if (part.type !== "structured-output")
       throw new Error("expected structured output")
     expect(part.data).toEqual({ toJSON: expect.stringMatching(TOKEN) })
+  })
+
+  it("uses captured Map and String intrinsics after anonymization yields", async () => {
+    const session = createAnonymizer({ placeholders: token() }).createSession()
+    const originalAnonymize = session.anonymize.bind(session)
+    const mapKeys = ["set", "get", "has"] as const
+    const mapDescriptors = {
+      set: Object.getOwnPropertyDescriptor(Map.prototype, "set")!,
+      get: Object.getOwnPropertyDescriptor(Map.prototype, "get")!,
+      has: Object.getOwnPropertyDescriptor(Map.prototype, "has")!,
+    }
+    const originalStringDescriptor = Object.getOwnPropertyDescriptor(
+      globalThis,
+      "String"
+    )!
+    vi.spyOn(session, "anonymize").mockImplementation(async (text) => {
+      const result = await originalAnonymize(text)
+      for (const key of mapKeys) {
+        const descriptor = mapDescriptors[key]
+        Object.defineProperty(Map.prototype, key, {
+          configurable: true,
+          get() {
+            Object.defineProperty(Map.prototype, key, descriptor)
+            if (key === "set")
+              return function (this: Map<unknown, unknown>) {
+                return this
+              }
+            if (key === "has") return () => false
+            return () => undefined
+          },
+        })
+      }
+      Object.defineProperty(globalThis, "String", {
+        configurable: true,
+        writable: true,
+        value: () => {
+          Object.defineProperty(globalThis, "String", originalStringDescriptor)
+          return "wrong-key"
+        },
+      })
+      return result
+    })
+
+    try {
+      const forwarded: Array<UIMessage>[] = []
+      const wrapped = piiConnection(
+        {
+          connect(messages) {
+            forwarded.push(messages as Array<UIMessage>)
+            return emptyStream()
+          },
+        },
+        { session }
+      )
+      await collect(
+        wrapped.connect([
+          {
+            id: "map-intrinsics",
+            role: "assistant",
+            parts: [
+              { type: "text", content: "ana@acme.com" },
+              {
+                type: "structured-output",
+                status: "complete",
+                raw: '{"email":"ana@acme.com"}',
+                data: { email: "ana@acme.com" },
+              },
+            ],
+          },
+        ] as unknown as Array<UIMessage>)
+      )
+      expect(JSON.stringify(forwarded)).not.toContain("ana@acme.com")
+      expect(forwarded[0]![0]!.parts[0]).toMatchObject({
+        content: expect.stringMatching(TOKEN),
+      })
+      expect(forwarded[0]![0]!.parts[1]).toMatchObject({
+        raw: expect.stringMatching(TOKEN),
+        data: { email: expect.stringMatching(TOKEN) },
+      })
+    } finally {
+      for (const key of mapKeys)
+        Object.defineProperty(Map.prototype, key, mapDescriptors[key])
+      Object.defineProperty(globalThis, "String", originalStringDescriptor)
+    }
   })
 
   it("rejects malformed tool-call JSON in included states", async () => {
