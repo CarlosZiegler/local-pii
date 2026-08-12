@@ -1,7 +1,7 @@
 {
   "name": "local-pii",
-  "version": "0.0.1",
-  "description": "On-device PII anonymization for Expo / React Native. Redact names, emails, phones and more locally before sending text to any LLM, then rehydrate the response. The mapping never leaves the device.",
+  "version": "0.1.0",
+  "description": "Adapter-first PII protection for Expo, React Native, browsers, and Node. Protect personal information before a model boundary, then restore it inside the caller's trust boundary.",
   "keywords": [
     "expo",
     "react-native",
@@ -72,6 +72,7 @@
     "build": "rslib build",
     "dev": "rslib build --watch",
     "test": "vitest run",
+    "test:matrix": "bun run build && node scripts/verify-import-matrix.mjs && tsc -p test/import-matrix/tsconfig.node.json && tsc -p test/import-matrix/tsconfig.bundler.json",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src",
@@ -135,6 +136,7 @@
     "@workspace/eslint-config": "workspace:*",
     "@workspace/typescript-config": "workspace:*",
     "ai": "^7.0.57",
+    "esbuild": "0.28.1",
     "eslint": "^9",
     "fast-check": "^4.9.0",
     "onnxruntime-node": "^1.27.0",

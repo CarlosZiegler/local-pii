@@ -50,12 +50,14 @@ export default function App() {
     try {
       // Lazily required so the native ONNX runtime only loads when AI is on —
       // the deterministic path keeps working in Expo Go.
-      const { rampart } = require("local-pii/expo") as typeof import("local-pii/expo")
+      const { rampart } =
+        require("local-pii/expo") as typeof import("local-pii/expo")
       return createAnonymizer({
-        ner: rampart({
+        detection: rampart({
           model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
         }),
-        onDegraded: (e) => setNote(`AI model unavailable, using rules only: ${e.message}`),
+        onDegraded: (e) =>
+          setNote(`AI model unavailable, using rules only: ${e.message}`),
       })
     } catch (e) {
       setNote(`Could not load the model: ${(e as Error).message}`)
@@ -89,8 +91,8 @@ export default function App() {
       <ScrollView contentContainerStyle={styles.content}>
         <Text style={[styles.title, { color: t.fg }]}>local-pii</Text>
         <Text style={[styles.subtitle, { color: t.muted }]}>
-          Anonymize on device → send only placeholders → rehydrate the reply. The
-          mapping never leaves your phone.
+          Anonymize on device → send only placeholders → rehydrate the reply.
+          The mapping never leaves your phone.
         </Text>
 
         <Text style={[styles.label, { color: t.muted }]}>Your note</Text>
@@ -98,13 +100,26 @@ export default function App() {
           value={text}
           onChangeText={setText}
           multiline
-          style={[styles.input, { color: t.fg, borderColor: t.border, backgroundColor: t.card }]}
+          style={[
+            styles.input,
+            { color: t.fg, borderColor: t.border, backgroundColor: t.card },
+          ]}
           placeholderTextColor={t.muted}
         />
 
         <View style={styles.row}>
-          <Toggle label="On-device AI (Rampart)" value={useNer} onValueChange={setUseNer} t={t} />
-          <Toggle label="Private mode" value={privateMode} onValueChange={setPrivateMode} t={t} />
+          <Toggle
+            label="On-device AI (Rampart)"
+            value={useNer}
+            onValueChange={setUseNer}
+            t={t}
+          />
+          <Toggle
+            label="Private mode"
+            value={privateMode}
+            onValueChange={setPrivateMode}
+            t={t}
+          />
         </View>
 
         <Pressable
@@ -167,16 +182,36 @@ function Toggle(props: {
   return (
     <View style={styles.toggle}>
       <Switch value={props.value} onValueChange={props.onValueChange} />
-      <Text style={[styles.toggleLabel, { color: props.t.fg }]}>{props.label}</Text>
+      <Text style={[styles.toggleLabel, { color: props.t.fg }]}>
+        {props.label}
+      </Text>
     </View>
   )
 }
 
-function Section(props: { title: string; t: Theme; mono?: boolean; children: string }) {
+function Section(props: {
+  title: string
+  t: Theme
+  mono?: boolean
+  children: string
+}) {
   return (
-    <View style={[styles.section, { backgroundColor: props.t.card, borderColor: props.t.border }]}>
-      <Text style={[styles.sectionTitle, { color: props.t.muted }]}>{props.title}</Text>
-      <Text style={[styles.sectionBody, props.mono && styles.mono, { color: props.t.fg }]}>
+    <View
+      style={[
+        styles.section,
+        { backgroundColor: props.t.card, borderColor: props.t.border },
+      ]}
+    >
+      <Text style={[styles.sectionTitle, { color: props.t.muted }]}>
+        {props.title}
+      </Text>
+      <Text
+        style={[
+          styles.sectionBody,
+          props.mono && styles.mono,
+          { color: props.t.fg },
+        ]}
+      >
         {props.children}
       </Text>
     </View>
@@ -228,7 +263,12 @@ const styles = StyleSheet.create({
   content: { padding: 20, paddingTop: 64, gap: 12 },
   title: { fontSize: 34, fontWeight: "800", letterSpacing: -0.5 },
   subtitle: { fontSize: 15, lineHeight: 21, marginBottom: 8 },
-  label: { fontSize: 12, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.6 },
+  label: {
+    fontSize: 12,
+    fontWeight: "600",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
   input: {
     minHeight: 120,
     borderWidth: 1,
@@ -251,11 +291,22 @@ const styles = StyleSheet.create({
   buttonText: { color: "#fff", fontSize: 16, fontWeight: "700" },
   note: { fontSize: 14, fontWeight: "500" },
   section: { borderWidth: 1, borderRadius: 14, padding: 14, gap: 6 },
-  sectionTitle: { fontSize: 11, fontWeight: "700", textTransform: "uppercase", letterSpacing: 0.6 },
+  sectionTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    textTransform: "uppercase",
+    letterSpacing: 0.6,
+  },
   sectionBody: { fontSize: 15, lineHeight: 22 },
   mono: { fontFamily: "Menlo", fontSize: 14 },
   chips: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  chip: { borderWidth: 1, borderRadius: 999, paddingVertical: 5, paddingHorizontal: 11, maxWidth: "100%" },
+  chip: {
+    borderWidth: 1,
+    borderRadius: 999,
+    paddingVertical: 5,
+    paddingHorizontal: 11,
+    maxWidth: "100%",
+  },
   chipType: { fontSize: 10, fontWeight: "800", letterSpacing: 0.4 },
   chipText: { fontSize: 13 },
 })
