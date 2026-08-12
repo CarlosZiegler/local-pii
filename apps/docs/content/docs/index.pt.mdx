@@ -6,8 +6,8 @@ description: Privacidade adapter-first para Expo, React Native, navegador e Node
 O **local-pii** protege informação pessoal antes que ela saia do dispositivo.
 Um adaptador de Detecção alimenta o anonymizer, uma sessão de privacidade
 possui uma conversa privada, e um adaptador de Geração ou callback inline chama
-o modelo de Geração escolhido. Apenas conteúdo protegido sai; o mapping privado
-fica local.
+o modelo de Geração escolhido. Apenas conteúdo protegido cruza a fronteira do
+provedor; o mapping privado fica dentro da fronteira de confiança do chamador.
 
 ```ts
 import { createAnonymizer, token } from "local-pii"
@@ -34,11 +34,13 @@ são modelos de Geração. `ner:` continua como alias de compatibilidade para
 ## Instalação
 
 ```bash
-bun add local-pii
+bun add local-pii onnxruntime-web @local-pii/model-rampart
 ```
 
-A Detecção determinística (emails, telefones, cartões, IBAN, SSN, IP e URLs)
-funciona no React Native, navegador e Node sem dependências extras.
+O quickstart usa Rampart no navegador, cujos peers opcionais são
+`onnxruntime-web` e `@local-pii/model-rampart`. A Detecção determinística
+(emails, telefones, cartões, IBAN, SSN, IP e URLs) funciona apenas com
+`local-pii` no React Native, navegador e Node.
 
 ## Escolha um adaptador de Detecção
 

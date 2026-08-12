@@ -14,8 +14,10 @@ Remover nome, email e telefone não desidentifica:
 > "Sou o único engenheiro brasileiro na empresa X em Kempten, diagnosticado
 > ontem com uma doença rara."
 
-Nenhum detector captura isso. Use o [dicionário](/pt/docs/detectors), o modo
-`strict` ou pule o provedor para notas especialmente sensíveis.
+Nenhum detector captura isso. Adicione termos conhecidos ao
+[dicionário](/pt/docs/detectors), remova detalhes indiretos explicitamente ou
+pule o provedor para notas especialmente sensíveis. `strict` apenas faz falhas
+de carregamento ou inferência do Rampart lançarem erro; não melhora o recall.
 
 ## O recall do modelo de Detecção tem limite
 

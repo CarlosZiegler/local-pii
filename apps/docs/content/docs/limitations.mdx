@@ -14,8 +14,10 @@ Removing a name, email, and phone does not de-identify:
 > "I'm the only Brazilian engineer at company X in Kempten, diagnosed yesterday
 > with a rare disease."
 
-No detector catches that. Use the [dictionary](/en/docs/detectors), `strict`
-mode, or skip a provider entirely for especially sensitive notes.
+No detector catches that. Add known terms to the
+[dictionary](/en/docs/detectors), remove indirect details explicitly, or skip a
+provider entirely for especially sensitive notes. `strict` only makes Rampart
+load or inference failures throw; it does not improve recall.
 
 ## Detection-model recall has a ceiling
 

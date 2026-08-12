@@ -14,22 +14,24 @@ Benutzerinhalt
   ─▶ Anonymizer und Platzhalter
   ─▶ eine Privacy-Session für eine private Konversation
   ─▶ geschützter Inhalt an Generierungs-Adapter/-modell
-  ◀─ rehydrierte Antwort; privates Mapping bleibt auf dem Gerät
+  ◀─ rehydrierte Antwort; privates Mapping bleibt beim Aufrufer
 ```
 
 Deterministische Detektoren erkennen E-Mail, Telefon, Karte, IBAN, SSN, IP und
-URL. Dictionary und Session-Vault sorgen für stabile Treffer. Rampart Q4 ist
+URL. Dictionary und privates Mapping sorgen für stabile Treffer. Rampart Q4 ist
 ein Erkennungsmodell für Namen, Adressen und IDs; Gemini Nano, Gemma und
 Provider-Modelle sind Generierungsmodelle. `ner:` bleibt der
 Kompatibilitätsalias für `detection:`.
 
-## Vault, Mapping und Privacy-Session
+## Privates Mapping und Privacy-Session
 
-- **Vault** weist jedem unterschiedlichen Wert einen stabilen Platzhalter zu.
-- **Privates Mapping** verbindet Platzhalter mit ursprünglichem Inhalt. Es ist
-  das Geheimnis: im Speicher halten und nie vom Gerät serialisieren.
-- **Privacy-Session** hält einen Vault über mehrere Turns und gehört zu einer
-  privaten Konversation. Eine neue Konversation erhält eine neue Session.
+- **Privates Mapping** weist jedem unterschiedlichen Wert einen stabilen
+  Platzhalter zu und verbindet ihn mit ursprünglichem Inhalt. Es ist das
+  Geheimnis: im Speicher halten und nie außerhalb der Vertrauensgrenze des
+  Aufrufers serialisieren.
+- **Privacy-Session** hält ein privates Mapping über mehrere Turns und gehört
+  zu einer privaten Konversation. Eine neue Konversation erhält eine neue
+  Session.
 
 ```ts
 const conversation = privacy.createSession()
@@ -40,8 +42,9 @@ conversation.rehydrate(assistantReply)
 
 Explizite Sessions werden für mehrere Turns empfohlen. Übergebene Sessions sind
 geliehen und werden von Adaptern nie geleert. OpenAI und AI SDK können eine
-implizite Session für einen Aufruf besitzen; TanStack verlangt eine Session des
-Aufrufers.
+implizite Wrapper-Session besitzen und über Aufrufe wiederverwenden; TanStack
+verlangt eine Session des Aufrufers. Pro privater Konversation wird ein neuer
+Wrapper erstellt.
 
 ## Vertrauensgrenzen und Lifecycle
 
@@ -50,6 +53,10 @@ geschützter Inhalt kann an einen Provider gehen, während das Mapping lokal
 bleibt. In Route oder Gateway gehören Adapter und Mapping deinem Server und
 schützen gegenüber dem Provider. Eine Session pro Request erzeugen, nie eine
 gemeinsame Modul-Session.
+
+Generische Inline-Callbacks und vom Aufrufer bereitgestellte Erkennungsmodelle
+sind vertrauenswürdiger Aufrufercode. Sie gehören zur Vertrauensgrenze der
+Anwendung und werden von `local-pii` nicht in einer Sandbox ausgeführt.
 
 Inline-Adapter lösen `session`, dann `anonymizer`, dann den Standard auf. Cleanup
 läuft auch bei Modell- oder Abort-Fehlern; der primäre Fehler bleibt erhalten.

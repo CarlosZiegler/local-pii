@@ -8,7 +8,7 @@ Rampart-Q4-**Erkennungsadapter** für Namen, Adressen und IDs, bevor ein
 Generierungsmodell geschützten Inhalt erhält.
 
 ```bash
-bun add onnxruntime-web local-pii
+bun add local-pii onnxruntime-web @local-pii/model-rampart
 ```
 
 ## Erkennung ohne Konfiguration
@@ -22,9 +22,10 @@ const { redactedText } = await privacy.anonymize("Hi, I'm João Silva")
 ```
 
 Standardmäßig werden Modell, Vokabular und Labels (14,7 MB) von der
-Rampart-Quelle geladen. Dieser Artefakt-Download enthält keinen Benutzerinhalt.
-Für Produktion sind selbst gehostete, gepinnte Assets und eine Content
-Security Policy vorzuziehen.
+Rampart-Quelle geladen. Das Laden erfolgt faul: Die erste Anonymisierung startet
+das Laden der Rampart-Artefakte und -Runtime. Dieser Artefakt-Download enthält
+keinen Benutzerinhalt. Für Produktion sind selbst gehostete, gepinnte Assets
+und eine Content Security Policy vorzuziehen.
 
 ## Selbst hosten
 

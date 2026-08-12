@@ -14,8 +14,11 @@ Das Entfernen von Name, E-Mail und Telefon de-identifiziert nicht:
 > "I'm the only Brazilian engineer at company X in Kempten, diagnosed yesterday
 > with a rare disease."
 
-Kein Detektor erfasst das. Nutze das [Dictionary](/de/docs/detectors), den
-`strict`-Modus oder überspringe den Provider für besonders sensible Notizen.
+Kein Detektor erfasst das. Ergänze bekannte Begriffe im
+[Dictionary](/de/docs/detectors), entferne indirekte Details ausdrücklich oder
+überspringe den Provider bei besonders sensiblen Notizen. `strict` lässt nur
+Fehler beim Laden oder Ausführen von Rampart werfen; es verbessert den Recall
+nicht.
 
 ## Das Erkennungsmodell hat eine Recall-Grenze
 

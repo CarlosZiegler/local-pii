@@ -5,7 +5,7 @@
 The protection flow is Detection adapter → anonymizer → one privacy session per
 private conversation → native Generation adapter or inline callback → caller-
 selected Generation model. Protected content contains placeholders; the private
-mapping never leaves the device.
+mapping stays inside the caller's trust boundary.
 
 ## Quickstart: the canonical flow
 
@@ -36,11 +36,12 @@ but new code should use `detection:`.
 ## Install
 
 ```sh
-bun add local-pii
+bun add local-pii onnxruntime-web @local-pii/model-rampart
 ```
 
-The deterministic pipeline works without additional dependencies in React
-Native, Node, and the browser.
+The quickstart uses browser Rampart, whose optional peers are
+`onnxruntime-web` and `@local-pii/model-rampart`. The deterministic pipeline
+works with only `local-pii` in React Native, Node, and the browser.
 
 ## Detection on Expo and the browser (Rampart)
 
@@ -87,8 +88,10 @@ remains the caller's responsibility.
 `withPii` wraps an AI SDK model; `withPiiOpenAI` wraps an OpenAI-compatible
 client; and `piiConnection` wraps a TanStack `ConnectConnectionAdapter`. Use
 one privacy session and one adapter wrapper per private conversation. The
-OpenAI and AI SDK adapters can create an implicit one-call session, while
-TanStack requires a caller-owned session.
+OpenAI and AI SDK adapters can create an implicit wrapper-scoped session that
+is reused across that wrapper's calls, while TanStack requires a caller-owned
+session. Create a fresh wrapper for a fresh private conversation when you do
+not pass `{ session }`.
 
 ## TanStack lifecycle limits
 

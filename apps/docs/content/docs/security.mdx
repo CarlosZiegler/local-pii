@@ -16,17 +16,21 @@ Keep original content out of telemetry that runs before Detection.
 | -------------------- | ----------- | ------------------------ | ----------------- |
 | `sequential()`       | not exposed | within a privacy session | yes (`[EMAIL_1]`) |
 | `hashed({ secret })` | not exposed | stable with the key      | yes               |
-| `token()`            | not exposed | not exposed              | not exposed       |
+| `token()`            | not exposed | within a privacy session | not exposed       |
 | `token({ secret })`  | not exposed | stable with the key      | not exposed       |
 
-Equality can be useful for stable references, but it is metadata. `token()` is
-the safer default for tools and machine-parsed output.
+Equality can be useful for stable references, but it is metadata. Equal
+canonical values reuse one `token()` during a privacy session; a new session
+breaks that link. `token()` is still the safer default for type obscurity and
+machine-parsed output.
 
 ## Why unkeyed hashing is forbidden
 
 A plain hash of an email or phone is guessable: a provider holding the hash can
-recompute candidates offline. `hashed` and `token({ secret })` use a random
-device-local key, so a correct guess cannot be verified without that key.
+recompute candidates offline. `hashed` and `token({ secret })` use the key you
+supply, so generate and store a strong random key; the strategies do not check
+its entropy. Expo apps can use `getOrCreateDeviceSecret()` from
+`local-pii/expo`. Without the key, a correct guess cannot be verified.
 
 Tool arguments are a disclosure boundary. Rehydrating an argument gives your
 tool the original value; if that tool forwards it elsewhere, that is a new

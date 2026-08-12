@@ -8,7 +8,7 @@ O núcleo TypeScript roda no navegador. `local-pii/web` fornece o adaptador de
 modelo de Geração receba conteúdo protegido.
 
 ```bash
-bun add onnxruntime-web local-pii
+bun add local-pii onnxruntime-web @local-pii/model-rampart
 ```
 
 ## Detecção sem configuração
@@ -22,8 +22,10 @@ const { redactedText } = await privacy.anonymize("Hi, I'm João Silva")
 ```
 
 O padrão baixa o modelo de 14,7 MB, vocabulário e labels da origem do Rampart.
-Esse download de artefatos não contém conteúdo do usuário. Em produção,
-prefira hospedar assets pinados e usar uma Content Security Policy.
+O carregamento é preguiçoso: a primeira anonimização inicia o carregamento dos
+artefatos e do runtime do Rampart. Esse download não contém conteúdo do
+usuário. Em produção, prefira hospedar assets pinados e usar uma Content
+Security Policy.
 
 ## Hospedagem própria
 

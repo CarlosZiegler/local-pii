@@ -16,17 +16,22 @@ Mantenha o conteúdo original fora de telemetria que roda antes da Detecção.
 | -------------------- | ----------- | ------------------- | ----------------- |
 | `sequential()`       | não exposto | dentro da sessão    | sim (`[EMAIL_1]`) |
 | `hashed({ secret })` | não exposto | estável com a chave | sim               |
-| `token()`            | não exposto | não exposta         | não exposto       |
+| `token()`            | não exposto | dentro da sessão    | não exposto       |
 | `token({ secret })`  | não exposto | estável com a chave | não exposto       |
 
-Igualdade pode ajudar referências estáveis, mas é metadado. `token()` é o padrão
-mais seguro para tools e saída processada por máquina.
+Igualdade pode ajudar referências estáveis, mas é metadado. Valores canônicos
+iguais reutilizam um `token()` durante a sessão de privacidade; uma nova sessão
+quebra esse vínculo. `token()` continua a opção mais segura para ocultar o tipo
+e para saída processada por máquina.
 
 ## Por que hashing sem chave é proibido
 
 Um hash simples de email ou telefone pode ser adivinhado: o provedor pode
-recalcular candidatos offline. `hashed` e `token({ secret })` usam uma chave
-aleatória local do dispositivo; sem ela, um palpite correto não é verificável.
+recalcular candidatos offline. `hashed` e `token({ secret })` usam a chave
+fornecida por você; gere e armazene uma chave aleatória forte, pois as
+estratégias não validam sua entropia. Apps Expo podem usar
+`getOrCreateDeviceSecret()` de `local-pii/expo`. Sem a chave, um palpite correto
+não é verificável.
 
 Argumentos de tools são uma fronteira de divulgação. Reidratá-los entrega o
 valor original à sua tool; se ela o encaminhar, será uma nova divulgação sob

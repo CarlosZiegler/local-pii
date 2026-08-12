@@ -8,7 +8,7 @@ Rampart Q4 **Detection adapter**; it finds names, addresses, and IDs before a
 Generation model receives protected content.
 
 ```bash
-bun add onnxruntime-web local-pii
+bun add local-pii onnxruntime-web @local-pii/model-rampart
 ```
 
 ## Zero-config Detection
@@ -22,8 +22,9 @@ const { redactedText } = await privacy.anonymize("Hi, I'm João Silva")
 ```
 
 The default fetches the 14.7 MB model, vocabulary, and labels from the Rampart
-origin. The artifact download contains no user content. For production, prefer
-self-hosting with a pinned asset and Content Security Policy.
+origin. Loading is lazy: the first anonymization starts Rampart artifact and
+runtime loading. The artifact download contains no user content. For
+production, prefer self-hosting with a pinned asset and Content Security Policy.
 
 ## Self-hosted
 

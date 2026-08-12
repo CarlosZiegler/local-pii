@@ -27,6 +27,10 @@ erzeugte Session wird bereinigt; eine übergebene Session ist geliehen und wird
 nie vom Adapter geleert. Ein Cleanup-Fehler ersetzt den primären Modell- oder
 Abort-Fehler nicht.
 
+Generische Inline-Callbacks und vom Aufrufer bereitgestellte Erkennungsmodelle
+werden als vertrauenswürdiger Aufrufercode ausgeführt. `local-pii` schützt ihre
+Generierungsgrenze; es führt sie nicht in einer Sandbox aus.
+
 ## OpenAI / Grok — `local-pii/openai`
 
 ```ts
@@ -49,9 +53,10 @@ const result = await client.chat.completions.create({
 | Nicht unterstützte Varianten / Fehler | Nicht unterstützte Client-Formen schlagen ohne stillen Fallback fehl. Abort- und Provider-Fehler behalten den primären Fehler; für JSON/Tools `token()` verwenden. |
 
 Der strukturelle Wrapper deckt auch Grok/xAI, Groq, Together, OpenRouter und
-Ollama ab. Eine implizite Session gilt für einen Aufruf; `{ session }` teilt
-eine private Konversation. Für manuelle Loops gibt es `createPiiChat`,
-`rehydrateToolArgs` und `createStreamingRehydrator`.
+Ollama ab. Eine implizite Session wird mit dem Wrapper erzeugt und über dessen
+Aufrufe wiederverwendet. Pro privater Konversation wird ein Wrapper verwendet;
+alternativ macht `{ session }` den Besitz explizit. Für manuelle Loops gibt es
+`createPiiChat`, `rehydrateToolArgs` und `createStreamingRehydrator`.
 
 ## Vercel AI SDK — `local-pii/ai-sdk`
 
@@ -66,15 +71,16 @@ const result = streamText({ model, prompt })
 
 | Vertrag                               | Getestetes Verhalten                                                                                                                                    |
 | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Geschützte semantische Werte          | System-/User-/Assistant-Text, Reasoning, Tool-Input/-Output und strukturiertes JSON werden geschützt.                                                   |
-| Rehydrierte semantische Werte         | Text, Reasoning, Tool-Argumente vor Tool-Ausführung und Ergebnisse im nächsten Schritt werden rehydriert.                                               |
-| Erhaltene Steuerung / opake Werte     | Typen, IDs, Rollen, Tool-Namen, Freigaben, Optionen und Stream-Marker bleiben unverändert; Aufrufer-Metadaten werden nicht untersucht.                  |
+| Geschützte semantische Werte          | System-/User-/Assistant-Text, Tool-Input/-Output und strukturiertes JSON werden geschützt. Reasoning ist opak und bleibt Verantwortung des Aufrufers.   |
+| Rehydrierte semantische Werte         | Text, Tool-Argumente vor Tool-Ausführung und Ergebnisse im nächsten Schritt werden rehydriert. Reasoning-Teile werden unverändert durchgereicht.        |
+| Erhaltene Steuerung / opake Werte     | Typen, IDs, Rollen, Reasoning, Tool-Namen, Freigaben, Optionen und Stream-Marker bleiben unverändert; Aufrufer-Metadaten werden nicht untersucht.       |
 | Nicht unterstützte Varianten / Fehler | Nicht unterstützte Inhalte und ungültige Streams schlagen fehl. Abort und Provider-Fehler behalten den exakten Fehler und rufen den Provider nicht auf. |
 
 `withPii` ist Middleware und braucht keinen Tool-Wrapper. Eine übergebene Session
-ist geliehen; ohne sie besitzt der Adapter eine Session für einen Aufruf. Der
-Browser-Playground pinnt `ai@7.0.57`, `@ai-sdk/react@4.0.61` und
-`@browser-ai/core@3.0.0`.
+ist geliehen; ohne sie besitzt die Middleware eine Session für ihre Instanz und
+verwendet sie über Aufrufe hinweg. Für eine neue private Konversation wird ein
+neuer Wrapper erstellt. Der Browser-Playground pinnt `ai@7.0.57`,
+`@ai-sdk/react@4.0.61` und `@browser-ai/core@3.0.0`.
 
 ## TanStack AI — `local-pii/tanstack`
 
@@ -101,3 +107,10 @@ lebenden Session. Persistence, vollständige Reload-Wiederherstellung,
 Cross-Tab-Wiederherstellung und eine neue Session werden nicht unterstützt.
 Seit 0.1.0 sollten nicht unterstützte semantische Teile in Text oder eine
 unterstützte Struktur migriert werden.
+
+## Platzhalterstrategie wählen
+
+Für normalen Text eignet sich das lesbare `sequential()`, für stabile
+Gleichheit das gekeyte `hashed({ secret })` und für Tools oder maschinell
+verarbeitetes JSON das opake `token()`. Das private Mapping ist kein
+Protokollfeld und muss innerhalb der Vertrauensgrenze des Aufrufers bleiben.

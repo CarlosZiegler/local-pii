@@ -16,18 +16,22 @@ Originalinhalt darf nicht in Telemetrie gelangen, die vor der Erkennung läuft.
 | -------------------- | ----------------- | --------------------- | ----------------- |
 | `sequential()`       | nicht offengelegt | innerhalb der Session | ja (`[EMAIL_1]`)  |
 | `hashed({ secret })` | nicht offengelegt | stabil mit Schlüssel  | ja                |
-| `token()`            | nicht offengelegt | nicht offengelegt     | nicht offengelegt |
+| `token()`            | nicht offengelegt | innerhalb der Session | nicht offengelegt |
 | `token({ secret })`  | nicht offengelegt | stabil mit Schlüssel  | nicht offengelegt |
 
-Gleichheit kann für stabile Referenzen nützlich sein, ist aber Metadaten. Für
-Tools und maschinell verarbeitete Ausgabe ist `token()` die sicherere Wahl.
+Gleichheit kann für stabile Referenzen nützlich sein, ist aber Metadaten.
+Gleiche kanonische Werte verwenden innerhalb einer Privacy-Session dasselbe
+`token()`; eine neue Session trennt diese Verbindung. Für Typverschleierung und
+maschinell verarbeitete Ausgabe bleibt `token()` die sicherere Wahl.
 
 ## Warum ungekeytes Hashing verboten ist
 
 Ein einfacher Hash von E-Mail oder Telefon ist erratbar: Ein Provider kann
 Kandidaten offline neu berechnen. `hashed` und `token({ secret })` verwenden
-einen zufälligen gerätelokalen Schlüssel; ohne ihn ist ein Treffer nicht
-verifizierbar.
+den von dir gelieferten Schlüssel. Erzeuge und speichere einen starken
+Zufallsschlüssel; die Strategien prüfen seine Entropie nicht. Expo-Apps können
+`getOrCreateDeviceSecret()` aus `local-pii/expo` verwenden. Ohne den Schlüssel
+ist ein Treffer nicht verifizierbar.
 
 Tool-Argumente sind eine Offenlegungsgrenze. Rehydrierung gibt deinem Tool den
 Originalwert; eine Weiterleitung ist eine neue Offenlegung unter Verantwortung

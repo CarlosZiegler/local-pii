@@ -2,8 +2,8 @@
 
 **Adapter-first privacy for Expo, React Native, the browser, and Node.** Detect
 personal information locally, replace it with placeholders, call the selected
-generation model, and restore the response while the private mapping stays on
-the device.
+generation model, and restore the response while the private mapping stays
+inside the caller's trust boundary.
 
 This is the monorepo. The SDK lives in [`packages/local-pii`](packages/local-pii)
 — **[read its README for the full docs](packages/local-pii/README.md)**.
@@ -59,7 +59,7 @@ bun run build
 ```text
 user content ─▶ Detection adapter ─▶ anonymizer ─▶ private session
               ─▶ protected content ─▶ Generation model
-              ◀─ restored response ◀─ private mapping stays on device
+              ◀─ restored response ◀─ private mapping stays with the caller
 ```
 
 The core deterministic detectors cover email, phone, card, IBAN, SSN, IP, and

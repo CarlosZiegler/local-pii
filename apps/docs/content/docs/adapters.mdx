@@ -30,6 +30,10 @@ anonymizer. An adapter-created session is cleaned up; a supplied session is
 borrowed and never cleared. Cleanup failures do not replace a primary model or
 abort failure.
 
+Generic inline callbacks and caller-supplied Detection models execute as
+trusted caller code. `local-pii` protects their Generation boundary; it does
+not sandbox them.
+
 ## OpenAI / Grok — `local-pii/openai`
 
 ```ts
@@ -53,8 +57,9 @@ const result = await client.chat.completions.create({
 
 The wrapper is structural and has no `openai` dependency, so it also covers
 Grok/xAI, Groq, Together, OpenRouter, and Ollama-compatible clients. An
-implicit session is created for a call; pass `{ session }` to share a private
-conversation. `createPiiChat`, `rehydrateToolArgs`, and
+implicit session is created with the wrapper and reused across its calls. Use
+one wrapper per private conversation, or pass `{ session }` to make ownership
+explicit. `createPiiChat`, `rehydrateToolArgs`, and
 `createStreamingRehydrator` are available for a manual loop.
 
 ## Vercel AI SDK — `local-pii/ai-sdk`
@@ -70,15 +75,16 @@ const result = streamText({ model, prompt })
 
 | Contract                          | Proven behavior                                                                                                                                                                  |
 | --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Protected semantic values         | System/user/assistant text, reasoning text, tool-call input, tool-result output, and structured JSON are protected before the provider.                                          |
-| Restored semantic values          | Text and reasoning stream parts, tool arguments before tool execution, and tool results at the next model step are restored.                                                     |
-| Preserved control / opaque values | Part types, IDs, roles, tool names, approval state, provider options, and stream control markers remain unchanged; caller-owned metadata is not inspected.                       |
+| Protected semantic values         | System/user/assistant text, tool-call input, tool-result output, and structured JSON are protected before the provider. Reasoning is opaque and remains caller responsibility.   |
+| Restored semantic values          | Text stream parts, tool arguments before tool execution, and tool results at the next model step are restored. Reasoning parts pass through unchanged.                           |
+| Preserved control / opaque values | Part types, IDs, roles, reasoning, tool names, approval state, provider options, and stream control markers remain unchanged; caller-owned metadata is not inspected.            |
 | Unsupported variants / errors     | Unsupported semantic content or malformed streams fail explicitly. Pre-abort/post-protection aborts and provider failures preserve the exact error and do not call the provider. |
 
 `withPii` is middleware: no tool wrapper is required. Supplied sessions are
-borrowed; without one the adapter owns a one-call session. The browser
-playground pins `ai@7.0.57`, `@ai-sdk/react@4.0.61`, and
-`@browser-ai/core@3.0.0`.
+borrowed; without one the middleware owns a session scoped to that middleware
+instance and reuses it across calls. Create a new wrapper for a new private
+conversation. The browser playground pins `ai@7.0.57`,
+`@ai-sdk/react@4.0.61`, and `@browser-ai/core@3.0.0`.
 
 ## TanStack AI — `local-pii/tanstack`
 
@@ -110,4 +116,5 @@ semantic parts to text or a supported structured value.
 
 Use readable `sequential()` for ordinary text, keyed `hashed({ secret })` when
 stable equality is required, and opaque `token()` for tools or machine-parsed
-JSON. A private mapping is never a protocol field and must stay on the device.
+JSON. A private mapping is never a protocol field and must stay inside the
+caller's trust boundary.

@@ -28,6 +28,10 @@ const answer = await runInlineText({
 adaptador é limpa; sessão fornecida é emprestada e nunca é limpa pelo
 adaptador. Falha de limpeza não substitui a falha primária do modelo ou abort.
 
+Callbacks inline genéricos e modelos de Detecção fornecidos pelo chamador
+executam como código confiável do chamador. `local-pii` protege a fronteira de
+Geração deles; não os executa em sandbox.
+
 ## OpenAI / Grok — `local-pii/openai`
 
 ```ts
@@ -50,8 +54,9 @@ const result = await client.chat.completions.create({
 | Variantes não suportadas / erros | Formatos de cliente não suportados falham sem fallback silencioso. Abort e erros do provedor preservam a falha primária; use `token()` em JSON/tools.      |
 
 O wrapper estrutural também cobre Grok/xAI, Groq, Together, OpenRouter e
-Ollama. Uma sessão implícita atende uma chamada; passe `{ session }` para
-compartilhar uma conversa. Loops manuais podem usar `createPiiChat`,
+Ollama. Uma sessão implícita é criada com o wrapper e reutilizada entre suas
+chamadas. Use um wrapper por conversa privada ou passe `{ session }` para
+deixar o ownership explícito. Loops manuais podem usar `createPiiChat`,
 `rehydrateToolArgs` e `createStreamingRehydrator`.
 
 ## Vercel AI SDK — `local-pii/ai-sdk`
@@ -65,16 +70,18 @@ const model = withPii(openai("gpt-5.2"), { session: conversation })
 const result = streamText({ model, prompt })
 ```
 
-| Contrato                         | Comportamento testado                                                                                                                         |
-| -------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| Valores semânticos protegidos    | Texto de sistema/usuário/assistente, reasoning, inputs/outputs de tools e JSON estruturado são protegidos.                                    |
-| Valores semânticos reidratados   | Texto, reasoning, argumentos antes da tool e resultados no passo seguinte são reidratados.                                                    |
-| Controle / opacos preservados    | Tipos, IDs, papéis, nomes, aprovações, opções e marcadores de stream permanecem iguais; metadados do chamador não são inspecionados.          |
-| Variantes não suportadas / erros | Conteúdo sem suporte e streams inválidos falham. Abort prévio/pós-proteção e erros do provedor preservam a falha exata sem chamar o provedor. |
+| Contrato                         | Comportamento testado                                                                                                                                       |
+| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Valores semânticos protegidos    | Texto de sistema/usuário/assistente, inputs/outputs de tools e JSON estruturado são protegidos. Reasoning é opaco e permanece responsabilidade do chamador. |
+| Valores semânticos reidratados   | Texto, argumentos antes da tool e resultados no passo seguinte são reidratados. Partes de reasoning passam sem alteração.                                   |
+| Controle / opacos preservados    | Tipos, IDs, papéis, reasoning, nomes, aprovações, opções e marcadores de stream permanecem iguais; metadados do chamador não são inspecionados.             |
+| Variantes não suportadas / erros | Conteúdo sem suporte e streams inválidos falham. Abort prévio/pós-proteção e erros do provedor preservam a falha exata sem chamar o provedor.               |
 
 `withPii` é middleware e não exige wrapper de tool. Sessão fornecida é
-emprestada; sem ela, o adaptador possui uma sessão de uma chamada. O playground
-fixa `ai@7.0.57`, `@ai-sdk/react@4.0.61` e `@browser-ai/core@3.0.0`.
+emprestada; sem ela, o middleware possui uma sessão vinculada à instância e a
+reutiliza entre chamadas. Crie um novo wrapper para uma nova conversa privada.
+O playground fixa `ai@7.0.57`, `@ai-sdk/react@4.0.61` e
+`@browser-ai/core@3.0.0`.
 
 ## TanStack AI — `local-pii/tanstack`
 
@@ -100,3 +107,10 @@ Hydration e `joinRun` funcionam apenas na mesma sessão viva. Persistência,
 restauração após reload completo, entre abas e com nova sessão não são
 suportadas. Desde 0.1.0, migre partes semânticas não suportadas para texto ou
 estrutura suportada em vez de depender de adivinhação.
+
+## Escolha uma estratégia de placeholder
+
+Use `sequential()` legível para texto comum, `hashed({ secret })` com chave
+quando igualdade estável for necessária e `token()` opaco para tools ou JSON
+processado por máquina. O mapping privado nunca é um campo do protocolo e deve
+permanecer dentro da fronteira de confiança do chamador.

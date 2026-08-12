@@ -10,7 +10,6 @@ geschützten Inhalt.
 
 ```bash
 bun add onnxruntime-react-native expo-asset expo-file-system @local-pii/model-rampart
-bun run fetch-model
 ```
 
 Erforderlich ist ein Dev Client / Prebuild, nicht Expo Go.
@@ -36,6 +35,10 @@ const privacy = createAnonymizer({
   }),
 })
 ```
+
+Das Laden erfolgt faul: Die erste Anonymisierung löst das paketierte Asset auf
+und startet die Rampart-Runtime. Anwendungen mit dem veröffentlichten
+Modellpaket führen das `fetch-model`-Entwicklungsskript des Monorepos nicht aus.
 
 Wenn das Modell nicht lädt, fällt der Standard auf deterministische Erkennung
 zurück; `strict: true` wirft stattdessen. `ner:` bleibt ein Kompatibilitätsalias.

@@ -13,22 +13,22 @@ conteúdo do usuário
   ─▶ anonymizer e placeholders
   ─▶ uma sessão de privacidade para uma conversa privada
   ─▶ conteúdo protegido para um adaptador/modelo de Geração
-  ◀─ resposta reidratada; mapping privado fica no dispositivo
+  ◀─ resposta reidratada; mapping privado fica com o chamador
 ```
 
 Detectores determinísticos cobrem email, telefone, cartão, IBAN, SSN, IP e URL.
-Dicionário e vault da sessão mantêm correspondências estáveis. Rampart Q4 é um
+Dicionário e mapping privado mantêm correspondências estáveis. Rampart Q4 é um
 modelo de Detecção para nomes, endereços e IDs; Gemini Nano, Gemma e modelos de
 provedor são modelos de Geração. `ner:` continua como alias de compatibilidade
 para `detection:`.
 
-## Vault, mapping e sessão de privacidade
+## Mapping privado e sessão de privacidade
 
-- **Vault** atribui um placeholder estável a cada valor distinto.
-- **Mapping privado** relaciona placeholders ao conteúdo original. É o segredo:
-  mantenha-o em memória e nunca o serialize para fora do dispositivo.
-- **Sessão de privacidade** mantém um vault entre turnos e pertence a uma
-  conversa privada. Uma nova conversa recebe uma nova sessão.
+- **Mapping privado** atribui um placeholder estável a cada valor distinto e o
+  relaciona ao conteúdo original. É o segredo: mantenha-o em memória e nunca o
+  serialize para fora da fronteira de confiança do chamador.
+- **Sessão de privacidade** mantém um mapping privado entre turnos e pertence a
+  uma conversa privada. Uma nova conversa recebe uma nova sessão.
 
 ```ts
 const conversation = privacy.createSession()
@@ -39,7 +39,8 @@ conversation.rehydrate(assistantReply)
 
 Sessões explícitas são recomendadas em várias mensagens. Sessões fornecidas são
 emprestadas; adaptadores nunca as limpam. OpenAI e AI SDK podem possuir uma
-sessão implícita de uma chamada; TanStack exige sessão fornecida pelo chamador.
+sessão implícita vinculada ao wrapper e reutilizada entre chamadas; TanStack
+exige sessão fornecida pelo chamador. Crie um wrapper novo por conversa privada.
 
 ## Fronteiras de confiança e ciclo de vida
 
@@ -48,6 +49,10 @@ Geração; conteúdo protegido pode ir para um provedor enquanto o mapping fica
 local. Em uma rota ou gateway, adaptador e mapping pertencem ao seu servidor e
 protegem contra o provedor. Crie uma sessão por requisição, nunca uma sessão de
 módulo compartilhada entre usuários.
+
+Callbacks inline genéricos e modelos de Detecção fornecidos pelo chamador são
+código confiável do chamador. Eles fazem parte da sua fronteira e não são
+executados em sandbox pelo `local-pii`.
 
 Adapters inline resolvem `session`, depois `anonymizer`, depois o padrão. A
 limpeza ocorre mesmo quando modelo ou abort falha, preservando a falha primária.
