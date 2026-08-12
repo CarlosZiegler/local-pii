@@ -168,8 +168,19 @@ function dependencyInput(input, dependency) {
 
 function nativeOnlyInput(input) {
   const normalized = input.replaceAll("\\", "/")
-  return /\/node_modules\/(?:\.bun\/[^/]+\/node_modules\/)?(?:@expo\/|@react-native\/|expo(?:-|\/|@)|react-native(?:\/|@)|onnxruntime-react-native(?:\/|@))/.test(
+  return /\/node_modules\/(?:\.bun\/[^/]+\/node_modules\/)?(?:@expo\/|@react-native(?:-|\/)|expo(?:-|\/|@)|react-native(?:-|\/|@)|onnxruntime-react-native(?:\/|@))/.test(
     normalized
+  )
+}
+
+for (const nativeOnlyFixture of [
+  "/fixture/node_modules/react-native-safe-area-context/index.js",
+  "/fixture/node_modules/.bun/react-native-mmkv@3/node_modules/react-native-mmkv/index.js",
+  "/fixture/node_modules/@react-native-community/netinfo/index.js",
+]) {
+  assert(
+    nativeOnlyInput(nativeOnlyFixture),
+    `native-only dependency family was not recognized: ${nativeOnlyFixture}`
   )
 }
 
