@@ -1,70 +1,73 @@
 # local-pii
 
-**On-device PII anonymization for Expo / React Native.** Redact personal data
-locally, send only placeholders to any LLM, and rehydrate the reply on device —
-the `placeholder → original` mapping never leaves the phone.
+**Adapter-first privacy for Expo, React Native, the browser, and Node.** Detect
+personal information locally, replace it with placeholders, call the selected
+generation model, and restore the response while the private mapping stays on
+the device.
 
 This is the monorepo. The SDK lives in [`packages/local-pii`](packages/local-pii)
 — **[read its README for the full docs](packages/local-pii/README.md)**.
 
-```ts
-import { createAnonymizer, rehydrate } from "local-pii"
+The canonical flow has four stages: a Detection adapter feeds the anonymizer,
+one privacy session owns a private conversation, and a native Generation
+adapter or inline callback calls the caller-selected Generation model.
 
-const pii = createAnonymizer()
-const { redactedText, mapping } = await pii.anonymize(
-  "Ontem encontrei João Silva. Meu telefone é +49 151 12345678.",
-)
-// redactedText → "Ontem encontrei João Silva. Meu telefone é [PHONE_1]."   (names need the model)
-const answer = rehydrate(await callYourLlm(redactedText), mapping)
+```ts
+import { createAnonymizer, token } from "local-pii"
+import { rampartWeb } from "local-pii/web"
+import { runInlineText } from "local-pii/inline"
+
+const privacy = createAnonymizer({
+  detection: rampartWeb(),
+  placeholders: token(),
+})
+const conversation = privacy.createSession()
+
+const answer = await runInlineText({
+  session: conversation,
+  input: "Email ana@acme.com",
+  call: (protectedContent, { signal }) =>
+    generationModel.generate(protectedContent, { signal }),
+})
 ```
 
-With the on-device [Rampart](https://huggingface.co/nationaldesignstudio/rampart)
-model enabled, names and addresses go too:
-`"[GIVEN_NAME_1] [SURNAME_1] … [STREET_NAME_1] [BUILDING_NUMBER_1]"`.
+Rampart Q4 is a **Detection model**. Gemini Nano, Gemma, and provider models
+are **Generation models**; they receive protected content, never the private
+mapping. `ner:` remains supported as compatibility spelling for `detection:`,
+but new code should use `detection:`.
 
 ## Packages
 
-| Package | Description |
-| --- | --- |
-| [`packages/local-pii`](packages/local-pii) | The SDK. Pure-TS core (`local-pii`) + subpaths `local-pii/expo` (Expo NER), `local-pii/web` (browser NER), `local-pii/ai-sdk` (Vercel AI SDK), `local-pii/openai` (OpenAI/Grok), `local-pii/metro`. |
-| [`packages/model-rampart`](packages/model-rampart) | `@local-pii/model-rampart` — the Rampart Q4 ONNX model + tokenizer assets (CC BY 4.0, fetched on demand). |
-| [`apps/docs`](apps/docs) | Fumadocs documentation site (`bun --filter docs dev` → :3001). |
-| [`apps/example`](apps/example) | Expo app demoing anonymize → mock LLM → rehydrate. |
-| `apps/web`, `packages/ui`, … | The original Next.js/shadcn template. |
-
-Subpaths, all pure-JS with optional peer deps: **`local-pii`** (core, no native
-deps) · **`/rampart`** (Expo) · **`/web`** (browser) · **`/ai-sdk`** · **`/openai`**
-(OpenAI + Grok/xAI) · **`/metro`**. Placeholder strategies: `sequential` (default),
-`hashed` (keyed), `token` (opaque, for tool calls). Full tool-call support with a
-leak-swept test proving no PII reaches the provider.
+| Package                                            | Description                                                                                             |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------- |
+| [`packages/local-pii`](packages/local-pii)         | The SDK: pure-TS core plus `/expo`, `/web`, `/inline`, `/ai-sdk`, `/openai`, `/tanstack`, and `/metro`. |
+| [`packages/model-rampart`](packages/model-rampart) | `@local-pii/model-rampart` — Rampart Q4 Detection assets (CC BY 4.0, fetched on demand).                |
+| [`apps/docs`](apps/docs)                           | Fumadocs documentation site (`bun --filter docs dev` → :3001).                                          |
+| [`apps/example`](apps/example)                     | Expo app demonstrating protect → model → restore.                                                       |
 
 ## Develop
 
 ```sh
 bun install
-bun run fetch-model     # download the Rampart model (sha256-pinned) for NER tests + the demo
-bun run test            # run the SDK test suite (incl. a real-model golden test)
-bun run build           # build the SDK (ESM + CJS + types via Rslib)
+bun run fetch-model
+bun run test
+bun run build
 ```
-
-Tooling: **Bun** workspaces + **Turborepo**, **Rslib** (Rspack) builds,
-**Vitest** tests. The SDK core is dependency-free and TypeScript-strict.
 
 ## How it works
 
-```
-note ─▶ deterministic detectors (email, phone, card+Luhn, IBAN, SSN, IP, URL)
-     ─▶ dictionary (your terms)
-     ─▶ Rampart NER (names, addresses, IDs) — 14.7 MB ONNX, on device
-     ─▶ resolve overlaps ─▶ placeholder engine ─▶ redacted text ─▶ LLM
-                                                        │
-                       reply ─▶ rehydrate(reply, mapping) ─▶ restored text
+```text
+user content ─▶ Detection adapter ─▶ anonymizer ─▶ private session
+              ─▶ protected content ─▶ Generation model
+              ◀─ restored response ◀─ private mapping stays on device
 ```
 
-The mapping is plain in-memory data that the SDK never serializes off-device.
+The core deterministic detectors cover email, phone, card, IBAN, SSN, IP, and
+URL. Rampart adds names, addresses, and IDs. Keep one privacy session per
+private conversation; supplied sessions are borrowed and are never cleared by
+an adapter.
 
 ## Credits
 
-- Rampart PII model by **National Design Studio** (CC BY 4.0).
-- Architecture planned with the help of the repo's [`PLAN.md`](PLAN.md).
+- Rampart Detection model by **National Design Studio** (CC BY 4.0).
 - SDK code licensed **MIT**.

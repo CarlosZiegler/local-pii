@@ -1,49 +1,47 @@
 ---
-title: Navegador
-description: Execute o mesmo modelo Rampart no navegador com onnxruntime-web (WASM + WebGPU).
+title: Detecção no navegador
+description: Execute o adaptador de Detecção Rampart no navegador com onnxruntime-web (WASM + WebGPU).
 ---
 
-O núcleo em JS puro já roda no navegador. Para NER on-device no navegador,
-`local-pii/web` conecta o `onnxruntime-web` (WASM, com WebGPU quando
-disponível) ao mesmo núcleo de modelo usado pelos caminhos Expo e Node.
+O núcleo TypeScript roda no navegador. `local-pii/web` fornece o adaptador de
+**Detecção** Rampart Q4 para encontrar nomes, endereços e IDs antes que um
+modelo de Geração receba conteúdo protegido.
 
 ```bash
 bun add onnxruntime-web local-pii
 ```
 
-## Sem configuração
+## Detecção sem configuração
 
 ```ts
 import { createAnonymizer } from "local-pii"
 import { rampartWeb } from "local-pii/web"
 
-const pii = createAnonymizer({ ner: rampartWeb() }) // fetches model + tokenizer from the HF CDN
-const { redactedText } = await pii.anonymize("Hi, I'm João Silva")
+const privacy = createAnonymizer({ detection: rampartWeb() })
+const { redactedText } = await privacy.anonymize("Hi, I'm João Silva")
 ```
 
-## Auto-hospedado (recomendado para produção)
+O padrão baixa o modelo de 14,7 MB, vocabulário e labels da origem do Rampart.
+Esse download de artefatos não contém conteúdo do usuário. Em produção,
+prefira hospedar assets pinados e usar uma Content Security Policy.
 
-Copie o modelo + tokenizer para o seu diretório `public/` e aponte para eles —
-melhor para CSP e disponibilidade:
+## Hospedagem própria
 
 ```ts
-import { rampartWeb, rampartAssets } from "local-pii/web"
+import { createAnonymizer } from "local-pii"
+import { rampartAssets, rampartWeb } from "local-pii/web"
 
-createAnonymizer({
-  ner: rampartWeb({
+const privacy = createAnonymizer({
+  detection: rampartWeb({
     model: "/models/rampart-q4.onnx",
     vocab: rampartAssets.vocab,
     labels: rampartAssets.labels,
-    wasmPaths: "/ort/", // where you serve the onnxruntime-web .wasm files
-    executionProviders: ["webgpu", "wasm"], // default; falls through to wasm
+    wasmPaths: "/ort/",
+    executionProviders: ["webgpu", "wasm"],
   }),
 })
 ```
 
-O download do modelo em si não contém nenhum dado do usuário. Os autores do
-Rampart relatam latência no navegador de ~3,9 ms (WebGPU) / ~12,6 ms (WASM)
-para textos curtos.
-
-> O execution provider WASM também roda no Node, que é como a própria suíte de
-> testes do local-pii verifica que o caminho do navegador detecta as mesmas
-> entidades que o runtime nativo.
+O adaptador tenta WASM se WebGPU não estiver disponível. Depois escolha um
+adaptador de Geração separado ou `runInlineText`. `ner:` continua aceito como
+compatibilidade para `detection:`.

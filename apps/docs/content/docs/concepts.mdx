@@ -1,54 +1,57 @@
 ---
 title: Core Concepts
-description: The pipeline, sessions, the vault, the mapping, and the two trust boundaries local-pii supports.
+description: Detection, protection flow, privacy sessions, ownership, and trust boundaries.
 ---
 
-## The pipeline
+## The protection flow
 
-Every `anonymize` call runs the same stages over your text:
+The canonical flow separates finding personal information from producing an
+answer:
 
 ```text
-text ─▶ deterministic detectors (email, phone, card+Luhn, IBAN, SSN, IP, URL)
-     ─▶ dictionary (your own terms)
-     ─▶ vault dictionary (values already seen this session)
-     ─▶ NER model (names, addresses, IDs) — optional, on device
-     ─▶ resolve overlaps (priority: dictionary > deterministic > NER)
-     ─▶ placeholder engine ─▶ redacted text
+user content
+  ─▶ Detection adapter (Rampart Q4 or caller model)
+  ─▶ anonymizer and placeholder engine
+  ─▶ one privacy session for one private conversation
+  ─▶ protected content to a Generation adapter/model
+  ◀─ restored response; private mapping stays on device
 ```
 
-Deterministic detectors are precise (checksum/structure validated), so they win
-over model guesses. Detections that overlap are resolved into one
-non-overlapping set before placeholders are assigned.
+Deterministic detectors run first for email, phone, card, IBAN, SSN, IP, and
+URL. Dictionary values and the session vault provide stable matches. Rampart
+Q4 is a Detection model for names, addresses, and IDs; Gemini Nano, Gemma, and
+provider models are Generation models. `ner:` is a supported compatibility
+alias for `detection:`.
 
-## Vault, Mapping, Session
+## Vault, mapping, and privacy session
 
-- **Vault** — the in-memory store that assigns a **stable placeholder per
-  distinct value**. The same value always gets the same placeholder.
-- **Mapping** — a plain `Record<placeholder, original>` snapshot of the vault.
-  This is the secret. Hold it in memory; never serialize it off device.
-- **Session** — keeps one vault across many turns, so `João` is `[GIVEN_NAME_1]`
-  in every message of a conversation and across a whole tool loop.
+- **Vault** assigns a stable placeholder to each distinct value.
+- **Private mapping** relates placeholders to original user content. It is the
+  secret: keep it in memory and never serialize it off device.
+- **Privacy session** keeps one vault across turns and belongs to one private
+  conversation. A new conversation gets a new session.
 
 ```ts
-const session = pii.createSession()
-await session.anonymize("First, about João…") // João → [GIVEN_NAME_1]
-await session.anonymize("Tell João I said hi") // João → [GIVEN_NAME_1] again
-session.rehydrate(assistantReply) // bound to this session's mapping
+const conversation = privacy.createSession()
+await conversation.anonymize("First, about João…")
+await conversation.anonymize("Tell João I said hi") // same placeholder
+conversation.rehydrate(assistantReply)
 ```
 
-Two session behaviors make multi-step loops robust:
+Explicit sessions are recommended for multi-turn use. Supplied sessions are
+borrowed; adapters never clear them. OpenAI and AI SDK adapters may own an
+implicit one-call session, while TanStack requires a caller-owned session.
 
-- **Vault dictionary** — any value already seen is re-matched on later turns, so
-  a model that stops detecting a name can't renumber or leak it.
-- **Idempotence** — re-anonymizing already-redacted text is a no-op.
+## Trust boundaries and lifecycle
 
-## Trust boundaries
+On device, the app owns the Detection adapter, privacy session, and Generation
+call; protected content can be sent to a provider while the private mapping
+stays local. In a server route or gateway, the adapter and mapping belong to
+your server and protect against the provider. Create one session per request,
+never one module-level session shared by users.
 
-The same code serves two deployment shapes:
-
-- **On device (Expo / browser)** — your app calls the provider directly, the
-  adapter runs in the app, and the mapping never leaves the device. This is
-  local-pii's home turf.
-- **Server-side (a Next.js route / gateway)** — the adapter runs on **your**
-  server; the mapping stays there and protects against the **provider**. Create
-  one session per request — never a module-level session shared across users.
+Inline adapters resolve `session`, then `anonymizer`, then their default. Their
+cleanup runs even when a model or abort fails, with the primary failure taking
+precedence. TanStack passes hydration through and joins runs only for the same
+live session; persistence, full reload, cross-tab restoration, and a new
+session cannot restore a private conversation.

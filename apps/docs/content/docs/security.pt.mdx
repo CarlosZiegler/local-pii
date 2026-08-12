@@ -1,51 +1,33 @@
 ---
 title: Segurança e Hashing
-description: O que cada estratégia vaza, por que hashing sem chave é proibido, e como lidar com o mapping.
+description: Mapping privado, divulgação de placeholders e fronteiras entre Detecção e Geração.
 ---
 
-## O mapping é o segredo
+## O mapping privado é o segredo
 
-O `mapping` (`placeholder → original`) é a única coisa capaz de reverter a
-anonimização. Mantenha-o **em memória**. Não o registre em log, não o envie
-para analytics ou crash reporters, nem o persista a menos que seja necessário
-— e, se for necessário, use o keystore da plataforma (`expo-secure-store`),
-nunca armazenamento simples.
+O mapping entre placeholder e conteúdo original é o único meio de restaurar
+conteúdo protegido. Mantenha-o em memória. Não o registre, não o envie para
+analytics ou crash reporters e não o persista fora de um keystore da plataforma.
+Mantenha o conteúdo original fora de telemetria que roda antes da Detecção.
 
-Mantenha também o **texto bruto** fora de logs/analytics/crash reporters que
-rodam _antes_ da anonimização.
+## O que o provedor de Geração vê
 
-## O que cada estratégia vaza para o provedor
+| Estratégia           | Valor       | Igualdade           | Tipo              |
+| -------------------- | ----------- | ------------------- | ----------------- |
+| `sequential()`       | não exposto | dentro da sessão    | sim (`[EMAIL_1]`) |
+| `hashed({ secret })` | não exposto | estável com a chave | sim               |
+| `token()`            | não exposto | não exposta         | não exposto       |
+| `token({ secret })`  | não exposto | estável com a chave | não exposto       |
 
-| Estratégia            | Vaza o valor? |   Vaza igualdade?    |   Vaza o tipo?    |
-| --------------------- | :-----------: | :------------------: | :---------------: |
-| `sequential()`        |      não      | dentro de uma sessão | sim (`[EMAIL_1]`) |
-| `hashed({ secret })`  |      não      |    sim (estável)     |        sim        |
-| `token()` (aleatório) |      não      |         não          |        não        |
-| `token({ secret })`   |      não      |    sim (estável)     |        não        |
-
-"Vaza igualdade" = o provedor consegue saber que duas menções são a mesma
-entidade. Isso é um recurso útil para IDs estáveis, mas é mais metadado do que
-`sequential` dentro de uma sessão — por isso `sequential` continua sendo o
-padrão.
+Igualdade pode ajudar referências estáveis, mas é metadado. `token()` é o padrão
+mais seguro para tools e saída processada por máquina.
 
 ## Por que hashing sem chave é proibido
 
-Um hash simples de um valor (`sha256(email)`) usado como placeholder é um
-**vazamento de privacidade, pior do que numeração sequencial**:
+Um hash simples de email ou telefone pode ser adivinhado: o provedor pode
+recalcular candidatos offline. `hashed` e `token({ secret })` usam uma chave
+aleatória local do dispositivo; sem ela, um palpite correto não é verificável.
 
-- Placeholders são enviados ao provedor.
-- PII tem baixa entropia — nomes, telefones e emails são
-  adivinháveis/enumeráveis.
-- Então qualquer um que tenha o placeholder pode confirmar um valor adivinhado
-  **offline**, recalculando o hash (um ataque de rainbow table/dicionário).
-
-Por isso o local-pii só oferece hashing **com chave** (`hashed` /
-`token({ secret })`) usando um segredo aleatório de ≥128 bits gerado no
-dispositivo (`getOrCreateDeviceSecret`) que nunca sai dele. Sem a chave, um
-palpite correto não é verificável.
-
-## Tool calls são um destino de divulgação
-
-Reidratar os argumentos de uma tool call entrega à sua tool os valores reais —
-apropriado quando é o seu próprio código, mas uma nova divulgação se a tool
-encaminhar os dados para terceiros. Veja [Tool Calls](/pt/docs/tool-calls).
+Argumentos de tools são uma fronteira de divulgação. Reidratá-los entrega o
+valor original à sua tool; se ela o encaminhar, será uma nova divulgação sob
+responsabilidade do app. Veja [Tool Calls](/pt/docs/tool-calls).

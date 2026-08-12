@@ -1,47 +1,33 @@
 ---
 title: Security & Hashing
-description: What each strategy leaks, why unkeyed hashing is forbidden, and how to handle the mapping.
+description: Private mappings, placeholder disclosure, and the trust boundary between Detection and Generation.
 ---
 
-## The mapping is the secret
+## The private mapping is the secret
 
-`mapping` (`placeholder → original`) is the only thing that can reverse
-anonymization. Keep it **in memory**. Do not log it, send it to analytics or
-crash reporters, or persist it unless you must — and if you must, use the
-platform keystore (`expo-secure-store`), never plain storage.
+The mapping from placeholder to original user content is the only thing that
+can restore protected content. Keep it in memory. Do not log it, send it to
+analytics or crash reporters, or persist it outside a platform keystore.
+Keep original content out of telemetry that runs before Detection.
 
-Also keep the **raw text** out of logs/analytics/crash reporters that run
-_before_ anonymization.
+## What a Generation provider sees
 
-## What each strategy leaks to the provider
+| Strategy             | Value       | Equality                 | Type              |
+| -------------------- | ----------- | ------------------------ | ----------------- |
+| `sequential()`       | not exposed | within a privacy session | yes (`[EMAIL_1]`) |
+| `hashed({ secret })` | not exposed | stable with the key      | yes               |
+| `token()`            | not exposed | not exposed              | not exposed       |
+| `token({ secret })`  | not exposed | stable with the key      | not exposed       |
 
-| Strategy             | Leaks the value? | Leaks equality?  |  Leaks the type?  |
-| -------------------- | :--------------: | :--------------: | :---------------: |
-| `sequential()`       |        no        | within a session | yes (`[EMAIL_1]`) |
-| `hashed({ secret })` |        no        |   yes (stable)   |        yes        |
-| `token()` (random)   |        no        |        no        |        no         |
-| `token({ secret })`  |        no        |   yes (stable)   |        no         |
-
-"Leaks equality" = the provider can tell two mentions are the same entity.
-That's a feature for stable IDs, but it's more metadata than `sequential`
-within one session — which is why `sequential` stays the default.
+Equality can be useful for stable references, but it is metadata. `token()` is
+the safer default for tools and machine-parsed output.
 
 ## Why unkeyed hashing is forbidden
 
-A plain hash of a value (`sha256(email)`) as a placeholder is a **privacy leak,
-worse than sequential numbering**:
+A plain hash of an email or phone is guessable: a provider holding the hash can
+recompute candidates offline. `hashed` and `token({ secret })` use a random
+device-local key, so a correct guess cannot be verified without that key.
 
-- Placeholders are sent to the provider.
-- PII is low-entropy — names, phones and emails are guessable/enumerable.
-- So anyone holding the placeholder can confirm a guessed value **offline** by
-  recomputing the hash (a rainbow/dictionary attack).
-
-local-pii therefore only offers **keyed** hashing (`hashed` / `token({ secret })`)
-using a random ≥128-bit secret generated on device (`getOrCreateDeviceSecret`)
-that never leaves it. Without the key, a correct guess is not verifiable.
-
-## Tool calls are a disclosure destination
-
-Rehydrating tool-call arguments hands your tool the real values — appropriate
-for your own code, a re-disclosure if the tool forwards data to a third party.
-See [Tool Calls](/en/docs/tool-calls).
+Tool arguments are a disclosure boundary. Rehydrating an argument gives your
+tool the original value; if that tool forwards it elsewhere, that is a new
+disclosure that your application owns. See [Tool Calls](/en/docs/tool-calls).

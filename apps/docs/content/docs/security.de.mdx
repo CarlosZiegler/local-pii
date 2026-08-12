@@ -1,52 +1,34 @@
 ---
 title: Sicherheit & Hashing
-description: Was jede Strategie preisgibt, warum ungekeytes Hashing verboten ist und wie man das Mapping handhabt.
+description: Privates Mapping, Platzhalter-Offenlegung und Vertrauensgrenzen zwischen Erkennung und Generierung.
 ---
 
-## Das Mapping ist das Geheimnis
+## Das private Mapping ist das Geheimnis
 
-`mapping` (`Platzhalter → Original`) ist das Einzige, das die Anonymisierung
-rückgängig machen kann. Halte es **im Speicher**. Logge es nicht, sende es
-nicht an Analytics- oder Crash-Reporter-Dienste und persistiere es nicht,
-außer du musst — und wenn du musst, verwende den Plattform-Keystore
-(`expo-secure-store`), niemals einfachen Speicher.
+Die Verbindung von Platzhalter zu ursprünglichem Inhalt kann geschützten Inhalt
+allein wiederherstellen. Halte sie im Speicher. Nicht loggen, an Analytics oder
+Crash-Reporter senden oder außerhalb eines Plattform-Keystores persistieren.
+Originalinhalt darf nicht in Telemetrie gelangen, die vor der Erkennung läuft.
 
-Halte außerdem den **Rohtext** aus Logs/Analytics/Crash-Reportern heraus, die
-_vor_ der Anonymisierung laufen.
+## Was ein Generierungs-Provider sieht
 
-## Was jede Strategie gegenüber dem Provider preisgibt
+| Strategie            | Wert              | Gleichheit            | Typ               |
+| -------------------- | ----------------- | --------------------- | ----------------- |
+| `sequential()`       | nicht offengelegt | innerhalb der Session | ja (`[EMAIL_1]`)  |
+| `hashed({ secret })` | nicht offengelegt | stabil mit Schlüssel  | ja                |
+| `token()`            | nicht offengelegt | nicht offengelegt     | nicht offengelegt |
+| `token({ secret })`  | nicht offengelegt | stabil mit Schlüssel  | nicht offengelegt |
 
-| Strategie            | Gibt den Wert preis? | Gibt Gleichheit preis?  | Gibt den Typ preis? |
-| -------------------- | :------------------: | :---------------------: | :-----------------: |
-| `sequential()`       |         nein         | innerhalb einer Session |  ja (`[EMAIL_1]`)   |
-| `hashed({ secret })` |         nein         |       ja (stabil)       |         ja          |
-| `token()` (zufällig) |         nein         |          nein           |        nein         |
-| `token({ secret })`  |         nein         |       ja (stabil)       |        nein         |
-
-„Gibt Gleichheit preis" bedeutet: Der Provider kann erkennen, dass zwei
-Erwähnungen dieselbe Entität sind. Das ist ein Feature für stabile IDs, aber
-mehr Metadaten als `sequential` innerhalb einer Session — weshalb
-`sequential` der Standard bleibt.
+Gleichheit kann für stabile Referenzen nützlich sein, ist aber Metadaten. Für
+Tools und maschinell verarbeitete Ausgabe ist `token()` die sicherere Wahl.
 
 ## Warum ungekeytes Hashing verboten ist
 
-Ein einfacher Hash eines Werts (`sha256(email)`) als Platzhalter ist ein
-**Privacy-Leak, schlimmer als sequenzielle Nummerierung**:
+Ein einfacher Hash von E-Mail oder Telefon ist erratbar: Ein Provider kann
+Kandidaten offline neu berechnen. `hashed` und `token({ secret })` verwenden
+einen zufälligen gerätelokalen Schlüssel; ohne ihn ist ein Treffer nicht
+verifizierbar.
 
-- Platzhalter werden an den Provider gesendet.
-- PII hat niedrige Entropie — Namen, Telefonnummern und E-Mails sind
-  erratbar/enumerierbar.
-- Wer also den Platzhalter besitzt, kann einen erratenen Wert **offline**
-  bestätigen, indem er den Hash neu berechnet (ein Rainbow-/
-  Dictionary-Angriff).
-
-local-pii bietet daher ausschließlich **gekeytes** Hashing (`hashed` /
-`token({ secret })`) mit einem zufälligen ≥128-Bit-Secret, das on device
-erzeugt wird (`getOrCreateDeviceSecret`) und es nie verlässt. Ohne den Key
-ist eine korrekte Vermutung nicht verifizierbar.
-
-## Tool Calls sind ein Disclosure-Ziel
-
-Das Rehydrieren von Tool-Call-Argumenten gibt deinem Tool die echten Werte —
-angemessen für deinen eigenen Code, aber eine erneute Offenlegung, wenn das
-Tool Daten an Dritte weiterleitet. Siehe [Tool Calls](/de/docs/tool-calls).
+Tool-Argumente sind eine Offenlegungsgrenze. Rehydrierung gibt deinem Tool den
+Originalwert; eine Weiterleitung ist eine neue Offenlegung unter Verantwortung
+der Anwendung. Siehe [Tool Calls](/de/docs/tool-calls).

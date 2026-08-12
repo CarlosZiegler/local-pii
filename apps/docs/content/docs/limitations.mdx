@@ -1,50 +1,35 @@
 ---
 title: Limitations
-description: What local-pii does NOT catch. Read this before you rely on it.
+description: What Detection does not catch and where adapter guarantees stop.
 ---
 
-**PII removal is not perfect anonymization.** Treat local-pii as strong defense
-in depth, not a guarantee. These limits are real and some are asserted by the
-test suite so the docs stay honest.
+**Detection is not perfect anonymization.** Treat local-pii as defense in depth,
+not a guarantee. A successful round trip restores exactly what was protected;
+it cannot restore content that Detection missed.
 
 ## Indirect identifiers pass through
 
-Removing name, email and phone does not de-identify:
+Removing a name, email, and phone does not de-identify:
 
 > "I'm the only Brazilian engineer at company X in Kempten, diagnosed yesterday
 > with a rare disease."
 
-No detector catches that. Mitigate with the [dictionary](/en/docs/detectors),
-`strict` mode, and a "private mode" that skips the API entirely for sensitive
-notes.
+No detector catches that. Use the [dictionary](/en/docs/detectors), `strict`
+mode, or skip a provider entirely for especially sensitive notes.
 
-## The model has a recall ceiling
+## Detection-model recall has a ceiling
 
-Rampart is a small model tuned for **Latin-script** languages. From its model
-card:
+Rampart Q4 is a small Detection model tuned for Latin-script languages. Its
+reported private-term recall is ~97–99% for EN/ES/FR/DE/IT/PT/NL and ~13.7% for
+non-Latin scripts (Cyrillic, CJK, Arabic). Government-style IDs rely on model
+coverage (~68%). Deterministic detectors remain structural/checksum based and
+run first.
 
-- Private-term recall ~97–99% on EN/ES/FR/DE/IT/PT/NL.
-- **Non-Latin scripts (Cyrillic, CJK, Arabic): ~13.7%** — largely missed.
-- Government-style IDs rely on the model (~68%).
+## Choose the right placeholder
 
-Deterministic detectors have no such limit (they're checksum/structure based),
-which is why they run first and win overlaps.
+Readable `[TYPE_N]` placeholders can collide with placeholder-shaped input, and
+models can mangle brackets in JSON/Markdown/tool contexts. Use [`token()`](/en/docs/strategies)
+for tools and machine-parsed output.
 
-## Detection is not reversibility
-
-The [round-trip](/en/docs/tool-calls) is guaranteed regardless of what's detected:
-rehydrating restores exactly what was redacted. But something the detectors
-**miss** is never redacted — so it reaches the provider in the clear. Coverage
-and reversibility are separate concerns.
-
-## Choose the right token for the job
-
-Readable `[TYPE_N]` placeholders can collide with placeholder-shaped text
-already in the input, and LLMs mangle brackets in JSON/markdown/tool contexts.
-Use the opaque [`token()`](/en/docs/strategies) strategy for tool calls and
-machine-parsed output.
-
-## Community package
-
-`local-pii` is an independent community project — not affiliated with or endorsed
-by Expo, Vercel, OpenAI or National Design Studio.
+`local-pii` is an independent community project, not affiliated with Expo,
+Vercel, OpenAI, or National Design Studio.

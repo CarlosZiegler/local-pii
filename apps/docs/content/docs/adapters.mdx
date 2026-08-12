@@ -1,54 +1,86 @@
 ---
 title: Adapters
-description: Wrap any LLM call — Vercel AI SDK, OpenAI, Grok — with anonymize → call → rehydrate. Tool calls included.
+description: Protected and restored values across inline, OpenAI, AI SDK, and TanStack adapters.
 ---
 
-Adapters wrap the whole cycle so you barely change your code. Both handle
-streaming and rehydrate tool-call argument JSON, so your tools run with **real**
-values while the provider only ever sees placeholders. Use the opaque
-[`token()`](/en/docs/strategies) strategy when tools are involved — see
-[Tool Calls](/en/docs/tool-calls).
+Adapters implement the same protection flow: Detection → anonymizer → privacy
+session → Generation adapter or inline callback → restored result. They protect
+semantic user content while preserving protocol control fields.
 
 ## Inline calls — `local-pii/inline`
 
-Use the inline adapter for any in-process model API. It owns the strict
-protect → call → restore order and forwards the same `AbortSignal`:
+Use inline for any in-process Generation model. It protects, forwards the same
+`AbortSignal`, and restores in a `finally`-safe lifecycle:
 
 ```ts
-import {
-  runInlineJson,
-  runInlineText,
-  runInlineTextStream,
-} from "local-pii/inline"
+import { runInlineText } from "local-pii/inline"
 
 const answer = await runInlineText({
+  session: conversation,
   input: "Email ana@acme.com",
   signal,
-  call: (protectedText, { signal }) =>
-    localModel.prompt(protectedText, { signal }),
-})
-
-for await (const delta of runInlineTextStream({
-  input: "Repeat ana@acme.com",
-  call: (protectedText, { signal }) =>
-    localModel.stream(protectedText, { signal }),
-}))
-  render(delta)
-
-const extracted = await runInlineJson({
-  input: { contact: "ana@acme.com", request: "Summarize this contact" },
-  call: (protectedValue, { signal }) =>
-    localModel.extract(protectedValue, { signal }),
+  call: (protectedContent, { signal }) =>
+    generationModel.generate(protectedContent, { signal }),
 })
 ```
 
-`runInlineJson` deep-protects structured values without mutating them. An
-adapter-created session is cleared automatically; a supplied `session` remains
-owned by the caller and can span a conversation.
+`runInlineJson` deep-protects string leaves without mutating the input. Inline
+resolution priority is `session`, then `anonymizer`, then the default
+anonymizer. An adapter-created session is cleaned up; a supplied session is
+borrowed and never cleared. Cleanup failures do not replace a primary model or
+abort failure.
+
+## OpenAI / Grok — `local-pii/openai`
+
+```ts
+import OpenAI from "openai"
+import { withPiiOpenAI } from "local-pii/openai"
+
+const client = withPiiOpenAI(new OpenAI({ apiKey }))
+const result = await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages,
+  tools,
+})
+```
+
+| Contract                          | Proven behavior                                                                                                                                                                    |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Protected semantic values         | Message text, system text, tool arguments, and tool results are protected before the client sees them.                                                                             |
+| Restored semantic values          | Response text, streamed deltas, tool arguments delivered to your tool, and tool results are restored at their protocol boundary.                                                   |
+| Preserved control / opaque values | Roles, IDs, model/options, tool names, request metadata, and opaque provider fields are preserved; fields containing personal information remain caller responsibility.            |
+| Unsupported variants / errors     | Unsupported client shapes fail instead of silently falling back. Abort and provider errors retain their exact primary error; use `token()` when JSON or tools may mangle brackets. |
+
+The wrapper is structural and has no `openai` dependency, so it also covers
+Grok/xAI, Groq, Together, OpenRouter, and Ollama-compatible clients. An
+implicit session is created for a call; pass `{ session }` to share a private
+conversation. `createPiiChat`, `rehydrateToolArgs`, and
+`createStreamingRehydrator` are available for a manual loop.
+
+## Vercel AI SDK — `local-pii/ai-sdk`
+
+```ts
+import { openai } from "@ai-sdk/openai"
+import { streamText } from "ai"
+import { withPii } from "local-pii/ai-sdk"
+
+const model = withPii(openai("gpt-5.2"), { session: conversation })
+const result = streamText({ model, prompt })
+```
+
+| Contract                          | Proven behavior                                                                                                                                                                  |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Protected semantic values         | System/user/assistant text, reasoning text, tool-call input, tool-result output, and structured JSON are protected before the provider.                                          |
+| Restored semantic values          | Text and reasoning stream parts, tool arguments before tool execution, and tool results at the next model step are restored.                                                     |
+| Preserved control / opaque values | Part types, IDs, roles, tool names, approval state, provider options, and stream control markers remain unchanged; caller-owned metadata is not inspected.                       |
+| Unsupported variants / errors     | Unsupported semantic content or malformed streams fail explicitly. Pre-abort/post-protection aborts and provider failures preserve the exact error and do not call the provider. |
+
+`withPii` is middleware: no tool wrapper is required. Supplied sessions are
+borrowed; without one the adapter owns a one-call session. The browser
+playground pins `ai@7.0.57`, `@ai-sdk/react@4.0.61`, and
+`@browser-ai/core@3.0.0`.
 
 ## TanStack AI — `local-pii/tanstack`
-
-Wrap a client `ConnectConnectionAdapter`, including an entirely local one:
 
 ```ts
 import { createAnonymizer, token } from "local-pii"
@@ -59,51 +91,23 @@ const connection = piiConnection(browserConnection, { session })
 // useChat({ connection })
 ```
 
-Use one session/wrapper per conversation. Text, structured content, tool inputs,
-results, streaming boundaries, abort, and overlapping runs are protected. The
-current contract is pinned to `@tanstack/ai@0.43.1` and
-`@tanstack/ai-client@0.23.1`.
+| Contract                          | Proven behavior                                                                                                                                        |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Protected semantic values         | Text messages, supported structured content, tool inputs/results, and each stream boundary are protected without mutating caller messages.             |
+| Restored semantic values          | Text deltas, structured values, tool arguments, and tool results are restored at the TanStack boundary.                                                |
+| Preserved control / opaque values | Roles, message/run/thread IDs, event types, finish/error markers, and opaque `data` are preserved. Hydration is passed through.                        |
+| Unsupported variants / errors     | Unsupported semantic parts throw `UnsupportedTanStackSemanticContentError`; abort, cleanup, and overlapping-run failures preserve their primary error. |
 
-## Vercel AI SDK — `local-pii/ai-sdk`
+The contract is pinned to `@tanstack/ai@0.43.1`,
+`@tanstack/ai-client@0.23.1`, and `@tanstack/ai-react@0.19.1`. A caller must
+provide one session per private conversation. Hydration and `joinRun` work only
+with the same live session. Persistence, full-reload restoration, cross-tab
+restoration, and joining with a new session are unsupported. Since 0.1.0,
+`UnsupportedTanStackSemanticContentError` replaces guessing: migrate unsupported
+semantic parts to text or a supported structured value.
 
-A middleware. No tool wrapper needed: it rehydrates tool-call arguments before
-the SDK executes your tool, then re-anonymizes the tool result next step.
+## Choose a placeholder strategy
 
-```ts
-import { openai } from "@ai-sdk/openai"
-import { streamText } from "ai"
-import { withPii } from "local-pii/ai-sdk"
-
-const model = withPii(openai("gpt-5.2")) // wrapLanguageModel under the hood
-const { textStream } = streamText({ model, prompt })
-```
-
-Create one session per conversation (per request on a server):
-`withPii(model, { session })`.
-
-The browser playground pins `ai@7.0.57`, `@ai-sdk/react@4.0.61`, and
-`@browser-ai/core@3.0.0` for this direct client-side pipeline.
-
-## OpenAI & Grok / xAI — `local-pii/openai`
-
-Wraps an OpenAI **client instance** structurally — zero dependency on the
-`openai` package — so it also covers Grok, Groq, Together, OpenRouter, Ollama.
-
-```ts
-import OpenAI from "openai"
-import { withPiiOpenAI } from "local-pii/openai"
-
-// Grok: same wrapper, different baseURL
-const client = withPiiOpenAI(
-  new OpenAI({ baseURL: "https://api.x.ai/v1", apiKey })
-)
-const res = await client.chat.completions.create({
-  model: "grok-4",
-  messages,
-  tools,
-})
-// res.choices[0].message.content is already rehydrated
-```
-
-For a manual loop, `createPiiChat`, `rehydrateToolArgs` and
-`createStreamingRehydrator` are exported.
+Use readable `sequential()` for ordinary text, keyed `hashed({ secret })` when
+stable equality is required, and opaque `token()` for tools or machine-parsed
+JSON. A private mapping is never a protocol field and must stay on the device.
