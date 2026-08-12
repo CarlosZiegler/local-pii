@@ -65,7 +65,7 @@ então ele sobrevive — e a decodificação tolerante recupera confusões entre
 import { token } from "local-pii"
 
 token() // aleatório por valor distinto; igualdade aparece dentro da sessão
-token({ secret }) // HMAC — stable across sessions/devices
+token({ secret }) // HMAC — estável entre sessões/dispositivos
 token({ bits: 100, prefix: "PII" })
 ```
 

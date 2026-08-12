@@ -9,6 +9,10 @@ Inhalte werden geschützt, Protokoll-Steuerfelder bleiben erhalten.
 
 ## Inline-Aufrufe — `local-pii/inline`
 
+Inline eignet sich für jedes Generierungsmodell im selben Prozess. Der Adapter
+reicht dasselbe `AbortSignal` weiter und rehydriert in einem
+`finally`-sicheren Lifecycle:
+
 ```ts
 import { runInlineText } from "local-pii/inline"
 

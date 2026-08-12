@@ -9,7 +9,8 @@ Eles protegem conteúdo semântico e preservam campos de controle do protocolo.
 
 ## Chamadas inline — `local-pii/inline`
 
-Use inline para qualquer modelo de Geração no mesmo processo:
+Use inline para qualquer modelo de Geração no mesmo processo. Ele encaminha o
+mesmo `AbortSignal` e reidrata com um ciclo de vida seguro em `finally`:
 
 ```ts
 import { runInlineText } from "local-pii/inline"
