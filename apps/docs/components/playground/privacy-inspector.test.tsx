@@ -29,8 +29,31 @@ describe("PrivacyInspector", () => {
     render(<PrivacyInspector runtimeName="Gemma" />)
 
     expect(
-      screen.getByText("No protected generation has been committed yet.")
+      screen.getByText("No generation run has been committed yet.")
     ).toBeInTheDocument()
     expect(screen.getByText("No prompt sent yet.")).toBeInTheDocument()
+  })
+
+  it("distinguishes a committed run without detected personal information", () => {
+    render(
+      <PrivacyInspector
+        inspection={{
+          generationRunId: "run-empty",
+          counts: {},
+          protectedHistory: [],
+          protectedContent: "hello",
+        }}
+        runtimeName="Gemma"
+      />
+    )
+
+    expect(
+      screen.getByText(
+        "No personal information was detected in this generation run."
+      )
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText("No generation run has been committed yet.")
+    ).not.toBeInTheDocument()
   })
 })

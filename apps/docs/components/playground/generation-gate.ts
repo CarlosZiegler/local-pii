@@ -80,18 +80,22 @@ export function withPlaygroundGate(
     id: runtime.id,
     disclosure: runtime.disclosure,
     generate(input: ProtectedBrowserRequest) {
-      let lease: GenerationLease | undefined
-      return managedGeneration(
-        async () => {
-          lease = gate.tryAcquire(owner)
-          const source = runtime.generate(input)
-          return source[Symbol.asyncIterator]()
+      return {
+        [Symbol.asyncIterator]() {
+          let lease: GenerationLease | undefined
+          return managedGeneration(
+            async () => {
+              lease = gate.tryAcquire(owner)
+              const source = runtime.generate(input)
+              return source[Symbol.asyncIterator]()
+            },
+            input.signal,
+            () => {
+              lease?.release()
+            }
+          )[Symbol.asyncIterator]()
         },
-        input.signal,
-        () => {
-          lease?.release()
-        }
-      )
+      }
     },
     dispose() {
       return runtime.dispose()

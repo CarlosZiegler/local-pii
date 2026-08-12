@@ -96,8 +96,8 @@ function anonymizeJsonValue(
 
 /**
  * Observe the exact PiiSession calls used by a protected browser run.
- * Observation is deliberately separate from the session mapping: publishing
- * a committed request never copies or serializes the reverse mapping.
+ * Observation is deliberately separate from the private mapping: publishing
+ * a committed generation run never copies or serializes that mapping.
  */
 export function createProtectionObserver(
   base: PiiSession,
@@ -227,44 +227,70 @@ export function observeBrowserRuntime(
     generate(input) {
       assertProtectedBrowserRequest(input)
       const observation = observer.current()
-      return managedGeneration(
-        async () => {
-          const source = runtime.generate(input)
-          const upstream = source[Symbol.asyncIterator]()
-          let first = true
-          let closed = false
+      return {
+        [Symbol.asyncIterator]() {
+          let naturalEnd = false
+          const managed = managedGeneration(
+            async () => {
+              const source = runtime.generate(input)
+              const upstream = source[Symbol.asyncIterator]()
+              return {
+                next(...args: [] | [undefined]) {
+                  return Promise.resolve(upstream.next(...args)).then(
+                    (result) => {
+                      if (result.done) naturalEnd = true
+                      return result
+                    }
+                  )
+                },
+                return(reason?: unknown) {
+                  observation?.discard()
+                  return (
+                    upstream.return?.(reason) ??
+                    Promise.resolve({ done: true, value: undefined })
+                  )
+                },
+                throw(error?: unknown) {
+                  observation?.discard()
+                  return (
+                    upstream.throw?.(error) ??
+                    Promise.reject(
+                      error ?? new Error("The generation cannot throw")
+                    )
+                  )
+                },
+              }
+            },
+            input.signal,
+            () => {
+              if (!naturalEnd) observation?.discard()
+            }
+          )[Symbol.asyncIterator]()
+
           return {
             next(...args: [] | [undefined]) {
-              const result = upstream.next(...args)
-              if (!first) return result
-              first = false
-              return Promise.resolve(result).then(
-                (value) => {
-                  if (!closed && !input.signal?.aborted) {
-                    observation?.commit(input)
-                  }
-                  return value
+              return managed.next(...args).then(
+                (result) => {
+                  if (result.done) observation?.commit(input)
+                  return result
                 },
                 (error) => {
-                  closed = true
                   observation?.discard()
                   throw error
                 }
               )
             },
             return(reason?: unknown) {
-              closed = true
               observation?.discard()
               return (
-                upstream.return?.(reason) ??
+                managed.return?.(reason) ??
                 Promise.resolve({ done: true, value: undefined })
               )
             },
             throw(error?: unknown) {
-              closed = true
               observation?.discard()
               return (
-                upstream.throw?.(error) ??
+                managed.throw?.(error) ??
                 Promise.reject(
                   error ?? new Error("The generation cannot throw")
                 )
@@ -272,9 +298,7 @@ export function observeBrowserRuntime(
             },
           }
         },
-        input.signal,
-        () => observation?.discard()
-      )
+      }
     },
     dispose() {
       return runtime.dispose()

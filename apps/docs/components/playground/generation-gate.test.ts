@@ -13,7 +13,7 @@ import {
 function request(signal?: AbortSignal): ProtectedBrowserRequest {
   return createProtectedBrowserRequest({
     protectedHistory: [],
-    protectedContent: "safe",
+    protectedContent: "protected content",
     signal,
   })
 }
@@ -138,6 +138,46 @@ describe("generation gate", () => {
     expect(gate.getSnapshot()).toEqual({ owner: "vercel" })
     cleanup.resolve()
     await close
+    expect(gate.getSnapshot()).toEqual({ owner: null })
+  })
+
+  it("does not let a rejected sibling iterator release the active lease", async () => {
+    const gate = createGenerationGate()
+    const pending = deferred<IteratorResult<string>>()
+    const source: BrowserGenerationRuntime = {
+      id: "sibling",
+      disclosure: {
+        label: "Sibling",
+        model: "sibling",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate: () => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => pending.promise,
+            return: async () => ({ done: true, value: undefined }),
+          }
+        },
+      }),
+      dispose: async () => undefined,
+    }
+    const generated = withPlaygroundGate(source, gate, "vercel").generate(
+      request()
+    )
+    const first = generated[Symbol.asyncIterator]()
+    const second = generated[Symbol.asyncIterator]()
+    const firstNext = first.next()
+    await vi.waitFor(() =>
+      expect(gate.getSnapshot()).toEqual({ owner: "vercel" })
+    )
+
+    await expect(second.next()).rejects.toBeInstanceOf(PlaygroundBusyError)
+    expect(gate.getSnapshot()).toEqual({ owner: "vercel" })
+    expect(() => gate.tryAcquire("tanstack")).toThrow(PlaygroundBusyError)
+
+    pending.resolve({ done: true, value: undefined })
+    await firstNext
     expect(gate.getSnapshot()).toEqual({ owner: null })
   })
 })

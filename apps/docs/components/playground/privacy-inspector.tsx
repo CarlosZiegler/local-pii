@@ -46,7 +46,9 @@ export function PrivacyInspector({
             ))
           ) : (
             <span className="text-xs text-muted-foreground">
-              No protected generation has been committed yet.
+              {committed
+                ? "No personal information was detected in this generation run."
+                : "No generation run has been committed yet."}
             </span>
           )}
         </div>

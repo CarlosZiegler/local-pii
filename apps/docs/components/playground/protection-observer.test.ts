@@ -166,9 +166,15 @@ describe("protection observer", () => {
     const generation = observed.generate(request)
 
     expect(publish).not.toHaveBeenCalled()
-    await expect(generation[Symbol.asyncIterator]().next()).resolves.toEqual({
+    const iterator = generation[Symbol.asyncIterator]()
+    await expect(iterator.next()).resolves.toEqual({
       done: false,
       value: "ok",
+    })
+    expect(publish).not.toHaveBeenCalled()
+    await expect(iterator.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
     })
     expect(publish).toHaveBeenCalledOnce()
     expect(base.mapping).toEqual({ "[EMAIL_1]": "seam@example.com" })
@@ -201,6 +207,7 @@ describe("protection observer", () => {
     const runA = observed.generate(requestA)[Symbol.asyncIterator]()
 
     const runB = observer.begin("run-b")
+    await runA.next()
     await runA.next()
 
     expect(publish).not.toHaveBeenCalled()
@@ -255,6 +262,45 @@ describe("protection observer", () => {
     await expect(pending).resolves.toEqual({ done: true, value: undefined })
     await Promise.resolve()
 
+    expect(publish).not.toHaveBeenCalled()
+  })
+
+  it("does not publish a generation run that fails after its first chunk", async () => {
+    const failure = new Error("late generation failure")
+    const publish = vi.fn()
+    const observer = createProtectionObserver(session(), publish)
+    observer.begin("failed-run")
+    const runtime: BrowserGenerationRuntime = {
+      id: "late-failure",
+      disclosure: {
+        label: "Late failure",
+        model: "late-failure",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield "first"
+          throw failure
+        },
+      }),
+      dispose: async () => undefined,
+    }
+    const iterator = observeBrowserRuntime(runtime, observer)
+      .generate(
+        createProtectedBrowserRequest({
+          protectedHistory: [],
+          protectedContent: "protected",
+        })
+      )
+      [Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: "first",
+    })
+    expect(publish).not.toHaveBeenCalled()
+    await expect(iterator.next()).rejects.toBe(failure)
     expect(publish).not.toHaveBeenCalled()
   })
 })
