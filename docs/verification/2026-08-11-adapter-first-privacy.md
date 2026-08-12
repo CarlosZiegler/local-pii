@@ -4,16 +4,17 @@ This record closes the evidence work in [issue #29](https://github.com/CarlosZie
 
 ## Automated commands
 
-| Command                                                        | Observed result | Coverage or artifact                                                                                                                                    |
-| -------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `bun run test`                                                 | Pass            | `local-pii` 380/380; docs 207/207                                                                                                                       |
-| `bun run typecheck`                                            | Pass            | Workspace TypeScript checks                                                                                                                             |
-| `bun run lint`                                                 | Pass            | No errors; one pre-existing unused `Geist` warning in `apps/web`                                                                                        |
-| `bun run build`                                                | Pass            | Library ESM/CJS/declarations; docs static export with 38 pages                                                                                          |
-| `bun run --cwd packages/local-pii test:matrix`                 | Pass            | 8 public subpaths; ESM/CJS targets; React Native target; 13 isolated bundles; NodeNext and Bundler declarations                                         |
-| `bun run --cwd apps/example test:export`                       | Pass            | Real Android Metro export; exact 14.7 MB Rampart ONNX provenance; native ONNX runtime present and web runtime absent                                    |
-| `bun run --cwd apps/docs test:e2e`                             | Pass            | 4 Playwright checks over a fresh static export: both chats, keyboard/status/inspection, PT/DE routes, `.mjs` MIME, WebSocket rejection, and HTTP policy |
-| `bunx prettier --check .` and `git diff --check 1b0609a..HEAD` | Pass            | Formatting and whitespace                                                                                                                               |
+| Command                                                              | Observed result | Coverage or artifact                                                                                                                                    |
+| -------------------------------------------------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `bun run test`                                                       | Pass            | `local-pii` 380/380; docs 207/207                                                                                                                       |
+| `bun run typecheck`                                                  | Pass            | Workspace TypeScript checks                                                                                                                             |
+| `bun run lint`                                                       | Pass            | No errors; one pre-existing unused `Geist` warning in `apps/web`                                                                                        |
+| `bun run build`                                                      | Pass            | Library ESM/CJS/declarations; docs static export with 38 pages                                                                                          |
+| `bun run --cwd packages/local-pii test:matrix`                       | Pass            | 8 public subpaths; ESM/CJS targets; React Native target; 13 isolated bundles; NodeNext and Bundler declarations                                         |
+| `npx -y node@20 packages/local-pii/scripts/verify-import-matrix.mjs` | Pass            | Direct export-target and isolation matrix on the lowest declared Node major                                                                             |
+| `bun run --cwd apps/example test:export`                             | Pass            | Real Android Metro export; exact 14.7 MB Rampart ONNX provenance; native ONNX runtime present and web runtime absent                                    |
+| `bun run --cwd apps/docs test:e2e`                                   | Pass            | 5 Playwright checks over a fresh static export: both chats, keyboard/status/inspection, PT/DE routes, `.mjs` MIME, WebSocket rejection, and HTTP policy |
+| `bunx prettier --check .` and `git diff --check 1b0609a..HEAD`       | Pass            | Formatting and whitespace                                                                                                                               |
 
 The deterministic E2E installs a fake native Prompt API only as a browser-runtime seam. It is not counted as evidence that a real model exists or has a particular quality.
 
@@ -50,6 +51,8 @@ Their repository sizes total **293,284,073 bytes**. Chrome also fetched two vers
 - `ort-wasm-simd-threaded.asyncify.wasm`: 23,567,050 uncompressed bytes
 
 The disclosure therefore reports approximately **316,898,512 static artifact bytes (~317 MB before transfer compression)** and all three origin families: `https://huggingface.co`, `https://*.cdn.hf.co`, and `https://cdn.jsdelivr.net`. The captured responses used Brotli transfer compression, so observed wire bytes were lower. All external requests were GETs for these static model/runtime resources; there was no remote generation request.
+
+A final installed-Chrome render check after this correction showed `Artifact download: ~317 MB` and the JSDelivr origin before activation, without starting another download.
 
 The six model URLs remain the cache/prefetch manifest. The two ONNX Runtime support resources are versioned application-runtime dependencies, not model files, and are disclosed without being misclassified as Gemma artifacts.
 
