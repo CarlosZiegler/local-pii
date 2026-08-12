@@ -858,6 +858,14 @@ export function createGemmaBrowserRuntime(
   const active = new Set<Promise<void>>()
   let runtimeDisposePromise: Promise<void> | undefined
   const generatorDisposals = new WeakMap<object, Promise<void>>()
+  let hasCleanupFailure = false
+  let firstCleanupFailure: unknown
+
+  const recordCleanupFailure = (cause: unknown): void => {
+    if (hasCleanupFailure) return
+    hasCleanupFailure = true
+    firstCleanupFailure = cause
+  }
 
   const disposeGenerator = (generator: TextGenerator): Promise<void> => {
     const key = generator as object
@@ -887,9 +895,20 @@ export function createGemmaBrowserRuntime(
       ) {
         await resource.dispose()
       }
-    } catch {
-      // Preserve the acquisition/abort error as primary. The controller's
-      // disposal barrier owns the complete runtime cleanup failure policy.
+    } catch (cause) {
+      // Preserve the acquisition/abort error as primary. Runtime disposal
+      // reports the first secondary cleanup failure after all attempts.
+      recordCleanupFailure(cause)
+    }
+  }
+
+  const disposeGeneratorSafely = async (
+    generator: TextGenerator
+  ): Promise<void> => {
+    try {
+      await disposeGenerator(generator)
+    } catch (cause) {
+      recordCleanupFailure(cause)
     }
   }
 
@@ -939,7 +958,7 @@ export function createGemmaBrowserRuntime(
       signal.throwIfAborted()
       return { generator, transformers }
     } catch (cause) {
-      if (generator) await disposeGenerator(generator)
+      if (generator) await disposeGeneratorSafely(generator)
       else await disposeResource(model)
       await disposeResource(tokenizer)
       throw cause
@@ -1058,8 +1077,6 @@ export function createGemmaBrowserRuntime(
           activeError = error
         }
 
-        let disposalFailed = false
-        let disposalError: unknown
         try {
           const loading = preparation?.promise
           preparation?.abortController.abort(
@@ -1071,16 +1088,15 @@ export function createGemmaBrowserRuntime(
           await loading?.catch(() => undefined)
           const loaded = generatorBundle
           generatorBundle = undefined
-          if (loaded) await disposeGenerator(loaded.generator)
+          if (loaded) await disposeGeneratorSafely(loaded.generator)
         } catch (error) {
-          disposalFailed = true
-          disposalError = error
+          recordCleanupFailure(error)
         }
 
         // Active-run cleanup has deterministic precedence, but shared
         // pipeline disposal is always attempted before reporting either.
         if (activeFailed) throw activeError
-        if (disposalFailed) throw disposalError
+        if (hasCleanupFailure) throw firstCleanupFailure
       })()
       return runtimeDisposePromise
     },

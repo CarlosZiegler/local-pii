@@ -267,6 +267,8 @@ describe("browser runtime controller", () => {
       status: "error",
       error: reason,
     })
+
+    await expect(controller.dispose()).rejects.toBe(cleanupFailure)
   })
 
   it("reports a warm-session cleanup failure when activation succeeds", async () => {
@@ -334,6 +336,128 @@ describe("browser runtime controller", () => {
       status: "ready",
       kind: "gemma-3-270m",
     })
+  })
+
+  it("does not block native activation behind pending Gemma cleanup", async () => {
+    const native = nativeFactory("downloadable")
+    const selected = runtime("gemini-nano")
+    const candidate = runtime("gemma-3-270m") as BrowserGenerationRuntime & {
+      prepare: ReturnType<typeof vi.fn>
+    }
+    const releaseCleanup = deferred<void>()
+    candidate.prepare = vi.fn(async () => {
+      throw new Error("Gemma preparation failed")
+    })
+    candidate.dispose = vi.fn(() => releaseCleanup.promise)
+    const controller = createRuntimeController(
+      controllerDependencies({
+        getNative: () => native,
+        createNativeRuntime: () => selected,
+        loadGemma: async () => candidate,
+      })
+    )
+
+    await controller.check()
+    await expect(controller.activate("gemma-3-270m")).rejects.toThrow(
+      "Gemma preparation failed"
+    )
+    await vi.waitFor(() => expect(candidate.dispose).toHaveBeenCalledOnce())
+
+    await controller.check()
+    await expect(controller.activate("gemini-nano")).resolves.toBeUndefined()
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "ready",
+      kind: "gemini-nano",
+    })
+
+    releaseCleanup.resolve()
+    await controller.dispose()
+    expect(candidate.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("waits for Gemma cleanup before an un-aborted retry", async () => {
+    const first = runtime("gemma-3-270m") as BrowserGenerationRuntime & {
+      prepare: ReturnType<typeof vi.fn>
+    }
+    const second = runtime("gemma-3-270m") as BrowserGenerationRuntime & {
+      prepare: ReturnType<typeof vi.fn>
+    }
+    const releaseCleanup = deferred<void>()
+    first.prepare = vi.fn(async () => {
+      throw new Error("first preparation failed")
+    })
+    first.dispose = vi.fn(() => releaseCleanup.promise)
+    second.prepare = vi.fn(async () => undefined)
+    const loadGemma = vi
+      .fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second)
+    const controller = createRuntimeController(
+      controllerDependencies({ loadGemma })
+    )
+
+    await controller.check()
+    await expect(controller.activate("gemma-3-270m")).rejects.toThrow(
+      "first preparation failed"
+    )
+    await vi.waitFor(() => expect(first.dispose).toHaveBeenCalledOnce())
+
+    const retry = controller.activate("gemma-3-270m")
+    await Promise.resolve()
+    expect(second.prepare).not.toHaveBeenCalled()
+
+    releaseCleanup.resolve()
+    await retry
+    expect(second.prepare).toHaveBeenCalledOnce()
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "ready",
+      kind: "gemma-3-270m",
+    })
+    await controller.dispose()
+  })
+
+  it("aborts a retry waiting on Gemma cleanup with its exact reason", async () => {
+    const first = runtime("gemma-3-270m") as BrowserGenerationRuntime & {
+      prepare: ReturnType<typeof vi.fn>
+    }
+    const second = runtime("gemma-3-270m") as BrowserGenerationRuntime & {
+      prepare: ReturnType<typeof vi.fn>
+    }
+    const releaseCleanup = deferred<void>()
+    first.prepare = vi.fn(async () => {
+      throw new Error("first preparation failed")
+    })
+    first.dispose = vi.fn(() => releaseCleanup.promise)
+    second.prepare = vi.fn(async () => undefined)
+    const loadGemma = vi
+      .fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second)
+    const controller = createRuntimeController(
+      controllerDependencies({ loadGemma })
+    )
+
+    await controller.check()
+    await expect(controller.activate("gemma-3-270m")).rejects.toThrow(
+      "first preparation failed"
+    )
+    await vi.waitFor(() => expect(first.dispose).toHaveBeenCalledOnce())
+
+    const abort = new AbortController()
+    const reason = new DOMException("Retry stopped", "AbortError")
+    const retry = controller.activate("gemma-3-270m", abort.signal)
+    abort.abort(reason)
+
+    await expect(retry).rejects.toBe(reason)
+    expect(second.prepare).not.toHaveBeenCalled()
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "error",
+      error: reason,
+      kind: "gemma-3-270m",
+    })
+
+    releaseCleanup.resolve()
+    await controller.dispose()
   })
 
   it("owns failed preparation cleanup exactly once", async () => {

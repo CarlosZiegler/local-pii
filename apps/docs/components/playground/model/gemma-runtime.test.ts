@@ -317,6 +317,45 @@ describe("Gemma browser-generation runtime", () => {
     await runtime.dispose()
   })
 
+  it("preserves preparation failure while retaining partial cleanup failure", async () => {
+    const preparationFailure = new Error("model construction")
+    const modelCleanupFailure = new Error("model cleanup")
+    const tokenizerCleanupFailure = new Error("tokenizer cleanup")
+    const tokenizer = {
+      apply_chat_template: vi.fn(() => "formatted prompt"),
+      dispose: vi.fn(async () => {
+        throw tokenizerCleanupFailure
+      }),
+    }
+    const model = {
+      dispose: vi.fn(async () => {
+        throw modelCleanupFailure
+      }),
+    }
+    const loadTransformers = vi.fn(async () => ({
+      env: {},
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      AutoConfig: {
+        from_pretrained: vi.fn(async () => ({ model_type: "gemma3_text" })),
+      },
+      AutoTokenizer: { from_pretrained: vi.fn(async () => tokenizer) },
+      AutoModelForCausalLM: {
+        from_pretrained: vi.fn(async () => model),
+      },
+      TextGenerationPipeline: vi.fn(() => {
+        throw preparationFailure
+      }),
+      TextStreamer: FakeTextStreamer,
+    }))
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+
+    await expect(runtime.prepare()).rejects.toBe(preparationFailure)
+    expect(model.dispose).toHaveBeenCalledOnce()
+    expect(tokenizer.dispose).toHaveBeenCalledOnce()
+    await expect(runtime.dispose()).rejects.toBe(modelCleanupFailure)
+    await expect(runtime.dispose()).rejects.toBe(modelCleanupFailure)
+  })
+
   it("prepares the shared pipeline without starting a generation", async () => {
     const fake = fakeTransformers()
     const runtime = createGemmaBrowserRuntime({

@@ -204,6 +204,7 @@ export function createRuntimeController(
   let disposed = false
   let disposal: Promise<void> | undefined
   const pendingDisposals = new Set<Promise<void>>()
+  const pendingGemmaDisposals = new Set<Promise<void>>()
   let hasBackgroundFailure = false
   let firstBackgroundFailure: unknown
 
@@ -213,22 +214,31 @@ export function createRuntimeController(
     firstBackgroundFailure = cause
   }
 
-  const trackPendingDisposal = (promise: Promise<void>): void => {
+  const trackPendingDisposal = (
+    promise: Promise<void>,
+    kind?: RuntimeKind
+  ): void => {
     pendingDisposals.add(promise)
+    if (kind === "gemma-3-270m") pendingGemmaDisposals.add(promise)
     void promise.then(
-      () => pendingDisposals.delete(promise),
+      () => {
+        pendingDisposals.delete(promise)
+        pendingGemmaDisposals.delete(promise)
+      },
       (cause) => {
         recordBackgroundFailure(cause)
         pendingDisposals.delete(promise)
+        pendingGemmaDisposals.delete(promise)
       }
     )
   }
 
   const scheduleDisposal = (
-    cleanup: () => void | Promise<void>
+    cleanup: () => void | Promise<void>,
+    kind?: RuntimeKind
   ): Promise<void> => {
     const disposal = Promise.resolve().then(cleanup)
-    trackPendingDisposal(disposal)
+    trackPendingDisposal(disposal, kind)
     return disposal
   }
 
@@ -251,10 +261,17 @@ export function createRuntimeController(
    * remain retained for controller.dispose(), but do not replace the retry's
    * own primary activation result.
    */
-  const drainPendingDisposals = async (): Promise<void> => {
-    while (pendingDisposals.size > 0) {
-      await Promise.allSettled([...pendingDisposals])
+  const drainGemmaDisposals = async (
+    signal: AbortSignal | undefined
+  ): Promise<void> => {
+    throwIfAborted(signal)
+    while (pendingGemmaDisposals.size > 0) {
+      const barrier = Promise.allSettled([...pendingGemmaDisposals]).then(
+        () => undefined
+      )
+      await awaitWithAbort(barrier, signal)
     }
+    throwIfAborted(signal)
   }
 
   const publish = (next: RuntimeSnapshot) => {
@@ -285,7 +302,8 @@ export function createRuntimeController(
 
   const replaceRuntime = async (
     next: BrowserGenerationRuntime,
-    operationId: number
+    operationId: number,
+    kind?: RuntimeKind
   ): Promise<boolean> => {
     const previous = currentRuntime
     if (previous && previous !== next) {
@@ -293,7 +311,7 @@ export function createRuntimeController(
       if (currentRuntime === previous) currentRuntime = undefined
     }
     if (!isCurrent(operationId)) {
-      scheduleDisposal(() => next.dispose())
+      scheduleDisposal(() => next.dispose(), kind)
       return false
     }
     currentRuntime = next
@@ -336,7 +354,7 @@ export function createRuntimeController(
       if (!isCurrent(operationId)) return
       if (nativeAvailability === "available") {
         const runtime = createChromeBrowserRuntime(native)
-        if (await replaceRuntime(runtime, operationId)) {
+        if (await replaceRuntime(runtime, operationId, "gemini-nano")) {
           publish({
             status: "ready",
             kind: "gemini-nano",
@@ -427,6 +445,8 @@ export function createRuntimeController(
       cleanupFailure = cause
     }
 
+    if (hasCleanupFailure) recordBackgroundFailure(cleanupFailure)
+
     if (!hasPrimaryFailure && signal?.aborted) {
       hasPrimaryFailure = true
       primaryFailure = signal.reason
@@ -442,7 +462,7 @@ export function createRuntimeController(
     signal: AbortSignal | undefined,
     onProgress: (progress: number) => void
   ): Promise<BrowserGenerationRuntime> => {
-    await drainPendingDisposals()
+    if (kind === "gemma-3-270m") await drainGemmaDisposals(signal)
     throwIfAborted(signal)
     if (kind === "gemini-nano") {
       const factory = getNative()
@@ -473,7 +493,7 @@ export function createRuntimeController(
       Promise.resolve(result),
       signal,
       (lateRuntime) => lateRuntime.dispose(),
-      trackPendingDisposal
+      (pending) => trackPendingDisposal(pending, kind)
     )
     try {
       await runtime.prepare?.(signal)
@@ -482,7 +502,7 @@ export function createRuntimeController(
       // The candidate is not returned to runActivation when prepare fails, so
       // this is the sole owner of its cleanup. The barrier retains any late
       // disposal failure without replacing the preparation error.
-      scheduleDisposal(() => runtime.dispose())
+      scheduleDisposal(() => runtime.dispose(), "gemma-3-270m")
       throw cause
     }
   }
@@ -521,10 +541,10 @@ export function createRuntimeController(
       runtime = await loadRuntime(kind, operationId, signal, publishProgress)
       throwIfAborted(signal)
       if (!isCurrent(operationId)) {
-        scheduleDisposal(() => runtime!.dispose())
+        scheduleDisposal(() => runtime!.dispose(), kind)
         return
       }
-      if (!(await replaceRuntime(runtime, operationId))) return
+      if (!(await replaceRuntime(runtime, operationId, kind))) return
       installed = true
       throwIfAborted(signal)
       publishProgress(1)
@@ -534,9 +554,9 @@ export function createRuntimeController(
     } catch (cause) {
       if (runtime && installed && currentRuntime === runtime) {
         currentRuntime = undefined
-        scheduleDisposal(() => runtime!.dispose())
+        scheduleDisposal(() => runtime!.dispose(), kind)
       }
-      if (runtime && !installed) scheduleDisposal(() => runtime!.dispose())
+      if (runtime && !installed) scheduleDisposal(() => runtime!.dispose(), kind)
       if (!isCurrent(operationId)) return
       publishError(operationId, cause, kind)
       throw cause
