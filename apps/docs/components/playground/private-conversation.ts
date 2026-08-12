@@ -1,4 +1,5 @@
 import type { BrowserGenerationRuntime } from "./model/types"
+import { isExpectedChatCancellation } from "./model/settle-chat-stop"
 
 export interface PrivateConversationReset {
   blockSubmissions(blocked: boolean): void
@@ -17,22 +18,13 @@ function asError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause))
 }
 
-function isAbort(cause: unknown): boolean {
-  return (
-    typeof cause === "object" &&
-    cause !== null &&
-    "name" in cause &&
-    cause.name === "AbortError"
-  )
-}
-
 /** Reset one private conversation while preserving the first non-abort error. */
 export async function resetPrivateConversation(
   actions: PrivateConversationReset
 ): Promise<Error | undefined> {
   let failure: Error | undefined
   const capture = (cause: unknown) => {
-    if (!failure && !isAbort(cause)) failure = asError(cause)
+    if (!failure && !isExpectedChatCancellation(cause)) failure = asError(cause)
   }
   const run = (action: () => void) => {
     try {
@@ -220,7 +212,7 @@ export function createGenerationRunRegistry(): GenerationRunRegistry {
         signal: controller.signal,
         settlement,
         recordFailure(cause) {
-          if (!settled && !hasFailure && !isAbort(cause)) {
+          if (!settled && !hasFailure && !isExpectedChatCancellation(cause)) {
             failure = cause
             hasFailure = true
           }

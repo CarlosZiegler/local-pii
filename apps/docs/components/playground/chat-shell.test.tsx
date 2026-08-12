@@ -57,7 +57,7 @@ describe("ChatShell lifecycle controls", () => {
       />
     )
 
-    expect(screen.getByText("Stopping generation…")).toBeVisible()
+    expect(screen.getByText("Stopping generation run…")).toBeVisible()
     expect(screen.getByRole("button", { name: "Submit" })).toBeDisabled()
     expect(screen.getByLabelText("Message")).toBeDisabled()
     expect(

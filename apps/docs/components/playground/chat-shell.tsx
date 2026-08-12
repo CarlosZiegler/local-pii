@@ -1,5 +1,3 @@
-"use client"
-
 import {
   Conversation,
   ConversationContent,
@@ -132,11 +130,11 @@ export function ChatShell({
             <PromptInputFooter>
               <span className="text-xs text-muted-foreground">
                 {resetting
-                  ? "Resetting private chat…"
+                  ? "Resetting private conversation…"
                   : stopping
-                    ? "Stopping generation…"
+                    ? "Stopping generation run…"
                     : busy
-                      ? "Generating locally…"
+                      ? "Running browser-local inference…"
                       : "Enter to send · Shift+Enter for newline"}
               </span>
               <PromptInputSubmit

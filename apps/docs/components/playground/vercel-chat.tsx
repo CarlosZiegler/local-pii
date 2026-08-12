@@ -1,5 +1,3 @@
-"use client"
-
 import { useChat } from "@ai-sdk/react"
 import { createAnonymizer, token, type PiiSession } from "local-pii"
 import { withPii } from "local-pii/ai-sdk"
@@ -17,7 +15,10 @@ import {
   createProtectionObserver,
   observeBrowserRuntime,
 } from "./protection-observer"
-import { settleChatStop } from "./model/settle-chat-stop"
+import {
+  isExpectedChatCancellation,
+  settleChatStop,
+} from "./model/settle-chat-stop"
 import { createBrowserLanguageModel } from "./model/vercel-model"
 import { withPlaygroundGate } from "./generation-gate"
 import type { BrowserGenerationRuntime } from "./model/types"
@@ -35,15 +36,6 @@ function createSession(): PiiSession {
 
 function toError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause))
-}
-
-function isExpectedCancellation(cause: unknown): boolean {
-  return (
-    typeof cause === "object" &&
-    cause !== null &&
-    "name" in cause &&
-    (cause.name === "AbortError" || cause.name === "LocalChatStop")
-  )
 }
 
 export function VercelChat({ runtime, runtimeName }: VercelChatProps) {
@@ -161,7 +153,7 @@ export function VercelChat({ runtime, runtimeName }: VercelChatProps) {
         await sendMessage({ text })
       } catch (cause) {
         observer.discard()
-        if (!isExpectedCancellation(cause)) {
+        if (!isExpectedChatCancellation(cause)) {
           if (runs.current.isCurrent(run.id)) setControlError(toError(cause))
           throw cause
         }
