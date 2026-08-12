@@ -208,12 +208,23 @@ export function createRuntimeController(
   let disposed = false
   let disposal: Promise<void> | undefined
   const pendingDisposals = new Set<Promise<void>>()
+  let hasBackgroundFailure = false
+  let firstBackgroundFailure: unknown
+
+  const recordBackgroundFailure = (cause: unknown): void => {
+    if (hasBackgroundFailure) return
+    hasBackgroundFailure = true
+    firstBackgroundFailure = cause
+  }
 
   const trackPendingDisposal = (promise: Promise<void>): void => {
     pendingDisposals.add(promise)
     void promise.then(
       () => pendingDisposals.delete(promise),
-      () => pendingDisposals.delete(promise)
+      (cause) => {
+        recordBackgroundFailure(cause)
+        pendingDisposals.delete(promise)
+      }
     )
   }
 
@@ -226,18 +237,16 @@ export function createRuntimeController(
   }
 
   const waitForPendingDisposals = async (): Promise<void> => {
-    let firstError: unknown
     while (pendingDisposals.size > 0) {
       const pending = [...pendingDisposals]
       const results = await Promise.allSettled(pending)
-      if (firstError === undefined) {
-        firstError = results.find(
-          (result): result is PromiseRejectedResult =>
-            result.status === "rejected"
-        )?.reason
+      for (const result of results) {
+        if (result.status === "rejected") {
+          recordBackgroundFailure(result.reason)
+        }
       }
     }
-    if (firstError !== undefined) throw firstError
+    if (hasBackgroundFailure) throw firstBackgroundFailure
   }
 
   const publish = (next: RuntimeSnapshot) => {
@@ -542,22 +551,26 @@ export function createRuntimeController(
       await Promise.allSettled(pending)
       const runtime = currentRuntime
       currentRuntime = undefined
+      let hasRuntimeError = false
       let runtimeError: unknown
       if (runtime) {
         try {
           await runtime.dispose()
         } catch (cause) {
+          hasRuntimeError = true
           runtimeError = cause
         }
       }
+      let hasPendingDisposalError = false
       let pendingDisposalError: unknown
       try {
         await waitForPendingDisposals()
       } catch (cause) {
+        hasPendingDisposalError = true
         pendingDisposalError = cause
       }
-      if (runtimeError !== undefined) throw runtimeError
-      if (pendingDisposalError !== undefined) throw pendingDisposalError
+      if (hasRuntimeError) throw runtimeError
+      if (hasPendingDisposalError) throw pendingDisposalError
     })()
     return disposal
   }

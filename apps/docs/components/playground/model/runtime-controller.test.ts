@@ -475,4 +475,188 @@ describe("browser runtime controller", () => {
     await expect(controller.dispose()).rejects.toBe(previousFailure)
     expect(candidate.dispose).toHaveBeenCalledOnce()
   })
+
+  it("retains a completed background cleanup failure until disposal", async () => {
+    const native = nativeFactory("downloadable")
+    const previous = runtime("gemini-nano")
+    const activationFailure = new Error("previous runtime cleanup")
+    const backgroundFailure = new Error("candidate cleanup")
+    previous.dispose = vi
+      .fn()
+      .mockRejectedValueOnce(activationFailure)
+      .mockResolvedValue(undefined)
+    const candidate = runtime("gemma-3-270m")
+    candidate.dispose = vi.fn(async () => {
+      throw backgroundFailure
+    })
+    const controller = createRuntimeController(
+      controllerDependencies({
+        getNative: () => native,
+        createNativeRuntime: () => previous,
+        loadGemma: async () => candidate,
+      })
+    )
+    await controller.check()
+    await controller.activate("gemini-nano")
+    await controller.check()
+    await expect(controller.activate("gemma-3-270m")).rejects.toBe(
+      activationFailure
+    )
+    await vi.waitFor(() => expect(candidate.dispose).toHaveBeenCalledOnce())
+
+    const firstDispose = controller.dispose()
+    expect(controller.dispose()).toBe(firstDispose)
+    const result = await firstDispose.then(
+      () => ({ status: "resolved" as const }),
+      (cause) => ({ status: "rejected" as const, cause })
+    )
+    expect(result).toEqual({ status: "rejected", cause: backgroundFailure })
+    expect(candidate.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("retains cleanup failure while current runtime disposal is pending", async () => {
+    const native = nativeFactory("downloadable")
+    const previous = runtime("gemini-nano")
+    const activationFailure = new Error("previous runtime cleanup")
+    const backgroundFailure = new Error("candidate cleanup")
+    let releaseCurrent!: () => void
+    const currentDisposal = new Promise<void>((resolve) => {
+      releaseCurrent = resolve
+    })
+    let releaseCandidate!: (cause?: unknown) => void
+    const candidateDisposal = new Promise<void>((_, reject) => {
+      releaseCandidate = reject
+    })
+    previous.dispose = vi
+      .fn()
+      .mockRejectedValueOnce(activationFailure)
+      .mockReturnValueOnce(currentDisposal)
+    const candidate = runtime("gemma-3-270m")
+    candidate.dispose = vi.fn(() => candidateDisposal)
+    const controller = createRuntimeController(
+      controllerDependencies({
+        getNative: () => native,
+        createNativeRuntime: () => previous,
+        loadGemma: async () => candidate,
+      })
+    )
+    await controller.check()
+    await controller.activate("gemini-nano")
+    await controller.check()
+    await expect(controller.activate("gemma-3-270m")).rejects.toBe(
+      activationFailure
+    )
+    await vi.waitFor(() => expect(candidate.dispose).toHaveBeenCalledOnce())
+
+    let settled = false
+    const disposing = controller.dispose().finally(() => {
+      settled = true
+    })
+    await vi.waitFor(() => expect(previous.dispose).toHaveBeenCalledTimes(2))
+    releaseCandidate(backgroundFailure)
+    await Promise.resolve()
+    expect(settled).toBe(false)
+    releaseCurrent()
+    const result = await disposing.then(
+      () => ({ status: "resolved" as const }),
+      (cause) => ({ status: "rejected" as const, cause })
+    )
+    expect(result).toEqual({ status: "rejected", cause: backgroundFailure })
+  })
+
+  it("prefers current runtime disposal failure over background cleanup failure", async () => {
+    const native = nativeFactory("downloadable")
+    const previous = runtime("gemini-nano")
+    const activationFailure = new Error("previous runtime cleanup")
+    const currentFailure = new Error("current runtime disposal")
+    const backgroundFailure = new Error("candidate cleanup")
+    previous.dispose = vi
+      .fn()
+      .mockRejectedValueOnce(activationFailure)
+      .mockRejectedValue(currentFailure)
+    const candidate = runtime("gemma-3-270m")
+    candidate.dispose = vi.fn(async () => {
+      throw backgroundFailure
+    })
+    const controller = createRuntimeController(
+      controllerDependencies({
+        getNative: () => native,
+        createNativeRuntime: () => previous,
+        loadGemma: async () => candidate,
+      })
+    )
+    await controller.check()
+    await controller.activate("gemini-nano")
+    await controller.check()
+    await expect(controller.activate("gemma-3-270m")).rejects.toBe(
+      activationFailure
+    )
+    await vi.waitFor(() => expect(candidate.dispose).toHaveBeenCalledOnce())
+
+    const result = await controller.dispose().then(
+      () => ({ status: "resolved" as const }),
+      (cause) => ({ status: "rejected" as const, cause })
+    )
+    expect(result).toEqual({ status: "rejected", cause: currentFailure })
+  })
+
+  it("retains an undefined background cleanup rejection", async () => {
+    const native = nativeFactory("downloadable")
+    const previous = runtime("gemini-nano")
+    const activationFailure = new Error("previous runtime cleanup")
+    previous.dispose = vi
+      .fn()
+      .mockRejectedValueOnce(activationFailure)
+      .mockResolvedValue(undefined)
+    const candidate = runtime("gemma-3-270m")
+    candidate.dispose = vi.fn(async () => {
+      throw undefined
+    })
+    const controller = createRuntimeController(
+      controllerDependencies({
+        getNative: () => native,
+        createNativeRuntime: () => previous,
+        loadGemma: async () => candidate,
+      })
+    )
+    await controller.check()
+    await controller.activate("gemini-nano")
+    await controller.check()
+    await expect(controller.activate("gemma-3-270m")).rejects.toBe(
+      activationFailure
+    )
+    await vi.waitFor(() => expect(candidate.dispose).toHaveBeenCalledOnce())
+
+    const result = await controller.dispose().then(
+      () => ({ status: "resolved" as const }),
+      (cause) => ({ status: "rejected" as const, cause })
+    )
+    expect(result).toEqual({ status: "rejected", cause: undefined })
+    expect(candidate.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("retains an undefined current runtime disposal rejection", async () => {
+    const native = nativeFactory("downloadable")
+    const selected = runtime("gemini-nano")
+    selected.dispose = vi.fn(async () => {
+      throw undefined
+    })
+    const controller = createRuntimeController(
+      controllerDependencies({
+        getNative: () => native,
+        createNativeRuntime: () => selected,
+      })
+    )
+    await controller.check()
+    await controller.activate("gemini-nano")
+
+    const firstDispose = controller.dispose()
+    expect(controller.dispose()).toBe(firstDispose)
+    const result = await firstDispose.then(
+      () => ({ status: "resolved" as const }),
+      (cause) => ({ status: "rejected" as const, cause })
+    )
+    expect(result).toEqual({ status: "rejected", cause: undefined })
+    expect(selected.dispose).toHaveBeenCalledOnce()
+  })
 })
