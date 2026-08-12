@@ -57,13 +57,15 @@ export function TanStackChat({ runtime, runtimeName }: TanStackChatProps) {
       framework="TanStack AI"
       inspection={inspection}
       messages={shellMessages}
-      onNewChat={() => {
+      onNewChat={async () => {
         stop()
         clear()
         session.clear()
         setInspection(undefined)
       }}
-      onStop={stop}
+      onStop={async () => {
+        stop()
+      }}
       onSubmit={async (text) => {
         const result = await session.anonymize(text)
         const counts: Record<string, number> = {}

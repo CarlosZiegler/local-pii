@@ -10,6 +10,11 @@ import {
   useSyncExternalStore,
 } from "react"
 import type { RuntimeController } from "./model/runtime-controller"
+import {
+  createGenerationGate,
+  type GenerationGate,
+  type GenerationGateSnapshot,
+} from "./generation-gate"
 import type {
   BrowserGenerationRuntime,
   RuntimeKind,
@@ -22,10 +27,13 @@ type RuntimeContextValue = RuntimeSnapshot & {
   activate(kind: RuntimeKind): Promise<void>
   abort(): void
   check(): Promise<void>
+  readonly gate: GenerationGate
+  readonly gateSnapshot: GenerationGateSnapshot
 }
 
 const RuntimeContext = createContext<RuntimeContextValue | null>(null)
 const SERVER_SNAPSHOT: RuntimeSnapshot = { status: "checking", operationId: 0 }
+const SERVER_GATE_SNAPSHOT: GenerationGateSnapshot = { owner: null }
 type RuntimeActionError = {
   readonly error: Error
   readonly generation: number
@@ -34,12 +42,23 @@ type RuntimeActionError = {
 export interface RuntimeProviderCoreProps {
   children: ReactNode
   controller: RuntimeController
+  gate?: GenerationGate
 }
 
 export function RuntimeProviderCore({
   children,
   controller,
+  gate: suppliedGate,
 }: RuntimeProviderCoreProps) {
+  const gate = useMemo(
+    () => suppliedGate ?? createGenerationGate(),
+    [suppliedGate]
+  )
+  const gateSnapshot = useSyncExternalStore(
+    gate.subscribe,
+    gate.getSnapshot,
+    () => SERVER_GATE_SNAPSHOT
+  )
   const snapshot = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
@@ -159,8 +178,18 @@ export function RuntimeProviderCore({
         setActionError(undefined)
         return controller.check().catch(() => undefined)
       },
+      gate,
+      gateSnapshot,
     }
-  }, [abort, activate, controller, snapshot, visibleActionError])
+  }, [
+    abort,
+    activate,
+    controller,
+    gate,
+    gateSnapshot,
+    snapshot,
+    visibleActionError,
+  ])
 
   return (
     <RuntimeContext.Provider value={value}>{children}</RuntimeContext.Provider>
@@ -172,4 +201,8 @@ export function useLocalRuntime(): RuntimeContextValue {
   if (!value)
     throw new Error("useLocalRuntime must be used within RuntimeProvider")
   return value
+}
+
+export function useOptionalLocalRuntime(): RuntimeContextValue | null {
+  return useContext(RuntimeContext)
 }

@@ -77,9 +77,18 @@ describe("createBrowserLanguageModel", () => {
         prompt: [{ role: "user", content: [{ type: "file", data: "x" }] }],
       } as unknown as V4CallOptions)
     ).rejects.toThrow(UnsupportedBrowserModelInputError)
-    await expect(model.doGenerate({ ...options(), tools: [] })).rejects.toThrow(
-      UnsupportedBrowserModelInputError
-    )
+    await expect(
+      model.doGenerate({
+        ...options(),
+        tools: [
+          {
+            type: "function",
+            name: "lookup",
+            inputSchema: { type: "object" },
+          },
+        ],
+      })
+    ).rejects.toThrow(UnsupportedBrowserModelInputError)
     await expect(
       model.doGenerate({ ...options(), reasoning: "low" })
     ).rejects.toThrow(UnsupportedBrowserModelInputError)

@@ -8,7 +8,7 @@ export async function settleChatStop(
       typeof cause === "object" &&
       cause !== null &&
       "name" in cause &&
-      cause.name === "AbortError"
+      (cause.name === "AbortError" || cause.name === "LocalChatStop")
     ) {
       return undefined
     }

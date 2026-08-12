@@ -39,7 +39,14 @@ function textParts(
 }
 
 function textPrompt(options: V4CallOptions): TextTurn[] {
-  if (options.tools !== undefined || options.toolChoice !== undefined) {
+  const toolChoiceRequiresTools =
+    options.toolChoice !== undefined &&
+    options.toolChoice.type !== "auto" &&
+    options.toolChoice.type !== "none"
+  if (
+    (options.tools !== undefined && options.tools.length > 0) ||
+    toolChoiceRequiresTools
+  ) {
     return unsupported("The browser generation model does not support tools")
   }
   if (options.reasoning !== undefined) {
