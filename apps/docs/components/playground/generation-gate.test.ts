@@ -180,4 +180,21 @@ describe("generation gate", () => {
     await firstNext
     expect(gate.getSnapshot()).toEqual({ owner: null })
   })
+
+  it("isolates subscriber failures from lease ownership", () => {
+    const gate = createGenerationGate()
+    const listenerFailure = new Error("subscriber failed")
+    gate.subscribe(() => {
+      throw listenerFailure
+    })
+
+    const lease = gate.tryAcquire("vercel")
+    expect(gate.getSnapshot()).toEqual({ owner: "vercel" })
+    expect(() => lease.release()).not.toThrow()
+    expect(gate.getSnapshot()).toEqual({ owner: null })
+
+    const next = gate.tryAcquire("tanstack")
+    expect(next.owner).toBe("tanstack")
+    next.release()
+  })
 })

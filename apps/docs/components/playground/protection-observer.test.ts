@@ -366,4 +366,44 @@ describe("protection observer", () => {
       protectedContent: "protected",
     })
   })
+
+  it("isolates publisher failures from a completed generation run", async () => {
+    const observer = createProtectionObserver(session(), () => {
+      throw new Error("publisher failed")
+    })
+    observer.begin("publisher-failure")
+    const runtime: BrowserGenerationRuntime = {
+      id: "publisher-failure",
+      disclosure: {
+        label: "Publisher failure",
+        model: "publisher-failure",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield "complete"
+        },
+      }),
+      dispose: async () => undefined,
+    }
+    const iterator = observeBrowserRuntime(runtime, observer)
+      .generate(
+        createProtectedBrowserRequest({
+          protectedHistory: [],
+          protectedContent: "protected",
+        })
+      )
+      [Symbol.asyncIterator]()
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: "complete",
+    })
+    await expect(iterator.next()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+    expect(observer.current()).toBeUndefined()
+  })
 })

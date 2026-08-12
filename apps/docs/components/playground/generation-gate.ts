@@ -36,7 +36,13 @@ export function createGenerationGate(): GenerationGate {
 
   const publish = () => {
     snapshot = Object.freeze({ owner })
-    for (const listener of listeners) listener()
+    for (const listener of [...listeners]) {
+      try {
+        listener()
+      } catch {
+        // A view subscriber cannot corrupt acquisition or release ownership.
+      }
+    }
   }
 
   return {

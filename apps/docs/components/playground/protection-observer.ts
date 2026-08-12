@@ -181,7 +181,11 @@ export function createProtectionObserver(
         })
         observation.active = false
         if (active === observation) active = undefined
-        publish(inspection)
+        try {
+          publish(inspection)
+        } catch {
+          // Inspector rendering cannot change a completed generation outcome.
+        }
         return inspection
       },
       discard() {
