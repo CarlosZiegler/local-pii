@@ -1,40 +1,49 @@
 ---
 title: Playground
-description: Compare chats reais com Vercel AI SDK e TanStack AI usando um modelo que roda diretamente no navegador.
+description: Compare conversas privadas reais com Vercel AI SDK e TanStack AI usando Geração local no navegador.
 ---
 
 import { Playground } from "@/components/playground"
 
-Tudo abaixo roda **no seu navegador**: sem gateway, API route, server action,
-chave de API ou endpoint de inferência. Use o Gemini Nano embutido no Chrome
-quando a Prompt API estiver disponível ou baixe explicitamente o fallback local
-Gemma 3 270M. Depois compare o mesmo fluxo no Vercel AI SDK e no TanStack AI.
+Tudo abaixo usa Geração local no navegador: sem Gateway, API route, server
+action, chave de API ou endpoint de inferência. Escolha o Gemini Nano gerenciado
+no Chrome quando disponível ou ative explicitamente o fallback Gemma. Não há
+downloads automáticos nem troca silenciosa de runtime.
 
 <Playground />
 
 ## Experimente
 
-- Envie `Email ana@acme.com e repita.` em qualquer aba.
-- O privacy inspector mostra o prompt opaco entregue ao modelo.
-- A resposta é reidratada localmente e a UI volta a mostrar o email original.
-- **New chat** limpa o histórico visível e o vault em memória daquela aba.
+- Envie `Email ana@acme.com e repita.` em qualquer chat.
+- O inspector mostra o histórico protegido e o conteúdo atual exatos entregues
+  ao runtime, nunca o mapping privado nem o input original.
+- A resposta é restaurada localmente e a UI mostra o email original.
+- **New chat** espera stop e limpeza do runtime; só então limpa histórico,
+  sessão, erro e inspection da aba e cria uma nova sessão.
 
-As abas mantêm históricos e `PiiSession` independentes. Stop cancela a geração
-no navegador; não chama um serviço remoto.
+Cada aba montada mantém conversa privada, sessão, histórico, observer e mapping
+independentes. Um gate permite uma geração por vez: o chat proprietário pode
+parar; submit e reset do outro ficam desabilitados até a limpeza liberar o gate.
+Ambos usam seus adaptadores públicos reais de Vercel AI SDK e TanStack. O
+runtime interno da documentação não é uma API pública de `local-pii`.
 
-## Sobre os runtimes
+## Divulgação do runtime
 
-- O Gemini Nano é gerenciado pelo navegador e depende de Chrome desktop,
-  hardware compatível e disponibilidade da Prompt API.
-- O fallback é `onnx-community/gemma-3-270m-it-ONNX`, q4f16, com cerca de
-  426 MB. Ele só é carregado após consentimento explícito e exige um navegador
-  desktop compatível com WebGPU. Revise o [model card e os termos da licença Gemma](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
-  antes do download.
-- Downloads dos artefatos podem aparecer no Network do DevTools. Prompts,
-  valores reidratados e o vault nunca vão para um servidor de inferência do app.
-- Modelos locais pequenos são adequados para a demonstração, mas qualidade de
-  idioma e raciocínio variam. Traduzir a interface não garante qualidade igual
-  em inglês, português e alemão.
-
-A interface usa primitives do shadcn e AI Elements. Os dois exemplos usam
-ciclos de vida reais no cliente; nenhum esconde o outro framework como transport.
+- Gemini Nano é gerenciado pelo navegador e exige Chrome desktop, hardware e
+  Prompt API compatíveis. Seus recursos não são download de artefatos controlado
+  por esta página.
+- Gemma é `onnx-community/gemma-3-270m-it-ONNX`, revisão
+  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0` e q4f16 WebGPU. Seus seis arquivos
+  pinados do modelo totalizam 293.284.073 bytes. A primeira ativação também pode
+  baixar 23.614.439 bytes não comprimidos de arquivos versionados de suporte do
+  ONNX Runtime Web, totalizando aproximadamente 316.898.512 bytes de artefatos
+  estáticos (~317 MB antes da compressão de transferência). As origens são
+  `https://huggingface.co`, `https://*.cdn.hf.co` e `https://cdn.jsdelivr.net`;
+  leia o [model card e os termos da licença Gemma](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
+  antes de ativar.
+- Downloads explícitos contêm apenas recursos estáticos do modelo e do runtime,
+  sem conteúdo do usuário. Prompts, valores restaurados, mappings e inspector
+  não vão para endpoint da aplicação.
+- Modelos de Geração pequenos são úteis nesta demonstração, mas qualidade e
+  raciocínio variam. Traduzir a interface não garante qualidade igual em inglês,
+  português e alemão.

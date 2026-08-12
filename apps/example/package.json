@@ -7,7 +7,8 @@
     "start": "expo start --dev-client",
     "android": "expo run:android",
     "ios": "expo run:ios",
-    "prebuild": "expo prebuild --clean"
+    "prebuild": "expo prebuild --clean",
+    "test:export": "node scripts/verify-export.mjs"
   },
   "dependencies": {
     "@local-pii/model-rampart": "workspace:*",
@@ -25,6 +26,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.1.0",
+    "babel-preset-expo": "54.0.12",
     "typescript": "~5.9.0"
   }
 }

@@ -1,84 +1,64 @@
 ---
 title: Primeiros Passos
-description: Anonimização de PII on-device para Expo, React Native, navegador e Node. Redija localmente, envie apenas placeholders para qualquer LLM, reidrate a resposta.
+description: Privacidade adapter-first para Expo, React Native, navegador e Node.
 ---
 
-**local-pii** anonimiza dados pessoais **antes** que eles saiam do
-dispositivo, envia apenas placeholders para o seu LLM, e reidrata a resposta
-localmente. O mapping `placeholder → original` nunca sai do dispositivo.
+O **local-pii** protege informação pessoal antes que ela cruze a fronteira do
+provedor de Geração escolhido.
+Um adaptador de Detecção alimenta o anonymizer, uma sessão de privacidade
+possui uma conversa privada, e um adaptador de Geração ou callback inline chama
+o modelo de Geração escolhido. Conteúdo semântico protegido cruza a fronteira
+do provedor; reasoning, metadados e opções opacos permanecem responsabilidade
+do chamador. O mapping privado fica dentro da fronteira de confiança dele.
 
-```text
-Ontem encontrei João Silva. Meu telefone é +49 151 12345678.
-        │  anonymize (on device)
-        ▼
-Ontem encontrei [GIVEN_NAME_1] [SURNAME_1]. Meu telefone é [PHONE_1].   ← only this is sent
-        │  ↕ your LLM
-        ▼  rehydrate (on device)
-João Silva / +49 151 12345678 come back — the mapping never left the device.
+```ts
+import { createAnonymizer, token } from "local-pii"
+import { rampartWeb } from "local-pii/web"
+import { runInlineText } from "local-pii/inline"
+
+const privacy = createAnonymizer({
+  detection: rampartWeb(),
+  placeholders: token(),
+})
+const conversation = privacy.createSession()
+const answer = await runInlineText({
+  session: conversation,
+  input: "Email ana@acme.com",
+  call: (protectedContent, { signal }) =>
+    generationModel.generate(protectedContent, { signal }),
+})
 ```
+
+Rampart Q4 é um modelo de Detecção. Gemini Nano, Gemma e modelos de provedor
+são modelos de Geração. `ner:` continua como alias de compatibilidade para
+`detection:`.
 
 ## Instalação
 
 ```bash
-bun add local-pii   # or npm / pnpm / yarn
+bun add local-pii onnxruntime-web @local-pii/model-rampart
 ```
 
-O pipeline determinístico (emails, telefones, cartões, IBAN, SSN, IP, URLs)
-funciona sem mais nada instalado, no React Native, no navegador e no Node.
+O quickstart usa Rampart no navegador, cujos peers opcionais são
+`onnxruntime-web` e `@local-pii/model-rampart`. A Detecção determinística
+(emails, telefones, cartões, IBAN, SSN, IP e URLs) funciona apenas com
+`local-pii` no React Native, navegador e Node.
 
-## Início rápido
+## Escolha um adaptador de Detecção
 
-```ts
-import { createAnonymizer, rehydrate } from "local-pii"
+- **Expo / React Native** → [`rampart()`](/pt/docs/expo) via
+  `onnxruntime-react-native`.
+- **Navegador / web** → [`rampartWeb()`](/pt/docs/browser) via
+  `onnxruntime-web` (WASM/WebGPU).
 
-const pii = createAnonymizer()
+`ner:` é suportado durante a migração, mas aplicações novas devem usar
+`detection:`.
 
-const { redactedText, mapping } = await pii.anonymize(
-  "Email me at ana@acme.com or call +49 151 12345678"
-)
-// redactedText → "Email me at [EMAIL_1] or call [PHONE_1]"
+## Envolva uma chamada de Geração
 
-const reply = await callYourLlm(redactedText) // only placeholders leave the device
-const answer = rehydrate(reply, mapping) // originals restored locally
-```
-
-O `mapping` é um dado simples (`{ "[EMAIL_1]": "ana@acme.com", … }`).
-Mantenha-o em memória — nunca faça log dele, nunca o envie, nem o coloque em
-analytics/crash reports.
-
-## Adicione IA on-device
-
-Os detectores determinísticos não capturam nomes ou endereços — essa é a
-tarefa do modelo NER
-[Rampart](https://huggingface.co/nationaldesignstudio/rampart). Escolha o
-backend para sua plataforma:
-
-- **Expo / React Native** → [`rampart()`](/pt/docs/expo) via `onnxruntime-react-native`.
-- **Navegador / web** → [`rampartWeb()`](/pt/docs/browser) via `onnxruntime-web` (WASM/WebGPU).
-
-```ts
-import { createAnonymizer } from "local-pii"
-import { rampart } from "local-pii/expo" // or: rampartWeb from "local-pii/web"
-
-const pii = createAnonymizer({
-  ner: rampart({
-    model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
-  }),
-})
-// "Ontem encontrei João Silva" → "Ontem encontrei [GIVEN_NAME_1] [SURNAME_1]"
-```
-
-## Envolva suas chamadas de LLM
-
-Os adaptadores envolvem todo o ciclo anonimizar → chamar → reidratar,
-**incluindo tool calls**, para que você quase não precise alterar seu código:
-
-- [Vercel AI SDK](/pt/docs/adapters) — `withPii(model)`
-- [OpenAI & Grok/xAI](/pt/docs/adapters) — `withPiiOpenAI(client)`
-
-## Próximos passos
-
-- [Conceitos Fundamentais](/pt/docs/concepts) — o pipeline, sessões, o vault, fronteiras de confiança
-- [Estratégias de Placeholder](/pt/docs/strategies) — `sequential`, `hashed`, `token`
-- [Tool Calls](/pt/docs/tool-calls) — a parte difícil, resolvida
-- [Limitações](/pt/docs/limitations) — o que ele **não** captura (leia isso)
+- [Adaptadores](/pt/docs/adapters) — matrizes inline, OpenAI/Grok, Vercel AI SDK e TanStack.
+- [Conceitos Fundamentais](/pt/docs/concepts) — sessões, ownership e confiança.
+- [Playground](/pt/docs/playground) — Geração local no navegador sem backend.
+- [Estratégias de Placeholder](/pt/docs/strategies) — `sequential`, `hashed`, `token`.
+- [Tool Calls](/pt/docs/tool-calls) — argumentos protegidos e resultados reidratados.
+- [Limitações](/pt/docs/limitations) — o que a Detecção não captura.

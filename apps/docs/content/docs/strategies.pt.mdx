@@ -33,8 +33,9 @@ entre sessões e dispositivos que compartilhem o segredo.
 > **Por que com chave?** Um hash simples do valor (`sha256(email)`) é um
 > vazamento de privacidade: os placeholders chegam ao provedor, e PII tem
 > baixa entropia, então qualquer um pode confirmar um valor adivinhado offline
-> recalculando o hash. `hashed()` usa HMAC com chave, com um segredo local ao
-> dispositivo que nunca sai dele. Hashing sem chave não é oferecido. Veja
+> recalculando o hash. `hashed()` usa HMAC com o segredo fornecido pelo
+> chamador. Gere e armazene um segredo aleatório forte; a estratégia não valida
+> sua entropia. Hashing sem chave não é oferecido. Veja
 > [Segurança](/pt/docs/security).
 
 Obtenha um segredo de dispositivo persistido (Expo):
@@ -63,10 +64,11 @@ então ele sobrevive — e a decodificação tolerante recupera confusões entre
 ```ts
 import { token } from "local-pii"
 
-token() // random per value — leaks not even equality
-token({ secret }) // HMAC — stable across sessions/devices
+token() // aleatório por valor distinto; igualdade aparece dentro da sessão
+token({ secret }) // HMAC — estável entre sessões/dispositivos
 token({ bits: 100, prefix: "PII" })
 ```
 
-Ele não vaza nada — nem mesmo o tipo da entidade. O array `entities` no
-resultado ainda carrega os tipos para a sua UI.
+Ele oculta o valor e o tipo da entidade, mas valores canônicos iguais reutilizam
+um token dentro de uma sessão de privacidade. Uma nova sessão quebra esse
+vínculo. O array `entities` no resultado ainda carrega os tipos para a sua UI.

@@ -1,5 +1,10 @@
 import { describe, expect, it, vi } from "vitest"
-import { createGemmaLanguageModelFactory } from "./gemma-runtime"
+import {
+  createGemmaBrowserRuntime,
+  createGemmaLanguageModelFactory,
+} from "./gemma-runtime"
+import { createProtectedBrowserRequest } from "./protected-request"
+import { GEMMA_ARTIFACT_URLS, GEMMA_CACHE_NAME } from "./runtime-metadata"
 
 class FakeStoppingCriteria {
   interrupted = false
@@ -20,11 +25,21 @@ class FakeTextStreamer {
   }
 }
 
-function fakeTransformers(tokens = ["one ", "two ", "three"]) {
-  const env: { experimental_useCrossOriginStorage?: boolean } = {}
-  let generated = 0
-  let promptMessages: Array<{ role: string; content: string }> = []
-  const progress = vi.fn()
+function fakeTransformers(
+  tokens: readonly string[] = ["one ", "two ", "three"],
+  failure?: Error,
+  stuckAfterFirst = false
+) {
+  const env: { experimental_useCrossOriginStorage?: boolean } = {
+    experimental_useCrossOriginStorage: true,
+  }
+  const promptMessages: Array<{ role: string; content: string }> = []
+  const criteria: FakeStoppingCriteria[] = []
+  let disposed = false
+  let generationFailure = failure
+  const dispose = vi.fn(async () => {
+    disposed = true
+  })
   const generator = Object.assign(
     vi.fn(
       async (
@@ -34,13 +49,21 @@ function fakeTransformers(tokens = ["one ", "two ", "three"]) {
           streamer: FakeTextStreamer
         }
       ) => {
-        for (const value of tokens) {
+        if (disposed) throw new Error("used disposed generator")
+        criteria.push(options.stopping_criteria[0]!)
+        for (const [index, value] of tokens.entries()) {
           await new Promise((resolve) => setTimeout(resolve, 0))
           if (options.stopping_criteria[0]?.interrupted) break
-          generated += 1
           options.streamer.emit(value)
+          if (stuckAfterFirst && index === 0) {
+            await new Promise<void>(() => {})
+          }
         }
-        return [{ generated_text: tokens.join("") }]
+        if (generationFailure) {
+          const error = generationFailure
+          generationFailure = undefined
+          throw error
+        }
       }
     ),
     {
@@ -48,109 +71,1461 @@ function fakeTransformers(tokens = ["one ", "two ", "three"]) {
         apply_chat_template(
           messages: Array<{ role: string; content: string }>
         ) {
-          promptMessages = messages
+          promptMessages.splice(0, promptMessages.length, ...messages)
           return "formatted prompt"
         },
       },
+      dispose,
     }
   )
-  const pipeline = vi.fn(
-    async (
-      _task: string,
-      _model: string,
-      options: { progress_callback(event: unknown): void }
-    ) => {
-      options.progress_callback({ progress: 50, status: "progress_total" })
-      options.progress_callback({ status: "ready" })
-      progress()
-      return generator
+  const model = generator
+  const autoConfig = vi.fn(async () => ({ model_type: "gemma3_text" }))
+  const autoTokenizer = vi.fn(async () => generator.tokenizer)
+  const autoModelForCausalLM = vi.fn(async () => model)
+  const TextGenerationPipeline = vi.fn(
+    function FakeTextGenerationPipeline(options: {
+      model: object
+      tokenizer: object
+    }) {
+      Object.assign(options.model, { tokenizer: options.tokenizer })
+      return options.model
     }
   )
-
-  return {
-    generated: () => generated,
-    loadTransformers: vi.fn(async () => ({
-      env,
-      InterruptableStoppingCriteria: FakeStoppingCriteria,
-      pipeline,
-      TextStreamer: FakeTextStreamer,
-    })),
+  const loadTransformers = vi.fn(async () => ({
     env,
-    pipeline,
-    progress,
-    promptMessages: () => promptMessages,
+    InterruptableStoppingCriteria: FakeStoppingCriteria,
+    AutoConfig: { from_pretrained: autoConfig },
+    AutoTokenizer: { from_pretrained: autoTokenizer },
+    AutoModelForCausalLM: { from_pretrained: autoModelForCausalLM },
+    TextGenerationPipeline,
+    TextStreamer: FakeTextStreamer,
+  }))
+  return {
+    criteria,
+    env,
+    generator,
+    loadTransformers,
+    autoConfig,
+    autoTokenizer,
+    autoModelForCausalLM,
+    TextGenerationPipeline,
+    promptMessages,
+    dispose,
   }
 }
 
-async function collect(stream: ReadableStream<string>): Promise<string> {
-  let result = ""
-  const reader = stream.getReader()
-  while (true) {
-    const next = await reader.read()
-    if (next.done) break
-    result += next.value
-  }
-  return result
+function request(signal?: AbortSignal) {
+  return createProtectedBrowserRequest({
+    protectedHistory: [
+      { role: "user", protectedContent: "Earlier" },
+      { role: "assistant", protectedContent: "Answer" },
+    ],
+    protectedContent: "Current",
+    signal,
+  })
 }
 
-describe("Gemma browser runtime", () => {
-  it("loads once, reports progress, and formats the complete conversation", async () => {
+async function collect(source: AsyncIterable<string>): Promise<string> {
+  let output = ""
+  for await (const chunk of source) output += chunk
+  return output
+}
+
+describe("Gemma browser-generation runtime", () => {
+  it("cancels artifact fetches and retries only missing artifacts", async () => {
+    const fake = fakeTransformers()
+    const entries = new Map<string, Response>()
+    const cache = {
+      match: vi.fn(async (url: string) => entries.get(url)),
+      put: vi.fn(async (url: string, response: Response) => {
+        entries.set(url, response.clone())
+      }),
+    }
+    const cacheStorage = {
+      open: vi.fn(async (name: string) => {
+        expect(name).toBe(GEMMA_CACHE_NAME)
+        return cache
+      }),
+    }
+    let firstAttempt = true
+    const fetchArtifact = vi.fn(
+      async (url: string, options?: { signal?: AbortSignal }) => {
+        if (firstAttempt && url === GEMMA_ARTIFACT_URLS[1]) {
+          return new Promise<Response>((_, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(options.signal?.reason),
+              { once: true }
+            )
+          })
+        }
+        return new Response(`artifact:${url}`)
+      }
+    )
+    const first = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+      fetch: fetchArtifact,
+      cacheStorage,
+    })
+    const abort = new AbortController()
+    const reason = new DOMException("Stop artifact download", "AbortError")
+    const preparation = first.prepare(abort.signal)
+    await vi.waitFor(() =>
+      expect(fetchArtifact).toHaveBeenCalledWith(
+        GEMMA_ARTIFACT_URLS[1],
+        expect.objectContaining({ signal: abort.signal })
+      )
+    )
+    abort.abort(reason)
+
+    await expect(preparation).rejects.toBe(reason)
+    await first.dispose()
+    firstAttempt = false
+
+    const second = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+      fetch: fetchArtifact,
+      cacheStorage,
+    })
+    await second.prepare()
+    await collect(second.generate(request()))
+
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
+    expect(fetchArtifact).toHaveBeenCalledTimes(GEMMA_ARTIFACT_URLS.length + 1)
+    expect(fetchArtifact).toHaveBeenCalledWith(
+      GEMMA_ARTIFACT_URLS[0],
+      expect.anything()
+    )
+    expect(fetchArtifact).toHaveBeenCalledWith(
+      GEMMA_ARTIFACT_URLS[1],
+      expect.anything()
+    )
+    await second.dispose()
+  })
+
+  it("cancels a non-OK artifact body and preserves its status error", async () => {
+    const fake = fakeTransformers()
+    const entries = new Map<string, Response>()
+    const cache = {
+      match: vi.fn(async (url: string) => entries.get(url)),
+      put: vi.fn(async (url: string, response: Response) => {
+        entries.set(url, response.clone())
+      }),
+    }
+    const cacheStorage = { open: vi.fn(async () => cache) }
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("error"))
+      },
+    })
+    const response = new Response(body, { status: 503 })
+    const cancel = vi.spyOn(response.body!, "cancel")
+    const fetchArtifact = vi.fn(async () => response)
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+      fetch: fetchArtifact,
+      cacheStorage,
+    })
+
+    await expect(runtime.prepare()).rejects.toThrow("503")
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(fake.TextGenerationPipeline).not.toHaveBeenCalled()
+    await runtime.dispose()
+  })
+
+  it("does not cross-abort concurrent prepare waiters", async () => {
+    const fake = fakeTransformers()
+    const config = deferred<unknown>()
+    const loadTransformers = vi.fn(async () => ({
+      ...(await fake.loadTransformers()),
+      AutoConfig: { from_pretrained: vi.fn(() => config.promise) },
+    }))
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const firstAbort = new AbortController()
+    const firstReason = new DOMException("First stopped", "AbortError")
+    const first = runtime.prepare(firstAbort.signal)
+    const second = runtime.prepare()
+
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+    firstAbort.abort(firstReason)
+    await expect(first).rejects.toBe(firstReason)
+    let secondSettled = false
+    void second.then(() => {
+      secondSettled = true
+    })
+    await Promise.resolve()
+    expect(secondSettled).toBe(false)
+
+    config.resolve({ model_type: "gemma3_text" })
+    await second
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
+    await runtime.dispose()
+  })
+
+  it("fails cache-only component loading without falling back to main", async () => {
+    const fake = fakeTransformers()
+    const entries = new Map(
+      GEMMA_ARTIFACT_URLS.map((url) => [url, new Response(`artifact:${url}`)])
+    )
+    const cache = {
+      match: vi.fn(async (url: string) => entries.get(url)),
+      put: vi.fn(async (url: string, response: Response) => {
+        entries.set(url, response.clone())
+      }),
+    }
+    const cacheStorage = { open: vi.fn(async () => cache) }
+    const fetchArtifact = vi.fn(async () => {
+      throw new Error("network fallback")
+    })
+    const autoConfig = vi.fn(async () => {
+      entries.delete(GEMMA_ARTIFACT_URLS[0]!)
+      throw new Error("cache miss")
+    })
+    const loadTransformers = vi.fn(async () => ({
+      ...(await fake.loadTransformers()),
+      AutoConfig: { from_pretrained: autoConfig },
+    }))
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers,
+      fetch: fetchArtifact,
+      cacheStorage,
+    })
+
+    await expect(runtime.prepare()).rejects.toThrow("cache miss")
+    expect(fetchArtifact).not.toHaveBeenCalled()
+    expect(autoConfig).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/resolve/2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+      ),
+      expect.objectContaining({
+        revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0",
+      })
+    )
+    await runtime.dispose()
+  })
+
+  it("disposes a loaded model when pipeline construction fails", async () => {
+    const fake = fakeTransformers()
+    const constructionFailure = new Error("pipeline construction")
+    fake.TextGenerationPipeline.mockImplementation(() => {
+      throw constructionFailure
+    })
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+
+    await expect(runtime.prepare()).rejects.toBe(constructionFailure)
+    expect(fake.dispose).toHaveBeenCalledOnce()
+    await runtime.dispose()
+  })
+
+  it("preserves preparation failure while retaining partial cleanup failure", async () => {
+    const preparationFailure = new Error("model construction")
+    const modelCleanupFailure = new Error("model cleanup")
+    const tokenizerCleanupFailure = new Error("tokenizer cleanup")
+    const tokenizer = {
+      apply_chat_template: vi.fn(() => "formatted prompt"),
+      dispose: vi.fn(async () => {
+        throw tokenizerCleanupFailure
+      }),
+    }
+    const model = {
+      dispose: vi.fn(async () => {
+        throw modelCleanupFailure
+      }),
+    }
+    const loadTransformers = vi.fn(async () => ({
+      env: {},
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      AutoConfig: {
+        from_pretrained: vi.fn(async () => ({ model_type: "gemma3_text" })),
+      },
+      AutoTokenizer: { from_pretrained: vi.fn(async () => tokenizer) },
+      AutoModelForCausalLM: {
+        from_pretrained: vi.fn(async () => model),
+      },
+      TextGenerationPipeline: vi.fn(() => {
+        throw preparationFailure
+      }),
+      TextStreamer: FakeTextStreamer,
+    }))
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+
+    await expect(runtime.prepare()).rejects.toBe(preparationFailure)
+    expect(model.dispose).toHaveBeenCalledOnce()
+    expect(tokenizer.dispose).toHaveBeenCalledOnce()
+    await expect(runtime.dispose()).rejects.toBe(modelCleanupFailure)
+    await expect(runtime.dispose()).rejects.toBe(modelCleanupFailure)
+  })
+
+  it("prepares the shared pipeline without starting a generation", async () => {
+    const fake = fakeTransformers()
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+
+    await runtime.prepare()
+
+    expect(fake.loadTransformers).toHaveBeenCalledOnce()
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
+    expect(fake.generator).not.toHaveBeenCalled()
+    await runtime.prepare()
+    expect(fake.loadTransformers).toHaveBeenCalledOnce()
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
+    await runtime.dispose()
+  })
+
+  it("preserves a preparation abort reason while disposing the shared pipeline", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers()
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const abort = new AbortController()
+    const reason = new DOMException("Preparation stopped", "AbortError")
+    const preparation = runtime.prepare(abort.signal)
+
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+    abort.abort(reason)
+    await expect(preparation).rejects.toBe(reason)
+
+    const disposal = runtime.dispose()
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await disposal
+    expect(fake.TextGenerationPipeline).not.toHaveBeenCalled()
+    expect(fake.dispose).not.toHaveBeenCalled()
+  })
+
+  it("loads lazily once and formats supplied protected history per run", async () => {
+    const fake = fakeTransformers()
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+    await expect(collect(runtime.generate(request()))).resolves.toBe(
+      "one two three"
+    )
+    await collect(runtime.generate(request()))
+
+    expect(fake.loadTransformers).toHaveBeenCalledOnce()
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
+    expect(fake.autoConfig).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/resolve/2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+      ),
+      { revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0" }
+    )
+    expect(fake.autoTokenizer).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/resolve/2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+      ),
+      expect.objectContaining({
+        revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0",
+      })
+    )
+    expect(fake.autoModelForCausalLM).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/resolve/2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+      ),
+      expect.objectContaining({
+        device: "webgpu",
+        dtype: "q4f16",
+        revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0",
+      })
+    )
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledWith({
+      task: "text-generation",
+      model: fake.generator,
+      tokenizer: fake.generator.tokenizer,
+    })
+    expect(fake.env.experimental_useCrossOriginStorage).toBe(true)
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "Earlier" },
+      { role: "assistant", content: "Answer" },
+      { role: "user", content: "Current" },
+    ])
+    expect(runtime.disclosure).toEqual({
+      label: "Gemma 3 270M IT",
+      model: "onnx-community/gemma-3-270m-it-ONNX",
+      source: "Transformers.js browser runtime",
+      artifacts: {
+        kind: "explicit-download",
+        approximateBytes: 316_898_512,
+        origins: [
+          "https://huggingface.co",
+          "https://*.cdn.hf.co",
+          "https://cdn.jsdelivr.net",
+        ],
+      },
+    })
+    await runtime.dispose()
+    await runtime.dispose()
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("interrupts one criterion when its generation signal aborts", async () => {
+    const fake = fakeTransformers()
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+    const abort = new AbortController()
+    const reader = runtime
+      .generate(request(abort.signal))
+      [Symbol.asyncIterator]()
+
+    await expect(reader.next()).resolves.toEqual({ done: false, value: "one " })
+    abort.abort(new DOMException("Stopped", "AbortError"))
+    await expect(reader.next()).rejects.toMatchObject({ name: "AbortError" })
+    await vi.waitFor(() => expect(fake.criteria[0]?.interrupted).toBe(true))
+  })
+
+  it("interrupts generation when its iterator is returned", async () => {
+    const fake = fakeTransformers()
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+    const reader = runtime.generate(request())[Symbol.asyncIterator]()
+
+    await expect(reader.next()).resolves.toEqual({ done: false, value: "one " })
+    await reader.return?.("stop")
+    expect(fake.criteria[0]?.interrupted).toBe(true)
+  })
+
+  it("rejects non-alternating protected history before loading artifacts", () => {
+    const fake = fakeTransformers()
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+    const malformed = createProtectedBrowserRequest({
+      protectedHistory: [
+        { role: "user", protectedContent: "first" },
+        { role: "user", protectedContent: "second" },
+      ],
+      protectedContent: "current",
+    })
+
+    expect(() => runtime.generate(malformed)).toThrow("alternating")
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("rejects unsupported compatibility roles before loading artifacts", async () => {
     const fake = fakeTransformers()
     const factory = await createGemmaLanguageModelFactory({
       loadTransformers: fake.loadTransformers,
     })
-    const loaded: number[] = []
-    const model = await factory.create({
-      initialPrompts: [{ role: "user", content: "Earlier" }],
-      monitor(monitor) {
-        monitor.addEventListener("downloadprogress", (event) => {
-          loaded.push(event.loaded)
-        })
-      },
+
+    await expect(
+      factory.create({
+        initialPrompts: [{ role: "tool" as never, content: "Unsupported" }],
+      })
+    ).rejects.toThrow("tool")
+
+    const session = await factory.create()
+    expect(() =>
+      session.promptStreaming([
+        { role: "tool" as never, content: "Unsupported" },
+        { role: "user", content: "Current" },
+      ])
+    ).toThrow("tool")
+    await expect(
+      session.append([{ role: "tool" as never, content: "Unsupported" }])
+    ).rejects.toThrow("tool")
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("rejects oversized compatibility context before loading artifacts", async () => {
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const oversized = "x".repeat(32_768 * 4 + 1)
+
+    await expect(
+      factory.create({ initialPrompts: [{ role: "user", content: oversized }] })
+    ).rejects.toMatchObject({ name: "QuotaExceededError" })
+
+    const session = await factory.create()
+    expect(() => session.promptStreaming(oversized)).toThrow(
+      expect.objectContaining({ name: "QuotaExceededError" })
+    )
+    await expect(session.append(oversized)).rejects.toMatchObject({
+      name: "QuotaExceededError",
+    })
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("evicts oldest post-initial pairs and dispatches both overflow events", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers([answer])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const contextOverflow = vi.fn()
+    const quotaOverflow = vi.fn()
+    const contextEvent = vi.fn()
+    const quotaEvent = vi.fn()
+    session.oncontextoverflow = contextOverflow
+    session.onquotaoverflow = quotaOverflow
+    session.addEventListener("contextoverflow", contextEvent)
+    session.addEventListener("quotaoverflow", quotaEvent)
+
+    await session.prompt(turn)
+    await session.prompt(turn)
+    await session.prompt(turn)
+
+    expect(contextOverflow).toHaveBeenCalledOnce()
+    expect(quotaOverflow).toHaveBeenCalledOnce()
+    expect(contextEvent).toHaveBeenCalledOnce()
+    expect(quotaEvent).toHaveBeenCalledOnce()
+    expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
+    expect(fake.promptMessages.map(({ role }) => role)).toEqual([
+      "system",
+      "user",
+      "assistant",
+      "user",
+    ])
+    expect(fake.promptMessages[1]?.content).toBe(turn)
+    expect(fake.promptMessages[2]?.content).toBe(answer)
+    expect(fake.promptMessages[3]?.content).toBe(turn)
+  })
+
+  it("evicts oldest post-initial pairs from append without acquiring the model", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const contextOverflow = vi.fn()
+    const quotaOverflow = vi.fn()
+    session.oncontextoverflow = contextOverflow
+    session.onquotaoverflow = quotaOverflow
+
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+
+    expect(contextOverflow).toHaveBeenCalledOnce()
+    expect(quotaOverflow).toHaveBeenCalledOnce()
+    expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("does not turn an append overflow-handler exception into an operation error", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const marker = new Error("context handler marker")
+    const contextEvent = vi.fn()
+    const quotaEvent = vi.fn()
+    const quotaHandler = vi.fn()
+    session.addEventListener("contextoverflow", contextEvent)
+    session.addEventListener("quotaoverflow", quotaEvent)
+    session.oncontextoverflow = () => {
+      throw marker
+    }
+    session.onquotaoverflow = quotaHandler
+
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await expect(
+      session.append([
+        { role: "user", content: turn },
+        { role: "assistant", content: answer },
+      ])
+    ).resolves.toBeUndefined()
+
+    expect(contextEvent).toHaveBeenCalledOnce()
+    expect(quotaEvent).toHaveBeenCalledOnce()
+    expect(quotaHandler).toHaveBeenCalledOnce()
+    expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
+  })
+
+  it("does not turn a prompt commit overflow-handler exception into an operation error", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers([answer])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const marker = new Error("context handler marker")
+    const contextEvent = vi.fn()
+    const quotaEvent = vi.fn()
+    const quotaHandler = vi.fn()
+    session.addEventListener("contextoverflow", contextEvent)
+    session.addEventListener("quotaoverflow", quotaEvent)
+    session.oncontextoverflow = () => {
+      throw marker
+    }
+    session.onquotaoverflow = quotaHandler
+
+    await session.prompt(turn)
+    await session.prompt(turn)
+    await expect(session.prompt(turn)).resolves.toBe(answer)
+
+    expect(contextEvent).toHaveBeenCalledOnce()
+    expect(quotaEvent).toHaveBeenCalledOnce()
+    expect(quotaHandler).toHaveBeenCalledOnce()
+    expect(session.contextUsage).toBeLessThanOrEqual(session.contextWindow)
+  })
+
+  it("registers, replaces, and removes IDL overflow handlers without double dispatch", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "system", content: "Keep this anchor" }],
+    })
+    const firstContextHandler = vi.fn()
+    let observedThis: LanguageModel | undefined
+    let observedTarget: EventTarget | null = null
+    let observedCurrentTarget: EventTarget | null = null
+    let observedPhase = 0
+    const secondContextHandler = vi.fn(function (
+      this: LanguageModel,
+      event: Event
+    ) {
+      observedThis = this
+      observedTarget = event.target
+      observedCurrentTarget = event.currentTarget
+      observedPhase = event.eventPhase
+    })
+    const firstQuotaHandler = vi.fn()
+    const secondQuotaHandler = vi.fn()
+    session.oncontextoverflow = firstContextHandler
+    expect(session.oncontextoverflow).toBe(firstContextHandler)
+    session.oncontextoverflow = secondContextHandler
+    expect(session.oncontextoverflow).toBe(secondContextHandler)
+    session.onquotaoverflow = firstQuotaHandler
+    session.onquotaoverflow = secondQuotaHandler
+    expect(session.onquotaoverflow).toBe(secondQuotaHandler)
+
+    const pair = [
+      { role: "user" as const, content: turn },
+      { role: "assistant" as const, content: answer },
+    ]
+    await session.append(pair)
+    await session.append(pair)
+    await session.append(pair)
+
+    expect(firstContextHandler).not.toHaveBeenCalled()
+    expect(secondContextHandler).toHaveBeenCalledOnce()
+    expect(firstQuotaHandler).not.toHaveBeenCalled()
+    expect(secondQuotaHandler).toHaveBeenCalledOnce()
+    expect(observedThis).toBe(session)
+    expect(observedTarget).toBe(session)
+    expect(observedCurrentTarget).toBe(session)
+    expect(observedPhase).toBe(Event.AT_TARGET)
+
+    session.oncontextoverflow = null
+    session.onquotaoverflow = null
+    expect(session.oncontextoverflow).toBeNull()
+    expect(session.onquotaoverflow).toBeNull()
+    await session.append(pair)
+    expect(secondContextHandler).toHaveBeenCalledOnce()
+    expect(secondQuotaHandler).toHaveBeenCalledOnce()
+  })
+
+  it("preserves IDL handler registration order across replacement and re-add", async () => {
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fakeTransformers().loadTransformers,
+    })
+    const session = await factory.create()
+    const order: string[] = []
+    const oldHandler = () => order.push("old")
+    const replacementHandler = () => order.push("replacement")
+    const externalListener = () => order.push("listener")
+
+    session.oncontextoverflow = oldHandler
+    session.addEventListener("contextoverflow", externalListener)
+    session.oncontextoverflow = replacementHandler
+    session.dispatchEvent(new Event("contextoverflow"))
+    expect(order).toEqual(["replacement", "listener"])
+
+    order.length = 0
+    session.oncontextoverflow = null
+    session.dispatchEvent(new Event("contextoverflow"))
+    expect(order).toEqual(["listener"])
+
+    order.length = 0
+    session.oncontextoverflow = replacementHandler
+    session.dispatchEvent(new Event("contextoverflow"))
+    expect(order).toEqual(["listener", "replacement"])
+  })
+
+  it("retains the completion of a user-ended initial anchor during eviction", async () => {
+    const turn = "u".repeat(8_000 * 4)
+    const answer = "a".repeat(8_000 * 4)
+    const fake = fakeTransformers(["done"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create({
+      initialPrompts: [{ role: "user", content: "Initial user" }],
+    })
+    const contextOverflow = vi.fn()
+    session.oncontextoverflow = contextOverflow
+
+    await session.append([{ role: "assistant", content: "Initial answer" }])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+    await session.append([
+      { role: "user", content: turn },
+      { role: "assistant", content: answer },
+    ])
+
+    await expect(session.prompt("Current")).resolves.toBe("done")
+    expect(contextOverflow).toHaveBeenCalledOnce()
+    expect(fake.promptMessages.map(({ role }) => role)).toEqual([
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+      "assistant",
+      "user",
+    ])
+    expect(fake.promptMessages[0]?.content).toBe("Initial user")
+    expect(fake.promptMessages[1]?.content).toBe("Initial answer")
+    expect(fake.promptMessages[2]?.content).toBe(turn)
+    expect(fake.promptMessages[3]?.content).toBe(answer)
+  })
+
+  it("rejects an oversized new pair without evicting or mutating it", async () => {
+    const oversized = "x".repeat(32_768 * 4 + 1)
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const contextOverflow = vi.fn()
+    session.oncontextoverflow = contextOverflow
+
+    await expect(
+      session.append([
+        { role: "user", content: oversized },
+        { role: "assistant", content: oversized },
+      ])
+    ).rejects.toMatchObject({ name: "QuotaExceededError" })
+    expect(() => session.promptStreaming(oversized)).toThrow(
+      expect.objectContaining({ name: "QuotaExceededError" })
+    )
+    expect(session.contextUsage).toBe(0)
+    expect(contextOverflow).not.toHaveBeenCalled()
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("rejects an overlapping prompt before acquisition and preserves causal history", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const first = session.promptStreaming("First question")
+    const firstReader = first.getReader()
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "answer ",
+    })
+    expect(() => session.promptStreaming("Overlapping question")).toThrow(
+      "active"
+    )
+    expect(fake.promptMessages).toHaveLength(1)
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
     })
 
-    await expect(collect(model.promptStreaming("Now"))).resolves.toBe(
-      "one two three"
-    )
-    await factory.create()
+    const third = session.promptStreaming("After first")
+    const thirdReader = third.getReader()
+    while (!(await thirdReader.read()).done) {
+      // Drain the post-settlement prompt.
+    }
 
-    expect(loaded).toEqual([0.5, 1])
-    expect(fake.env.experimental_useCrossOriginStorage).toBe(false)
-    expect(fake.pipeline).toHaveBeenCalledOnce()
-    expect(fake.promptMessages()).toEqual([
-      { role: "user", content: "Earlier" },
-      { role: "user", content: "Now" },
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "answer " },
+      { role: "user", content: "After first" },
     ])
   })
 
-  it("interrupts Transformers generation when the Prompt API signal aborts", async () => {
-    const fake = fakeTransformers()
+  it("rejects prompt overlap while promptStreaming is active", async () => {
+    const fake = fakeTransformers(["answer "])
     const factory = await createGemmaLanguageModelFactory({
       loadTransformers: fake.loadTransformers,
     })
-    const model = await factory.create()
-    const abort = new AbortController()
-    const reader = model
-      .promptStreaming("Generate", { signal: abort.signal })
-      .getReader()
+    const session = await factory.create()
+    const first = session.promptStreaming("First question")
+    const firstReader = first.getReader()
 
-    await expect(reader.read()).resolves.toEqual({ done: false, value: "one " })
-    abort.abort(new DOMException("Stopped", "AbortError"))
-    await expect(reader.read()).rejects.toMatchObject({ name: "AbortError" })
-    await vi.waitFor(() => expect(fake.generated()).toBe(1))
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "answer ",
+    })
+    await expect(session.prompt("Overlapping question")).rejects.toMatchObject({
+      name: "InvalidStateError",
+    })
+    expect(fake.promptMessages).toHaveLength(1)
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+    await expect(session.prompt("After first")).resolves.toBe("answer ")
   })
 
-  it("interrupts Transformers generation when its stream is cancelled", async () => {
+  it("rejects append while a prompt is active without mutating history", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const first = session.promptStreaming("First question")
+    const firstReader = first.getReader()
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "answer ",
+    })
+    await expect(session.append("Late append")).rejects.toMatchObject({
+      name: "InvalidStateError",
+    })
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+    await expect(session.prompt("After first")).resolves.toBe("answer ")
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "answer " },
+      { role: "user", content: "After first" },
+    ])
+  })
+
+  it("preserves an append abort reason over the busy-session error", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const first = session.promptStreaming("First question")
+    const firstReader = first.getReader()
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "answer ",
+    })
+    const abort = new AbortController()
+    const reason = new DOMException("Append stopped", "AbortError")
+    abort.abort(reason)
+    await expect(
+      session.append("Late append", { signal: abort.signal })
+    ).rejects.toBe(reason)
+
+    await expect(firstReader.read()).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+  })
+
+  it("measures supplied turns without requiring room in anchored history", async () => {
     const fake = fakeTransformers()
     const factory = await createGemmaLanguageModelFactory({
       loadTransformers: fake.loadTransformers,
     })
+    const session = await factory.create({
+      initialPrompts: [
+        { role: "system", content: "x".repeat((32_768 - 8) * 4) },
+      ],
+    })
+
+    await expect(session.measureContextUsage("12345678")).resolves.toBe(2)
+    expect(fake.loadTransformers).not.toHaveBeenCalled()
+  })
+
+  it("waits for a deferred pipeline and disposes it once", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers()
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const reader = runtime.generate(request())[Symbol.asyncIterator]()
+    const next = reader.next()
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+    const disposal = runtime.dispose()
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await expect(next).rejects.toThrow("disposed")
+    await disposal
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("surfaces a pipeline disposal error without repeating disposal", async () => {
+    const fake = fakeTransformers()
+    const disposalError = new Error("pipeline disposal")
+    fake.dispose.mockRejectedValue(disposalError)
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+    await collect(runtime.generate(request()))
+    await expect(runtime.dispose()).rejects.toBe(disposalError)
+    await expect(runtime.dispose()).rejects.toBe(disposalError)
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("does not dispose shared artifacts when compatibility destroy closes a session", async () => {
+    const fake = fakeTransformers(["ok"])
+    const disposalError = new Error("destroy disposal")
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
     const model = await factory.create()
-    const reader = model.promptStreaming("Generate").getReader()
+    const stream = await model.promptStreaming("Current question")
+    const reader = stream.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the stream so the shared pipeline is loaded before destroy.
+    }
+    fake.dispose.mockRejectedValue(disposalError)
 
-    await expect(reader.read()).resolves.toEqual({ done: false, value: "one " })
-    await reader.cancel("stop")
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on("unhandledRejection", onUnhandled)
+    try {
+      model.destroy()
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
 
-    await vi.waitFor(() => expect(fake.generated()).toBe(1))
+    expect(fake.dispose).not.toHaveBeenCalled()
+    expect(unhandled).toEqual([])
+  })
+
+  it("memoizes a synchronous pipeline dispose throw", async () => {
+    const fake = fakeTransformers(["ok"])
+    const disposalError = new Error("synchronous disposal")
+    fake.dispose.mockImplementation(() => {
+      throw disposalError
+    })
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+    await collect(runtime.generate(request()))
+
+    await expect(runtime.dispose()).rejects.toBe(disposalError)
+    await expect(runtime.dispose()).rejects.toBe(disposalError)
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("memoizes concurrent late-open and runtime disposal", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers(["ok"])
+    const disposalError = new Error("concurrent disposal")
+    fake.dispose.mockImplementation(() => {
+      throw disposalError
+    })
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const reader = runtime.generate(request())[Symbol.asyncIterator]()
+    const next = reader.next()
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+
+    const disposal = runtime.dispose()
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await expect(next).rejects.toBe(disposalError)
+    await expect(disposal).rejects.toBe(disposalError)
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("does not dispose the shared pipeline for one aborted run", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers()
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const abort = new AbortController()
+    const first = runtime
+      .generate(request(abort.signal))
+      [Symbol.asyncIterator]()
+    const second = runtime.generate(request())[Symbol.asyncIterator]()
+    const firstNext = first.next()
+    const secondNext = second.next()
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+
+    const reason = new DOMException("Stopped", "AbortError")
+    abort.abort(reason)
+    await expect(firstNext).rejects.toBe(reason)
+
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await expect(secondNext).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    expect(fake.dispose).not.toHaveBeenCalled()
+    await second.return?.("stop")
+    await runtime.dispose()
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("disposes the shared pipeline after all active runs settle", async () => {
+    const opening = deferred<unknown>()
+    const fake = fakeTransformers()
+    const loadTransformers = vi.fn(() => opening.promise)
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers,
+    })
+    const abort = new AbortController()
+    const first = runtime
+      .generate(request(abort.signal))
+      [Symbol.asyncIterator]()
+    const second = runtime.generate(request())[Symbol.asyncIterator]()
+    const firstNext = first.next()
+    const secondNext = second.next()
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+
+    // Both runs share a pending load. The first settles with its primary abort
+    // error; disposal must still wait for the second late acquisition.
+    abort.abort(new DOMException("Stopped", "AbortError"))
+    await expect(firstNext).rejects.toMatchObject({ name: "AbortError" })
+    const disposal = runtime.dispose()
+
+    opening.resolve({
+      env: fake.env,
+      InterruptableStoppingCriteria: FakeStoppingCriteria,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
+      TextStreamer: FakeTextStreamer,
+    })
+    await expect(secondNext).rejects.toThrow("disposed")
+    await disposal
+    expect(fake.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("preserves a leading system role through the compatibility bridge", async () => {
+    const fake = fakeTransformers(["ok"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const model = await factory.create({
+      initialPrompts: [{ role: "system", content: "Follow these rules" }],
+    })
+    const stream = await model.promptStreaming("Current question")
+    const reader = stream.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the compatibility stream so the tokenizer is invoked.
+    }
+
+    expect(fake.promptMessages).toEqual([
+      { role: "system", content: "Follow these rules" },
+      { role: "user", content: "Current question" },
+    ])
+  })
+
+  it("preserves every preceding array-form turn in the compatibility bridge", async () => {
+    const fake = fakeTransformers(["ok"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const stream = session.promptStreaming([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "Current question" },
+    ])
+    expect(stream).toBeInstanceOf(ReadableStream)
+    const reader = stream.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the compatibility stream so the tokenizer is invoked.
+    }
+
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "First answer" },
+      { role: "user", content: "Current question" },
+    ])
+  })
+
+  it("commits a successful prompt and assistant response to the next turn", async () => {
+    const fake = fakeTransformers(["answer "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+
+    await expect(session.prompt("First question")).resolves.toBe("answer ")
+    expect(session.contextWindow).toBe(32_768)
+    expect(session.inputQuota).toBe(32_768)
+    expect(session.contextUsage).toBe(
+      Math.ceil("First questionanswer ".length / 4)
+    )
+    await expect(session.measureContextUsage("Second question")).resolves.toBe(
+      Math.ceil("Second question".length / 4)
+    )
+    const clone = await session.clone()
+    await expect(clone.prompt("Clone question")).resolves.toBe("answer ")
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "answer " },
+      { role: "user", content: "Clone question" },
+    ])
+    clone.destroy()
+    const second = session.promptStreaming("Second question")
+    const reader = second.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the second successful prompt.
+    }
+
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "First question" },
+      { role: "assistant", content: "answer " },
+      { role: "user", content: "Second question" },
+    ])
+  })
+
+  it("does not commit a failed prompt to session history", async () => {
+    const failure = new Error("generation failed")
+    const fake = fakeTransformers(["partial "], failure)
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+
+    await expect(session.prompt("Failed question")).rejects.toBe(failure)
+
+    const next = session.promptStreaming("Next question")
+    const reader = next.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the next prompt after the failed one.
+    }
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "Next question" },
+    ])
+  })
+
+  it("exposes the synchronous native LanguageModel session surface", async () => {
+    const fake = fakeTransformers(["ok"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+
+    const initialStream = session.promptStreaming("Current")
+    expect(initialStream).toBeInstanceOf(ReadableStream)
+    const initialReader = initialStream.getReader()
+    while (!(await initialReader.read()).done) {
+      // Drain the shape-check prompt before starting another prompt.
+    }
+    await expect(session.prompt("Current")).resolves.toBe("ok")
+    await expect(
+      session.measureContextUsage("Current")
+    ).resolves.toBeGreaterThan(0)
+    await expect(session.measureInputUsage("Current")).resolves.toBeGreaterThan(
+      0
+    )
+    await expect(session.append("Earlier")).resolves.toBeUndefined()
+    await expect(session.clone()).resolves.toMatchObject({
+      prompt: expect.any(Function),
+      promptStreaming: expect.any(Function),
+      measureContextUsage: expect.any(Function),
+    })
+    session.destroy()
+  })
+
+  it("keeps the compatibility runtime alive after a warm session is destroyed", async () => {
+    const fake = fakeTransformers(["ok"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const warmSession = await factory.create()
+    warmSession.destroy()
+
+    const session = await factory.create()
+    const stream = await session.promptStreaming("Current question")
+    const reader = stream.getReader()
+    while (!(await reader.read()).done) {
+      // Drain the later session after activation's warm session is destroyed.
+    }
+
+    expect(fake.dispose).not.toHaveBeenCalled()
+  })
+
+  it("destroys only the compatibility session's active iterator", async () => {
+    const fake = fakeTransformers()
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const firstSession = await factory.create()
+    const secondSession = await factory.create()
+    const firstStream = await firstSession.promptStreaming("First")
+    const firstReader = firstStream.getReader()
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+
+    firstSession.destroy()
+
+    const secondStream = await secondSession.promptStreaming("Second")
+    const secondReader = secondStream.getReader()
+    while (!(await secondReader.read()).done) {
+      // The second session remains usable while the first is being destroyed.
+    }
+    expect(fake.dispose).not.toHaveBeenCalled()
+  })
+
+  it("aborts an active compatibility reader when its session is destroyed", async () => {
+    const fake = fakeTransformers(["one ", "two ", "three"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const stream = await session.promptStreaming("Current")
+    const reader = stream.getReader()
+
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    const pending = reader.read()
+
+    session.destroy()
+
+    await expect(pending).rejects.toMatchObject({
+      name: "AbortError",
+    })
+  })
+
+  it("keeps a not-yet-pulled compatibility reader aborted after destroy", async () => {
+    const fake = fakeTransformers(["one "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const stream = session.promptStreaming("Current")
+
+    session.destroy()
+
+    const reader = stream.getReader()
+    await expect(reader.read()).rejects.toMatchObject({
+      name: "AbortError",
+    })
+  })
+
+  it("keeps a sibling compatibility session usable after one is destroyed", async () => {
+    const fake = fakeTransformers(["one ", "two ", "three"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const first = await factory.create()
+    const second = await factory.create()
+    const firstStream = await first.promptStreaming("First")
+    const firstReader = firstStream.getReader()
+    await expect(firstReader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    const firstPending = firstReader.read()
+
+    const secondStream = await second.promptStreaming("Second")
+    const secondReader = secondStream.getReader()
+    first.destroy()
+
+    await expect(firstPending).rejects.toMatchObject({ name: "AbortError" })
+    await expect(secondReader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    second.destroy()
+  })
+
+  it("preserves the caller abort reason through compatibility composition", async () => {
+    const fake = fakeTransformers(["one ", "two ", "three"])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const abort = new AbortController()
+    const stream = await session.promptStreaming("Current", {
+      signal: abort.signal,
+    })
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "one ",
+    })
+    const pending = reader.read()
+    const reason = new DOMException("Caller stopped", "AbortError")
+
+    abort.abort(reason)
+
+    await expect(pending).rejects.toBe(reason)
+    session.destroy()
+  })
+
+  it("does not commit an aborted prompt to session history", async () => {
+    const fake = fakeTransformers(["partial ", "later "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const abort = new AbortController()
+    const stream = session.promptStreaming("Aborted question", {
+      signal: abort.signal,
+    })
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "partial ",
+    })
+    const pending = reader.read()
+    abort.abort(new DOMException("Stopped", "AbortError"))
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" })
+
+    const next = session.promptStreaming("Next question")
+    const nextReader = next.getReader()
+    while (!(await nextReader.read()).done) {
+      // Drain the next prompt after the aborted one.
+    }
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "Next question" },
+    ])
+  })
+
+  it("surfaces an abort before an ignored generator cleanup settles", async () => {
+    const fake = fakeTransformers(["partial ", "never"], undefined, true)
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const abort = new AbortController()
+    const stream = session.promptStreaming("Stuck question", {
+      signal: abort.signal,
+    })
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "partial ",
+    })
+    const pending = reader.read()
+    const reason = new DOMException("Caller stopped", "AbortError")
+    abort.abort(reason)
+
+    const outcome = await Promise.race([
+      pending.then(
+        () => "resolved",
+        (error) => error
+      ),
+      new Promise((resolve) => setTimeout(() => resolve("timed out"), 100)),
+    ])
+    expect(outcome).toBe(reason)
+    session.destroy()
+  })
+
+  it("does not commit a cancelled prompt to session history", async () => {
+    const fake = fakeTransformers(["partial ", "later "])
+    const factory = await createGemmaLanguageModelFactory({
+      loadTransformers: fake.loadTransformers,
+    })
+    const session = await factory.create()
+    const stream = session.promptStreaming("Cancelled question")
+    const reader = stream.getReader()
+    await expect(reader.read()).resolves.toEqual({
+      done: false,
+      value: "partial ",
+    })
+    await reader.cancel("cancelled")
+
+    const next = session.promptStreaming("Next question")
+    const nextReader = next.getReader()
+    while (!(await nextReader.read()).done) {
+      // Drain the next prompt after the cancelled one.
+    }
+    expect(fake.promptMessages).toEqual([
+      { role: "user", content: "Next question" },
+    ])
   })
 })
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}

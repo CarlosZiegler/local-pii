@@ -1,54 +1,90 @@
 ---
 title: Adaptadores
-description: Envolva qualquer chamada de LLM — Vercel AI SDK, OpenAI, Grok — com anonimizar → chamar → reidratar. Tool calls incluídas.
+description: Valores protegidos e reidratados nos adaptadores inline, OpenAI, AI SDK e TanStack.
 ---
 
-Os adaptadores envolvem o ciclo inteiro para que você quase não precise alterar
-seu código. Ambos lidam com streaming e reidratam o JSON de argumentos de tool
-call, para que suas tools rodem com valores **reais** enquanto o provedor só vê
-placeholders. Use a estratégia opaca [`token()`](/pt/docs/strategies) quando tools
-estiverem envolvidas — veja [Tool Calls](/pt/docs/tool-calls).
+Os adaptadores implementam o mesmo fluxo: Detecção → anonymizer → sessão de
+privacidade → adaptador de Geração ou callback inline → resultado reidratado.
+Eles protegem conteúdo semântico e preservam campos de controle do protocolo.
 
 ## Chamadas inline — `local-pii/inline`
 
-Use o adapter inline com qualquer API de modelo no mesmo processo. Ele garante
-a ordem proteger → chamar → restaurar e encaminha o mesmo `AbortSignal`:
+Use inline para qualquer modelo de Geração no mesmo processo. Ele encaminha o
+mesmo `AbortSignal` e reidrata com um ciclo de vida seguro em `finally`:
 
 ```ts
-import {
-  runInlineJson,
-  runInlineText,
-  runInlineTextStream,
-} from "local-pii/inline"
+import { runInlineText } from "local-pii/inline"
 
 const answer = await runInlineText({
+  session: conversation,
   input: "Email ana@acme.com",
   signal,
-  call: (protectedText, { signal }) =>
-    localModel.prompt(protectedText, { signal }),
-})
-
-for await (const delta of runInlineTextStream({
-  input: "Repita ana@acme.com",
-  call: (protectedText, { signal }) =>
-    localModel.stream(protectedText, { signal }),
-}))
-  render(delta)
-
-const extracted = await runInlineJson({
-  input: { contact: "ana@acme.com", request: "Resuma este contato" },
-  call: (protectedValue, { signal }) =>
-    localModel.extract(protectedValue, { signal }),
+  call: (protectedContent, { signal }) =>
+    generationModel.generate(protectedContent, { signal }),
 })
 ```
 
-`runInlineJson` protege valores estruturados profundamente sem mutação. Uma
-sessão criada pelo adapter é limpa automaticamente; uma `session` fornecida
-continua pertencendo ao chamador e pode durar toda a conversa.
+`runInlineJson` protege folhas string sem mutar a entrada. A prioridade é
+`session`, depois `anonymizer`, depois o anonymizer padrão. Sessão criada pelo
+adaptador é limpa; sessão fornecida é emprestada e nunca é limpa pelo
+adaptador. Falha de limpeza não substitui a falha primária do modelo ou abort.
+
+Callbacks inline genéricos e modelos de Detecção fornecidos pelo chamador
+executam como código confiável do chamador. `local-pii` protege a fronteira de
+Geração deles; não os executa em sandbox.
+
+## OpenAI / Grok — `local-pii/openai`
+
+```ts
+import OpenAI from "openai"
+import { withPiiOpenAI } from "local-pii/openai"
+
+const client = withPiiOpenAI(new OpenAI({ apiKey }))
+const result = await client.chat.completions.create({
+  model: "gpt-4o-mini",
+  messages,
+  tools,
+})
+```
+
+| Contrato                         | Comportamento testado                                                                                                                                      |
+| -------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Valores semânticos protegidos    | Texto de mensagens e sistema, argumentos de tools e resultados de tools são protegidos antes do cliente.                                                   |
+| Valores semânticos reidratados   | Texto, deltas de streaming, argumentos entregues à tool e resultados são reidratados em seus limites de protocolo.                                         |
+| Controle / opacos preservados    | Papéis, IDs, modelo/opções, nomes de tools, metadados e campos opacos do provedor são preservados; campos pessoais continuam responsabilidade do chamador. |
+| Variantes não suportadas / erros | Formatos de cliente não suportados falham sem fallback silencioso. Abort e erros do provedor preservam a falha primária; use `token()` em JSON/tools.      |
+
+O wrapper estrutural também cobre Grok/xAI, Groq, Together, OpenRouter e
+Ollama. Uma sessão implícita é criada com o wrapper e reutilizada entre suas
+chamadas. Use um wrapper por conversa privada ou passe `{ session }` para
+deixar o ownership explícito. Loops manuais podem usar `createPiiChat`,
+`rehydrateToolArgs` e `createStreamingRehydrator`.
+
+## Vercel AI SDK — `local-pii/ai-sdk`
+
+```ts
+import { openai } from "@ai-sdk/openai"
+import { streamText } from "ai"
+import { withPii } from "local-pii/ai-sdk"
+
+const model = withPii(openai("gpt-5.2"), { session: conversation })
+const result = streamText({ model, prompt })
+```
+
+| Contrato                         | Comportamento testado                                                                                                                                                    |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Valores semânticos protegidos    | Texto de sistema/usuário/assistente, inputs/outputs de tools e JSON estruturado são protegidos. Reasoning é opaco e permanece responsabilidade do chamador.              |
+| Valores semânticos reidratados   | Texto, argumentos antes da tool e resultados no passo seguinte são reidratados. Partes de reasoning passam sem alteração.                                                |
+| Controle / opacos preservados    | Tipos, IDs, papéis, reasoning, nomes, aprovações, opções e marcadores de stream permanecem iguais; metadados do chamador não são inspecionados.                          |
+| Variantes não suportadas / erros | Conteúdo sem suporte e streams inválidos falham. Aborts e erros do provedor preservam a falha exata; um abort observado antes da fronteira impede a chamada ao provedor. |
+
+`withPii` é middleware e não exige wrapper de tool. Sessão fornecida é
+emprestada; sem ela, o middleware possui uma sessão vinculada à instância e a
+reutiliza entre chamadas. Crie um novo wrapper para uma nova conversa privada.
+O playground fixa `ai@7.0.57`, `@ai-sdk/react@4.0.61` e
+`@browser-ai/core@3.0.0`.
 
 ## TanStack AI — `local-pii/tanstack`
-
-Envolva qualquer `ConnectConnectionAdapter` do cliente, inclusive um local:
 
 ```ts
 import { createAnonymizer, token } from "local-pii"
@@ -59,53 +95,23 @@ const connection = piiConnection(browserConnection, { session })
 // useChat({ connection })
 ```
 
-Use uma sessão/wrapper por conversa. Texto, conteúdo estruturado, inputs e
-resultados de tools, streaming, abort e execuções sobrepostas são protegidos.
-O contrato atual está pinado em `@tanstack/ai@0.43.1` e
-`@tanstack/ai-client@0.23.1`.
+| Contrato                         | Comportamento testado                                                                                                                             |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Valores semânticos protegidos    | Mensagens de texto, conteúdo estruturado suportado, inputs/outputs de tools e limites de stream são protegidos sem mutação.                       |
+| Valores semânticos reidratados   | Deltas, valores estruturados, argumentos e resultados de tools são reidratados no limite TanStack.                                                |
+| Controle / opacos preservados    | Papéis, IDs, tipos de evento, marcadores de fim/erro e `data` opaco são preservados; hydration passa diretamente.                                 |
+| Variantes não suportadas / erros | `UnsupportedTanStackSemanticContentError` rejeita partes semânticas não suportadas; abort, limpeza e runs sobrepostos preservam a falha primária. |
 
-## Vercel AI SDK — `local-pii/ai-sdk`
+O contrato é pinado em `@tanstack/ai@0.43.1`, `@tanstack/ai-client@0.23.1` e
+`@tanstack/ai-react@0.19.1`. O chamador fornece uma sessão por conversa.
+Hydration e `joinRun` funcionam apenas na mesma sessão viva. Persistência,
+restauração após reload completo, entre abas e com nova sessão não são
+suportadas. Desde 0.1.0, migre partes semânticas não suportadas para texto ou
+estrutura suportada em vez de depender de adivinhação.
 
-Um middleware. Não é necessário nenhum wrapper de tool: ele reidrata os
-argumentos de tool call antes que o SDK execute sua tool, e depois reanonimiza
-o resultado da tool no passo seguinte.
+## Escolha uma estratégia de placeholder
 
-```ts
-import { openai } from "@ai-sdk/openai"
-import { streamText } from "ai"
-import { withPii } from "local-pii/ai-sdk"
-
-const model = withPii(openai("gpt-5.2")) // wrapLanguageModel under the hood
-const { textStream } = streamText({ model, prompt })
-```
-
-Crie uma sessão por conversa (uma por requisição em um servidor):
-`withPii(model, { session })`.
-
-O playground no navegador fixa `ai@7.0.57`, `@ai-sdk/react@4.0.61` e
-`@browser-ai/core@3.0.0` para esse pipeline direto no cliente.
-
-## OpenAI & Grok / xAI — `local-pii/openai`
-
-Envolve uma **instância de cliente** da OpenAI estruturalmente — zero
-dependência do pacote `openai` — portanto também cobre Grok, Groq, Together,
-OpenRouter, Ollama.
-
-```ts
-import OpenAI from "openai"
-import { withPiiOpenAI } from "local-pii/openai"
-
-// Grok: same wrapper, different baseURL
-const client = withPiiOpenAI(
-  new OpenAI({ baseURL: "https://api.x.ai/v1", apiKey })
-)
-const res = await client.chat.completions.create({
-  model: "grok-4",
-  messages,
-  tools,
-})
-// res.choices[0].message.content is already rehydrated
-```
-
-Para um loop manual, `createPiiChat`, `rehydrateToolArgs` e
-`createStreamingRehydrator` são exportados.
+Use `sequential()` legível para texto comum, `hashed({ secret })` com chave
+quando igualdade estável for necessária e `token()` opaco para tools ou JSON
+processado por máquina. O mapping privado nunca é um campo do protocolo e deve
+permanecer dentro da fronteira de confiança do chamador.

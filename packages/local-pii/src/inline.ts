@@ -1,4 +1,4 @@
-import { createAnonymizer } from "./anonymizer"
+import { createAnonymizer, type Anonymizer } from "./anonymizer"
 import { token } from "./placeholder/strategies"
 import { createStreamingRehydrator } from "./rehydrate"
 import type { PiiSession } from "./session"
@@ -15,6 +15,8 @@ export interface InlineTransformContext extends InlineContext {
 export interface InlineSessionOptions {
   /** Borrow a session whose vault should survive this call. */
   session?: PiiSession
+  /** Derive a temporary session when no session is supplied. */
+  anonymizer?: Anonymizer
   signal?: AbortSignal
 }
 
@@ -41,7 +43,8 @@ interface ResolvedSession {
 function resolveSession(options: InlineSessionOptions): ResolvedSession {
   if (options.session) return { session: options.session, owned: false }
 
-  const anonymizer = createAnonymizer({ placeholders: token() })
+  const anonymizer =
+    options.anonymizer ?? createAnonymizer({ placeholders: token() })
   return { session: anonymizer.createSession(), owned: true }
 }
 
@@ -58,6 +61,7 @@ export async function runInline<Input, Protected, Output, Restored>(
     signal: options.signal,
   }
   const callContext: InlineContext = { signal: options.signal }
+  let primaryFailed = false
 
   try {
     options.signal?.throwIfAborted()
@@ -69,8 +73,21 @@ export async function runInline<Input, Protected, Output, Restored>(
     const output = await options.call(protectedInput, callContext)
     options.signal?.throwIfAborted()
     return await options.restore(output, transformContext)
+  } catch (error) {
+    primaryFailed = true
+    throw error
   } finally {
-    if (resolved.owned) resolved.session.clear()
+    if (resolved.owned) {
+      try {
+        resolved.session.clear()
+      } catch (cleanupError) {
+        if (!primaryFailed) {
+          // Cleanup is the primary failure only when the operation succeeded.
+          // eslint-disable-next-line no-unsafe-finally -- preserve cleanup error contract
+          throw cleanupError
+        }
+      }
+    }
   }
 }
 
@@ -137,17 +154,31 @@ export function runInlineTextStream(
         failed = true
         throw error
       } finally {
-        try {
-          if (!upstreamDone) await upstream?.return?.()
-        } catch (cleanupError) {
-          if (!failed) {
-            // Cleanup is the primary failure only when stream processing succeeded.
-            // eslint-disable-next-line no-unsafe-finally -- preserve the cleanup error contract
-            throw cleanupError
+        let hasCleanupError = false
+        let cleanupError: unknown
+
+        if (!upstreamDone) {
+          try {
+            await upstream?.return?.()
+          } catch (error) {
+            hasCleanupError = true
+            cleanupError = error
           }
-        } finally {
-          if (resolved.owned) resolved.session.clear()
         }
+
+        if (resolved.owned) {
+          try {
+            resolved.session.clear()
+          } catch (error) {
+            if (!hasCleanupError) {
+              hasCleanupError = true
+              cleanupError = error
+            }
+          }
+        }
+
+        // eslint-disable-next-line no-unsafe-finally -- preserve the first cleanup error
+        if (!failed && hasCleanupError) throw cleanupError
       }
     },
   }

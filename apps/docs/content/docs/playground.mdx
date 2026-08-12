@@ -1,41 +1,49 @@
 ---
 title: Playground
-description: Compare real Vercel AI SDK and TanStack AI chats backed by a model running directly in your browser.
+description: Compare real Vercel AI SDK and TanStack AI private conversations backed by browser-local Generation.
 ---
 
 import { Playground } from "@/components/playground"
 
-Everything below runs **in your browser**: no gateway, API route, server action,
-API key, or inference endpoint. Choose Chrome's built-in Gemini Nano when the
-Prompt API is available, or explicitly download the local Gemma 3 270M fallback.
-Then compare the same privacy flow through Vercel AI SDK and TanStack AI.
+Everything below uses browser-local Generation: no Gateway, API route, server
+action, API key, or inference endpoint. Choose Chrome's browser-managed Gemini
+Nano when available, or explicitly activate the Gemma fallback. There are no
+automatic downloads and no silent runtime switching.
 
 <Playground />
 
 ## Try it
 
-- Send `Email ana@acme.com and repeat it.` in either tab.
-- The privacy inspector shows the opaque prompt delivered to the model.
-- The assistant response is rehydrated locally, so the UI shows the original
-  email again.
-- **New chat** clears both the visible history and that tab's in-memory vault.
+- Send `Email ana@acme.com and repeat it.` in either chat.
+- The inspector shows the exact protected history and current content delivered
+  to the browser runtime, never the private mapping or original input.
+- The response is restored locally, so the UI shows the original email.
+- **New chat** waits for stop and runtime cleanup, then clears that tab's
+  history, privacy session, error, and inspection before creating a new session.
 
-The tabs have separate histories and separate `PiiSession` instances. Stop
-cancels the current browser generation rather than calling a remote service.
+Each force-mounted tab owns a separate private conversation, privacy session,
+history, observer, and mapping. A generation gate allows one chat at a time:
+the owning chat can stop; the other chat's submit and reset controls remain
+disabled until cleanup releases the gate. Both examples use their real public
+Vercel AI SDK and TanStack adapters. The docs-internal browser runtime is not a
+public `local-pii` API.
 
-## Runtime notes
+## Runtime disclosure
 
-- Gemini Nano is browser-managed and currently depends on compatible desktop
-  Chrome hardware and Prompt API availability.
-- The fallback is `onnx-community/gemma-3-270m-it-ONNX`, q4f16, approximately
-  426 MB. It is loaded only after explicit consent and requires a compatible
-  desktop browser with WebGPU. Review its [model card and Gemma license terms](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
-  before downloading.
-- Artifact downloads may appear in DevTools Network. Prompts, restored values,
-  and the privacy vault are never sent to an application inference server.
-- Small local models are useful for this demonstration, but language quality and
-  reasoning ability vary. The interface being translated does not guarantee
-  equal model quality in English, Portuguese, and German.
-
-The UI uses shadcn and AI Elements primitives. Both examples are real client-side
-framework lifecycles; neither hides the other framework as its transport.
+- Gemini Nano is browser-managed and requires compatible desktop Chrome,
+  hardware, and Prompt API availability. Browser-managed resources are not an
+  artifact download controlled by this page.
+- Gemma is `onnx-community/gemma-3-270m-it-ONNX`, revision
+  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0`, q4f16 WebGPU. Its six pinned
+  model files total 293,284,073 bytes. The first activation can also fetch
+  23,614,439 uncompressed bytes of versioned ONNX Runtime Web support files,
+  for approximately 316,898,512 static artifact bytes (~317 MB before transfer
+  compression). Origins are `https://huggingface.co`, `https://*.cdn.hf.co`,
+  and `https://cdn.jsdelivr.net`; review the [model card and Gemma license terms](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
+  before activation.
+- Explicit artifact downloads contain only static model and runtime resources,
+  with no user content. Prompts, restored values, private mappings, and
+  inspection state do not go to an application endpoint.
+- Small browser-local Generation models are useful for this demonstration, but
+  quality and reasoning vary by model and language. Translation does not imply
+  equal quality in English, Portuguese, and German.

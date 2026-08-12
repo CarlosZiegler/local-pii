@@ -36,6 +36,8 @@ describe("local-pii/tanstack public subpath", () => {
 
     expect(esm.piiConnection).toBeTypeOf("function")
     expect(cjs.piiConnection).toBeTypeOf("function")
+    expect(esm.UnsupportedTanStackSemanticContentError).toBeTypeOf("function")
+    expect(cjs.UnsupportedTanStackSemanticContentError).toBeTypeOf("function")
   })
 
   it("emits declarations against public TanStack package types", async () => {
@@ -46,6 +48,7 @@ describe("local-pii/tanstack public subpath", () => {
 
     expect(declarations).toContain("@tanstack/ai-client")
     expect(declarations).toContain("piiConnection")
+    expect(declarations).toContain("UnsupportedTanStackSemanticContentError")
     expect(declarations).not.toContain("@tanstack/ai-client/src/")
   })
 })

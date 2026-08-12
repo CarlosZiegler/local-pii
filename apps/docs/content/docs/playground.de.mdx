@@ -1,41 +1,51 @@
 ---
 title: Playground
-description: Vergleiche echte Vercel-AI-SDK- und TanStack-AI-Chats mit einem Modell, das direkt im Browser läuft.
+description: Echte private Vercel-AI-SDK- und TanStack-AI-Konversationen mit browserlokaler Generierung vergleichen.
 ---
 
 import { Playground } from "@/components/playground"
 
-Alles unten läuft **in deinem Browser**: kein Gateway, keine API-Route, Server
-Action, API-Key oder Inference-Endpoint. Nutze Chromes eingebautes Gemini Nano,
-wenn die Prompt API verfügbar ist, oder lade den lokalen Gemma-3-270M-Fallback
-ausdrücklich herunter. Danach kannst du denselben Privacy-Flow mit Vercel AI SDK
-und TanStack AI vergleichen.
+Alles unten nutzt browserlokale Generierung: kein Gateway, keine API-Route,
+Server Action, kein API-Key und kein Inference-Endpoint. Wähle das vom Browser
+verwaltete Gemini Nano, wenn verfügbar, oder aktiviere den Gemma-Fallback
+ausdrücklich. Es gibt keine automatischen Downloads und keinen stillen
+Runtime-Wechsel.
 
 <Playground />
 
-## Probier das aus
+## Ausprobieren
 
-- Sende `E-Mail ana@acme.com und wiederhole sie.` in einem der Tabs.
-- Der Privacy Inspector zeigt den opaken Prompt, den das Modell erhält.
-- Die Antwort wird lokal rehydriert; in der UI erscheint wieder die originale
-  E-Mail-Adresse.
-- **New chat** löscht Verlauf und In-Memory-Vault dieses Tabs.
+- Sende `E-Mail ana@acme.com und wiederhole sie.` in einem Chat.
+- Der Inspector zeigt den exakten geschützten Verlauf und aktuellen Inhalt, den
+  der Browser-Runtime erhält, niemals Mapping oder Originaleingabe.
+- Die Antwort wird lokal wiederhergestellt; die UI zeigt die ursprüngliche
+  E-Mail.
+- **New chat** wartet auf Stop und Runtime-Cleanup, leert erst danach Verlauf,
+  Session, Fehler und Inspector und erzeugt eine neue Session.
 
-Beide Tabs haben getrennte Verläufe und `PiiSession`-Instanzen. Stop bricht die
-Browser-Generierung ab, ohne einen Remote-Service aufzurufen.
+Jeder force-mounted Tab besitzt private Konversation, Session, Verlauf,
+Observer und Mapping unabhängig. Ein Generation-Gate erlaubt nur eine
+Generierung: Der besitzende Chat darf stoppen; Submit und Reset des anderen
+bleiben bis zum Cleanup deaktiviert. Beide Beispiele verwenden ihre echten
+öffentlichen Vercel-AI-SDK- und TanStack-Adapter. Die docs-interne Browser-
+Runtime ist keine öffentliche `local-pii`-API.
 
-## Hinweise zu den Runtimes
+## Runtime-Offenlegung
 
-- Gemini Nano wird vom Browser verwaltet und benötigt einen kompatiblen
-  Desktop-Chrome, passende Hardware und eine verfügbare Prompt API.
-- Der Fallback ist `onnx-community/gemma-3-270m-it-ONNX`, q4f16, ungefähr
-  426 MB. Er wird nur nach ausdrücklicher Zustimmung geladen und benötigt einen
-  kompatiblen Desktop-Browser mit WebGPU. Lies vor dem Download die
-  [Model Card und Gemma-Lizenzbedingungen](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX).
-- Artefakt-Downloads können in DevTools Network erscheinen. Prompts,
-  rehydrierte Werte und der Vault werden nie an einen Inference-Server gesendet.
-- Kleine lokale Modelle eignen sich für diese Demo, aber Sprach- und
-  Reasoning-Qualität variieren zwischen Englisch, Portugiesisch und Deutsch.
-
-Die Oberfläche besteht aus shadcn- und AI-Elements-Primitives. Beide Beispiele
-nutzen echte Client-Lifecycles; keines versteckt das andere Framework als Transport.
+- Gemini Nano wird vom Browser verwaltet und benötigt kompatibles Desktop-Chrome,
+  passende Hardware und Prompt-API. Diese Ressourcen sind kein von dieser Seite
+  gesteuerter Artefakt-Download.
+- Gemma ist `onnx-community/gemma-3-270m-it-ONNX`, Revision
+  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0` und q4f16 WebGPU. Die sechs
+  gepinnten Modelldateien sind zusammen 293.284.073 Bytes groß. Bei der ersten
+  Aktivierung können zusätzlich 23.614.439 unkomprimierte Bytes versionierter
+  ONNX-Runtime-Web-Unterstützungsdateien geladen werden, insgesamt also ungefähr
+  316.898.512 statische Artefakt-Bytes (~317 MB vor Übertragungskomprimierung).
+  Die Ursprünge sind `https://huggingface.co`, `https://*.cdn.hf.co` und
+  `https://cdn.jsdelivr.net`; lies vor der Aktivierung die [Model Card und Gemma-Lizenzbedingungen](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX).
+- Explizite Artefakt-Downloads enthalten nur statische Modell- und
+  Runtime-Ressourcen, keinen Benutzerinhalt. Prompts, wiederhergestellte Werte,
+  Mapping und Inspector werden nie an einen Anwendungs-Endpunkt gesendet.
+- Kleine browserlokale Generierungsmodelle eignen sich für diese Demo, aber
+  Qualität und Reasoning variieren. Eine Übersetzung garantiert keine gleiche
+  Qualität auf Englisch, Portugiesisch und Deutsch.

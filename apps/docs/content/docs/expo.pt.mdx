@@ -1,66 +1,46 @@
 ---
-title: Modelo On-device (Expo)
-description: Execute o modelo NER Rampart em iOS e Android com onnxruntime-react-native.
+title: Modelo de Detecção (Expo)
+description: Execute o adaptador de Detecção Rampart no iOS e Android com onnxruntime-react-native.
 ---
 
-O modelo NER [Rampart](https://huggingface.co/nationaldesignstudio/rampart)
-(nomes, endereços, IDs) é um modelo ONNX quantizado de 14,7 MB que roda no
-dispositivo via `onnxruntime-react-native`.
+O modelo Q4 [Rampart](https://huggingface.co/nationaldesignstudio/rampart) é um
+**modelo de Detecção** para nomes, endereços e IDs. Ele roda localmente via
+`onnxruntime-react-native`; o modelo separado de Geração recebe somente
+conteúdo protegido.
 
 ```bash
 bun add onnxruntime-react-native expo-asset expo-file-system @local-pii/model-rampart
-bun run fetch-model   # downloads the model into @local-pii/model-rampart (sha256-pinned)
 ```
 
-> Requer um **dev client / prebuild — não o Expo Go**
-> (`onnxruntime-react-native` é um módulo nativo). Execute
-> `bunx expo prebuild` e depois compile um dev client.
+É necessário dev client / prebuild, não Expo Go.
 
-## 1. Metro
-
-Deixe o Metro empacotar o modelo `.onnx` como asset:
+## Metro
 
 ```js
-// metro.config.js
 const { getDefaultConfig } = require("expo/metro-config")
 const { withLocalPiiMetro } = require("local-pii/metro")
 
 module.exports = withLocalPiiMetro(getDefaultConfig(__dirname))
 ```
 
-## 2. Uso
+## Configurar a Detecção
 
 ```ts
 import { createAnonymizer } from "local-pii"
 import { rampart } from "local-pii/expo"
 
-const pii = createAnonymizer({
-  ner: rampart({
+const privacy = createAnonymizer({
+  detection: rampart({
     model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
   }),
 })
-
-const { redactedText } = await pii.anonymize(
-  "Ontem encontrei João Silva na Müllerstraße 42."
-)
-// → "Ontem encontrei [GIVEN_NAME_1] [SURNAME_1] na [STREET_NAME_1] [BUILDING_NUMBER_1]."
 ```
 
-## Degradação suave
+O carregamento é preguiçoso: a primeira anonimização resolve o asset empacotado
+e inicia o runtime do Rampart. Aplicações que consomem o pacote publicado do
+modelo não executam o script de desenvolvimento `fetch-model` do monorepo.
 
-Se o modelo não conseguir carregar, o anonymizer **degrada para apenas
-determinístico** e chama `onDegraded` (defina `strict: true` para lançar uma
-exceção em vez disso):
-
-```ts
-createAnonymizer({
-  ner: rampart({
-    model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
-  }),
-  onDegraded: (e) =>
-    console.warn("PII model unavailable, rules only:", e.message),
-})
-```
-
-Por padrão, `CITY`, `STATE` e `ZIP_CODE` são mantidos (não redigidos) — altere
-isso com `keep` / `redact`.
+Se o modelo não carregar, o padrão degrada para Detecção determinística;
+`strict: true` lança o erro. `ner:` permanece alias de compatibilidade.
+`CITY`, `STATE` e `ZIP_CODE` ficam no texto por padrão; use `keep` ou `redact`
+para alterar essa política.

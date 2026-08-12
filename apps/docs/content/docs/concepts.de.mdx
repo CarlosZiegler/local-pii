@@ -1,61 +1,65 @@
 ---
 title: Kernkonzepte
-description: Die Pipeline, Sessions, der Vault, das Mapping und die zwei Vertrauensgrenzen, die local-pii unterstützt.
+description: Erkennung, Schutzablauf, Privacy-Sessions, Ownership und Vertrauensgrenzen.
 ---
 
-## Die Pipeline
+## Der Schutzablauf
 
-Jeder `anonymize`-Call durchläuft dieselben Stufen über deinen Text:
+Der kanonische Ablauf trennt das Erkennen persönlicher Informationen vom
+Erzeugen der Antwort:
 
 ```text
-text ─▶ deterministische Detektoren (email, phone, card+Luhn, IBAN, SSN, IP, URL)
-     ─▶ dictionary (deine eigenen Begriffe)
-     ─▶ vault dictionary (in dieser Session bereits gesehene Werte)
-     ─▶ NER-Modell (Namen, Adressen, IDs) — optional, on device
-     ─▶ Überlappungen auflösen (Priorität: dictionary > deterministic > NER)
-     ─▶ Placeholder-Engine ─▶ geschwärzter Text
+Benutzerinhalt
+  ─▶ Erkennungs-Adapter (Rampart Q4 oder Aufrufermodell)
+  ─▶ Anonymizer und Platzhalter
+  ─▶ eine Privacy-Session für eine private Konversation
+  ─▶ geschützter Inhalt an Generierungs-Adapter/-modell
+  ◀─ rehydrierte Antwort; privates Mapping bleibt beim Aufrufer
 ```
 
-Deterministische Detektoren sind präzise (checksum-/struktur-validiert) und
-gewinnen daher gegenüber Modell-Schätzungen. Überlappende Erkennungen werden
-zu einer nicht überlappenden Menge aufgelöst, bevor Platzhalter zugewiesen
-werden.
+Deterministische Detektoren erkennen E-Mail, Telefon, Karte, IBAN, SSN, IP und
+URL. Dictionary und privates Mapping sorgen für stabile Treffer. Rampart Q4 ist
+ein Erkennungsmodell für Namen, Adressen und IDs; Gemini Nano, Gemma und
+Provider-Modelle sind Generierungsmodelle. `ner:` bleibt der
+Kompatibilitätsalias für `detection:`.
 
-## Vault, Mapping, Session
+## Privates Mapping und Privacy-Session
 
-- **Vault** — der In-Memory-Speicher, der jedem **eindeutigen Wert einen
-  stabilen Platzhalter** zuweist. Derselbe Wert erhält immer denselben
-  Platzhalter.
-- **Mapping** — ein einfacher `Record<placeholder, original>`-Snapshot des
-  Vaults. Das ist das Geheimnis. Halte es im Speicher; serialisiere es nie
-  vom Gerät weg.
-- **Session** — hält einen Vault über mehrere Turns hinweg, sodass `João` in
-  jeder Nachricht einer Konversation und über eine ganze Tool-Loop hinweg
-  `[GIVEN_NAME_1]` bleibt.
+- **Privates Mapping** weist jedem unterschiedlichen Wert einen stabilen
+  Platzhalter zu und verbindet ihn mit ursprünglichem Inhalt. Es ist das
+  Geheimnis: im Speicher halten und nie außerhalb der Vertrauensgrenze des
+  Aufrufers serialisieren.
+- **Privacy-Session** hält ein privates Mapping über mehrere Turns und gehört
+  zu einer privaten Konversation. Eine neue Konversation erhält eine neue
+  Session.
 
 ```ts
-const session = pii.createSession()
-await session.anonymize("First, about João…") // João → [GIVEN_NAME_1]
-await session.anonymize("Tell João I said hi") // João → wieder [GIVEN_NAME_1]
-session.rehydrate(assistantReply) // gebunden an das Mapping dieser Session
+const conversation = privacy.createSession()
+await conversation.anonymize("First, about João…")
+await conversation.anonymize("Tell João I said hi") // derselbe Platzhalter
+conversation.rehydrate(assistantReply)
 ```
 
-Zwei Session-Verhalten machen mehrstufige Loops robust:
+Explizite Sessions werden für mehrere Turns empfohlen. Übergebene Sessions sind
+geliehen und werden von Adaptern nie geleert. OpenAI und AI SDK können eine
+implizite Wrapper-Session besitzen und über Aufrufe wiederverwenden; TanStack
+verlangt eine Session des Aufrufers. Pro privater Konversation wird ein neuer
+Wrapper erstellt.
 
-- **Vault Dictionary** — jeder bereits gesehene Wert wird in späteren Turns
-  erneut erkannt, sodass ein Modell, das einen Namen nicht mehr erkennt, ihn
-  weder umnummerieren noch leaken kann.
-- **Idempotenz** — bereits geschwärzten Text erneut zu anonymisieren ist ein
-  No-op.
+## Vertrauensgrenzen und Lifecycle
 
-## Vertrauensgrenzen
+Auf dem Gerät besitzt die App Erkennungs-Adapter, Session und Generierungsaufruf;
+geschützter Inhalt kann an einen Provider gehen, während das Mapping lokal
+bleibt. In Route oder Gateway gehören Adapter und Mapping deinem Server und
+schützen gegenüber dem Provider. Eine Session pro Request erzeugen, nie eine
+gemeinsame Modul-Session.
 
-Derselbe Code bedient zwei Deployment-Formen:
+Generische Inline-Callbacks und vom Aufrufer bereitgestellte Erkennungsmodelle
+sind vertrauenswürdiger Aufrufercode. Sie gehören zur Vertrauensgrenze der
+Anwendung und werden von `local-pii` nicht in einer Sandbox ausgeführt.
 
-- **On Device (Expo / Browser)** — deine App ruft den Provider direkt auf,
-  der Adapter läuft in der App, und das Mapping verlässt das Gerät nie. Das
-  ist local-piis ureigenes Terrain.
-- **Server-seitig (eine Next.js-Route / ein Gateway)** — der Adapter läuft
-  auf **deinem** Server; das Mapping bleibt dort und schützt gegenüber dem
-  **Provider**. Erzeuge eine Session pro Request — niemals eine Session auf
-  Modulebene, die zwischen Nutzern geteilt wird.
+Inline-Adapter lösen `session`, dann `anonymizer`, dann den Standard auf. Cleanup
+läuft auch bei Modell- oder Abort-Fehlern; der primäre Fehler bleibt erhalten.
+TanStack reicht Hydration durch und joint nur Runs derselben lebenden Session;
+Persistence, vollständiger Reload, Cross-Tab-Wiederherstellung und eine neue
+Session stellen eine private Konversation nicht wieder her.

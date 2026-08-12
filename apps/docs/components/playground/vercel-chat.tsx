@@ -1,25 +1,36 @@
-"use client"
-
 import { useChat } from "@ai-sdk/react"
 import { createAnonymizer, token, type PiiSession } from "local-pii"
 import { withPii } from "local-pii/ai-sdk"
+import { DirectChatTransport, ToolLoopAgent, type ChatStatus } from "ai"
+import { useCallback, useMemo, useRef, useState } from "react"
 import {
-  DirectChatTransport,
-  ToolLoopAgent,
-  type ChatStatus,
-  type LanguageModel,
-} from "ai"
-import { useCallback, useMemo, useState } from "react"
-import { ChatShell, type ChatShellMessage } from "./chat-shell"
-import { createEphemeralBrowserAIModel } from "./model/ephemeral-browser-ai"
-import { normalizeChatTransportAbort } from "./model/normalize-chat-transport-abort"
-import { settleChatStop } from "./model/settle-chat-stop"
-import type { BrowserModelRuntime } from "./model/types"
+  ChatShell,
+  OTHER_CONVERSATION_BUSY_REASON,
+  type ChatShellMessage,
+} from "./chat-shell"
+import {
+  createGenerationRunRegistry,
+  recordGenerationRunFailures,
+  resetPrivateConversation,
+  type GenerationRunRegistry,
+  type GenerationRun,
+} from "./private-conversation"
+import {
+  createProtectionObserver,
+  observeBrowserRuntime,
+} from "./protection-observer"
+import {
+  isExpectedChatCancellation,
+  settleChatStop,
+} from "./model/settle-chat-stop"
+import { createBrowserLanguageModel } from "./model/vercel-model"
+import { withPlaygroundGate } from "./generation-gate"
+import type { BrowserGenerationRuntime } from "./model/types"
 import type { PrivacyInspection } from "./privacy-inspector"
+import { useOptionalLocalRuntime } from "./runtime-provider"
 
 export interface VercelChatProps {
-  model?: LanguageModel
-  runtime?: BrowserModelRuntime
+  runtime?: BrowserGenerationRuntime
   runtimeName: string
 }
 
@@ -27,32 +38,48 @@ function createSession(): PiiSession {
   return createAnonymizer({ placeholders: token() }).createSession()
 }
 
-function inspectionFrom(
-  protectedPrompt: string,
-  entities: ReadonlyArray<{ type: string }>
-): PrivacyInspection {
-  const counts: Record<string, number> = {}
-  for (const entity of entities)
-    counts[entity.type] = (counts[entity.type] ?? 0) + 1
-  return { counts, protectedPrompt }
+function toError(cause: unknown): Error {
+  return cause instanceof Error ? cause : new Error(String(cause))
 }
 
-export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
-  const [session] = useState(createSession)
+export function VercelChat({ runtime, runtimeName }: VercelChatProps) {
+  const localRuntime = useOptionalLocalRuntime()
+  const selectedRuntime = runtime ?? localRuntime?.runtime
+  const gate = localRuntime?.gate
+  const gateSnapshot = localRuntime?.gateSnapshot
+  const [session, setSession] = useState(createSession)
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const [controlError, setControlError] = useState<Error>()
-  const protectedModel = useMemo(
-    () =>
-      withPii(model ?? createEphemeralBrowserAIModel({ runtime }), { session }),
-    [model, runtime, session]
+  const [resetting, setResetting] = useState(false)
+  const [stopping, setStopping] = useState(false)
+  const runs = useRef<GenerationRunRegistry>(createGenerationRunRegistry())
+  const activeRun = useRef<GenerationRun | null>(null)
+
+  const observer = useMemo(
+    () => createProtectionObserver(session, setInspection),
+    [session]
   )
+  const protectedModel = useMemo(() => {
+    if (!selectedRuntime)
+      throw new Error("A browser generation runtime is required")
+    const gated = gate
+      ? withPlaygroundGate(selectedRuntime, gate, "vercel")
+      : selectedRuntime
+    return withPii(
+      createBrowserLanguageModel(
+        observeBrowserRuntime(
+          recordGenerationRunFailures(gated, () => activeRun.current),
+          observer
+        )
+      ),
+      { session: observer.session }
+    )
+  }, [gate, observer, selectedRuntime])
   const transport = useMemo(
     () =>
-      normalizeChatTransportAbort(
-        new DirectChatTransport({
-          agent: new ToolLoopAgent({ model: protectedModel }),
-        })
-      ),
+      new DirectChatTransport({
+        agent: new ToolLoopAgent({ model: protectedModel }),
+      }),
     [protectedModel]
   )
   const {
@@ -64,11 +91,83 @@ export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
     status,
     stop,
   } = useChat({ transport })
-  const handleStop = useCallback(() => {
-    void settleChatStop(stop).then((stopError) => {
-      if (stopError) setControlError(stopError)
-    })
+
+  const handleStop = useCallback(async () => {
+    setStopping(true)
+    const settlement = runs.current.waitForActive()
+    let failure = await settleChatStop(stop)
+    try {
+      await settlement
+    } catch (cause) {
+      failure ??= toError(cause)
+    } finally {
+      setStopping(false)
+    }
+    if (failure) setControlError(failure)
   }, [stop])
+
+  const handleNewChat = useCallback(async () => {
+    const oldSession = session
+    const runSettlement = runs.current.waitForActive()
+    setResetting(true)
+    const failure = await resetPrivateConversation({
+      blockSubmissions(blocked) {
+        setResetting(blocked)
+      },
+      abortActiveRun() {
+        activeRun.current?.abort(
+          new DOMException("Private conversation reset", "AbortError")
+        )
+      },
+      stopFramework() {
+        return settleChatStop(stop)
+      },
+      awaitRunSettlement() {
+        return runSettlement
+      },
+      awaitRuntimeCleanup() {
+        return runSettlement
+      },
+      clearFramework() {
+        setMessages([])
+      },
+      clearFrameworkError() {
+        clearError()
+      },
+      clearOldSession() {
+        oldSession.clear()
+      },
+      clearInspection() {
+        setInspection(undefined)
+      },
+      createNewSession() {
+        setSession(createSession())
+      },
+    })
+    setControlError(failure)
+  }, [clearError, session, setMessages, stop])
+
+  const handleSubmit = useCallback(
+    async (text: string) => {
+      setControlError(undefined)
+      const run = runs.current.begin()
+      activeRun.current = run
+      observer.begin(run.id)
+      try {
+        await sendMessage({ text })
+      } catch (cause) {
+        observer.discard()
+        if (!isExpectedChatCancellation(cause)) {
+          if (runs.current.isCurrent(run.id)) setControlError(toError(cause))
+          throw cause
+        }
+      } finally {
+        run.settle()
+        if (activeRun.current?.id === run.id) activeRun.current = null
+      }
+    },
+    [observer, sendMessage]
+  )
 
   const shellMessages = useMemo<Array<ChatShellMessage>>(
     () =>
@@ -90,29 +189,28 @@ export function VercelChat({ model, runtime, runtimeName }: VercelChatProps) {
     [messages]
   )
 
+  const otherChatBusy =
+    gateSnapshot?.owner !== undefined &&
+    gateSnapshot?.owner !== null &&
+    gateSnapshot.owner !== "vercel"
+
   return (
     <ChatShell
+      disabled={otherChatBusy}
+      disabledReason={
+        otherChatBusy ? OTHER_CONVERSATION_BUSY_REASON : undefined
+      }
       error={controlError ?? error}
       framework="Vercel AI SDK"
       inspection={inspection}
       messages={shellMessages}
-      onNewChat={() => {
-        handleStop()
-        setMessages([])
-        clearError()
-        setControlError(undefined)
-        session.clear()
-        setInspection(undefined)
-      }}
+      onNewChat={handleNewChat}
       onStop={handleStop}
-      onSubmit={async (text) => {
-        setControlError(undefined)
-        const result = await session.anonymize(text)
-        setInspection(inspectionFrom(result.redactedText, result.entities))
-        await sendMessage({ text })
-      }}
+      onSubmit={handleSubmit}
+      resetting={resetting}
       runtimeName={runtimeName}
       status={status as ChatStatus}
+      stopping={stopping}
     />
   )
 }

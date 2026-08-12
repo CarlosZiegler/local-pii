@@ -1,52 +1,36 @@
 ---
 title: Limitações
-description: O que o local-pii NÃO captura. Leia isso antes de confiar nele.
+description: O que a Detecção não captura e onde terminam as garantias dos adaptadores.
 ---
 
-**A remoção de PII não é uma anonimização perfeita.** Trate o local-pii como
-uma defesa em profundidade forte, não como uma garantia. Esses limites são
-reais e alguns são verificados pela suíte de testes para que a documentação
-permaneça honesta.
+**Detecção não é anonimização perfeita.** Trate o local-pii como defesa em
+profundidade, não garantia. O round-trip restaura exatamente o que foi
+protegido; não restaura conteúdo que a Detecção não capturou.
 
-## Identificadores indiretos não são detectados
+## Identificadores indiretos passam
 
 Remover nome, email e telefone não desidentifica:
 
 > "Sou o único engenheiro brasileiro na empresa X em Kempten, diagnosticado
 > ontem com uma doença rara."
 
-Nenhum detector captura isso. Mitigue com o [dicionário](/pt/docs/detectors), o
-modo `strict`, e um "modo privado" que pula a API completamente para notas
-sensíveis.
+Nenhum detector captura isso. Adicione termos conhecidos ao
+[dicionário](/pt/docs/detectors), remova detalhes indiretos explicitamente ou
+pule o provedor para notas especialmente sensíveis. `strict` apenas faz falhas
+de carregamento ou inferência do Rampart lançarem erro; não melhora o recall.
 
-## O modelo tem um teto de recall
+## O recall do modelo de Detecção tem limite
 
-O Rampart é um modelo pequeno ajustado para idiomas de **escrita latina**. De
-acordo com seu model card:
+Rampart Q4 é um modelo pequeno de Detecção ajustado para escrita latina. O
+recall relatado é ~97–99% para EN/ES/FR/DE/IT/PT/NL e ~13,7% para escritas não
+latinas (cirílico, CJK, árabe). IDs governamentais dependem da cobertura do
+modelo (~68%). Detectores determinísticos continuam estruturais e rodam primeiro.
 
-- Recall de termos privados de ~97–99% em EN/ES/FR/DE/IT/PT/NL.
-- **Escritas não latinas (cirílico, CJK, árabe): ~13,7%** — majoritariamente
-  não detectados.
-- IDs no estilo governamental dependem do modelo (~68%).
+## Escolha o placeholder correto
 
-Detectores determinísticos não têm esse limite (são baseados em
-checksum/estrutura), por isso eles rodam primeiro e vencem as sobreposições.
+`[TYPE_N]` pode colidir com texto semelhante no input, e modelos podem alterar
+colchetes em JSON/Markdown/tools. Use [`token()`](/pt/docs/strategies) para
+tools e saída processada por máquina.
 
-## Detecção não é reversibilidade
-
-O [round-trip](/pt/docs/tool-calls) é garantido independentemente do que for
-detectado: reidratar restaura exatamente o que foi redigido. Mas algo que os
-detectores **não captam** nunca é redigido — então chega ao provedor em texto
-claro. Cobertura e reversibilidade são preocupações separadas.
-
-## Escolha o token certo para o trabalho
-
-Placeholders legíveis `[TYPE_N]` podem colidir com texto no formato de
-placeholder que já existe no input, e LLMs bagunçam colchetes em contextos de
-JSON/markdown/tools. Use a estratégia opaca [`token()`](/pt/docs/strategies)
-para tool calls e saída processada por máquina.
-
-## Pacote da comunidade
-
-`local-pii` é um projeto de comunidade independente — não afiliado a, nem
-endossado por, Expo, Vercel, OpenAI ou National Design Studio.
+`local-pii` é um projeto independente, não afiliado a Expo, Vercel, OpenAI ou
+National Design Studio.

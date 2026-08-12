@@ -9,11 +9,11 @@ The prompts, responses, and personal information handled for a user interaction.
 _Avoid_: Payload, raw data
 
 **Protected content**:
-User content whose personal information has been replaced by placeholders and whose private mapping remains on the user's device.
+User content whose personal information has been replaced by placeholders and whose private mapping remains inside the caller-controlled runtime.
 _Avoid_: Safe content, anonymized data
 
 **Private mapping**:
-The relationship between placeholders and the original personal information, retained only on the user's device.
+The relationship between placeholders and the original personal information, retained only inside the caller's trust boundary; this is the device for browser/Expo use and the application server for server-side use.
 _Avoid_: Lookup table, PII map
 
 **Browser-local inference**:
@@ -33,7 +33,7 @@ A language model that produces an application response from protected content; i
 _Avoid_: Detection model, PII model
 
 **Protection flow**:
-The reversible progression from user content to protected content, through a generation model, and back to restored content while the private mapping remains on the user's device.
+The reversible progression from user content to protected content, through a generation model, and back to restored content while the private mapping remains inside the caller's trust boundary.
 _Avoid_: Anonymization service, inference pipeline
 
 **Private conversation**:

@@ -15,6 +15,14 @@ describe("settleChatStop", () => {
     ).resolves.toBeUndefined()
   })
 
+  it("treats the AI SDK's known local Stop reason as expected cancellation", async () => {
+    await expect(
+      settleChatStop(async () => {
+        throw { name: "LocalChatStop" }
+      })
+    ).resolves.toBeUndefined()
+  })
+
   it("returns unexpected stop failures for the UI", async () => {
     await expect(
       settleChatStop(async () => {

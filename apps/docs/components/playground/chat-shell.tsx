@@ -1,5 +1,3 @@
-"use client"
-
 import {
   Conversation,
   ConversationContent,
@@ -23,8 +21,12 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { RotateCcwIcon, ShieldCheckIcon } from "lucide-react"
 import type { ChatStatus } from "ai"
+import { useId } from "react"
 import type { PrivacyInspection } from "./privacy-inspector"
 import { PrivacyInspector } from "./privacy-inspector"
+
+export const OTHER_CONVERSATION_BUSY_REASON =
+  "Another private conversation is running browser-local inference."
 
 export interface ChatShellMessage {
   id: string
@@ -34,19 +36,23 @@ export interface ChatShellMessage {
 
 export interface ChatShellProps {
   disabled?: boolean
+  disabledReason?: string
   error?: Error
   framework: string
   inspection?: PrivacyInspection
   messages: ChatShellMessage[]
-  onNewChat(): void
-  onStop(): void
+  onNewChat(): Promise<void>
+  onStop(): Promise<void>
   onSubmit(text: string): Promise<void>
+  resetting?: boolean
   runtimeName: string
   status: ChatStatus
+  stopping?: boolean
 }
 
 export function ChatShell({
   disabled,
+  disabledReason,
   error,
   framework,
   inspection,
@@ -54,10 +60,14 @@ export function ChatShell({
   onNewChat,
   onStop,
   onSubmit,
+  resetting = false,
   runtimeName,
   status,
+  stopping = false,
 }: ChatShellProps) {
+  const disabledReasonId = useId()
   const busy = status === "submitted" || status === "streaming"
+  const controlsDisabled = disabled || busy || resetting || stopping
 
   return (
     <div className="grid gap-4 lg:grid-cols-[minmax(0,1.65fr)_minmax(16rem,0.85fr)]">
@@ -71,8 +81,8 @@ export function ChatShell({
           </div>
           <Button
             aria-label="Start a new chat"
-            disabled={busy}
-            onClick={onNewChat}
+            disabled={controlsDisabled}
+            onClick={() => void onNewChat()}
             size="sm"
             type="button"
             variant="outline"
@@ -114,25 +124,38 @@ export function ChatShell({
           <PromptInput
             onSubmit={async ({ text }) => {
               const value = text.trim()
-              if (value && !disabled && !busy) await onSubmit(value)
+              if (value && !controlsDisabled) await onSubmit(value)
             }}
           >
             <PromptInputBody>
               <PromptInputTextarea
+                aria-describedby={
+                  disabled && disabledReason ? disabledReasonId : undefined
+                }
                 aria-label="Message"
-                disabled={disabled || busy}
+                disabled={controlsDisabled}
                 placeholder="Write a message containing test PII…"
               />
             </PromptInputBody>
             <PromptInputFooter>
-              <span className="text-xs text-muted-foreground">
-                {busy
-                  ? "Generating locally…"
-                  : "Enter to send · Shift+Enter for newline"}
+              <span
+                aria-live="polite"
+                className="text-xs text-muted-foreground"
+                id={disabledReasonId}
+              >
+                {disabled && disabledReason
+                  ? disabledReason
+                  : resetting
+                    ? "Resetting private conversation…"
+                    : stopping
+                      ? "Stopping generation run…"
+                      : busy
+                        ? "Running browser-local inference…"
+                        : "Enter to send · Shift+Enter for newline"}
               </span>
               <PromptInputSubmit
-                disabled={disabled}
-                onStop={onStop}
+                disabled={disabled || resetting || stopping}
+                onStop={() => void onStop()}
                 status={status}
               />
             </PromptInputFooter>

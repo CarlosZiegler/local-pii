@@ -55,6 +55,7 @@ export { mergeEntities } from "./pipeline/merge"
 export type {
   AnonymizeResult,
   Detector,
+  DetectionModel,
   DictionaryEntry,
   Entity,
   EntitySource,

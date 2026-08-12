@@ -8,6 +8,7 @@ import { createSession, type PiiSession } from "./session"
 import type {
   AnonymizeResult,
   Detector,
+  DetectionModel,
   DictionaryEntry,
   Entity,
   NerBackend,
@@ -20,8 +21,10 @@ export type AnonymizerStatus = "idle" | "loading" | "ready" | "degraded"
 export interface AnonymizerOptions {
   /** Deterministic detectors. `"default"` (built-ins), `"none"`, or a custom list. */
   detectors?: Detector[] | "default" | "none"
-  /** ML backend for names/addresses. `false`/omitted = regex + dictionary only. */
-  ner?: NerBackend | false
+  /** Detection model for names/addresses. `false`/omitted = regex + dictionary only. */
+  detection?: DetectionModel | false | undefined
+  /** Legacy name for the detection model. `false`/omitted = regex + dictionary only. */
+  ner?: NerBackend | false | undefined
   /** User terms to always redact (own name, family, employer…). */
   dictionary?: DictionaryEntry[]
   /** Placeholder scheme. Default {@link sequential}. */
@@ -64,6 +67,21 @@ function toError(e: unknown): Error {
  * `createAnonymizer()` runs all built-in deterministic detectors.
  */
 export function createAnonymizer(options: AnonymizerOptions = {}): Anonymizer {
+  const detectionSupplied = options.detection !== undefined
+  const nerSupplied = options.ner !== undefined
+  if (detectionSupplied && nerSupplied) {
+    throw new TypeError(
+      '"detection" and "ner" configure the same Detection model; supply only one'
+    )
+  }
+  const configuredDetection = detectionSupplied
+    ? options.detection
+    : options.ner
+  const ner: NerBackend | null =
+    configuredDetection === false || configuredDetection == null
+      ? null
+      : configuredDetection
+
   const strategy = options.placeholders ?? sequential()
   const baseDetectors: Detector[] =
     options.detectors === "none"
@@ -77,8 +95,6 @@ export function createAnonymizer(options: AnonymizerOptions = {}): Anonymizer {
     ? createDictionaryDetector(dictionaryEntries)
     : null
 
-  const ner: NerBackend | null =
-    options.ner === false || options.ner == null ? null : options.ner
   const strict = options.strict ?? false
   const threshold = options.nerThreshold ?? 0
   const keep = new Set<PiiType>(options.keep ?? DEFAULT_KEEP)
