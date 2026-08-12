@@ -34,8 +34,13 @@ function RuntimeActions() {
       <button onClick={() => void state.activate("gemma-3-270m")} type="button">
         Activate Gemma
       </button>
+      {state.status === "error" ? (
+        <output data-testid="snapshot-error">{state.error.message}</output>
+      ) : null}
       {state.actionError ? (
-        <output role="alert">{state.actionError.message}</output>
+        <output data-testid="action-error" role="alert">
+          {state.actionError.message}
+        </output>
       ) : null}
     </>
   )
@@ -75,5 +80,32 @@ describe("RuntimeProvider", () => {
     await waitFor(() =>
       expect(screen.getByTestId("status")).toHaveTextContent("ready")
     )
+  })
+
+  it("does not duplicate an activation failure already in the controller snapshot", async () => {
+    const failure = new Error("GPU preparation failed")
+    const controller: RuntimeController = createRuntimeController({
+      getNative: () => undefined,
+      isGemmaCached: async () => false,
+      loadGemma: vi.fn(async () => {
+        throw failure
+      }),
+    })
+    const user = userEvent.setup()
+    render(
+      <RuntimeProvider controller={controller}>
+        <RuntimeActions />
+      </RuntimeProvider>
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("choice-required")
+    )
+    await user.click(screen.getByRole("button", { name: "Activate Gemma" }))
+
+    expect(await screen.findByTestId("snapshot-error")).toHaveTextContent(
+      failure.message
+    )
+    expect(screen.queryByTestId("action-error")).not.toBeInTheDocument()
   })
 })

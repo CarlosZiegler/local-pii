@@ -113,29 +113,46 @@ function clampedProgress(progress: number): number {
 function awaitWithAbort<T>(
   value: Promise<T>,
   signal: AbortSignal | undefined,
-  lateValueCleanup?: (value: T) => void | Promise<void>
+  lateValueCleanup?: (value: T) => void | Promise<void>,
+  trackLateValue?: (promise: Promise<void>) => void
 ): Promise<T> {
   if (!signal) return value
   return new Promise<T>((resolve, reject) => {
     let settled = false
+    let aborted = false
+    const hasTrackedLateCleanup =
+      lateValueCleanup !== undefined && trackLateValue !== undefined
     const clean = () => signal.removeEventListener("abort", onAbort)
     const onAbort = () => {
       if (settled) return
+      aborted = true
       settled = true
       clean()
       reject(signal.reason)
     }
     if (signal.aborted) {
-      onAbort()
-      return
+      aborted = true
+      settled = true
+      reject(signal.reason)
+    } else {
+      signal.addEventListener("abort", onAbort, { once: true })
     }
-    signal.addEventListener("abort", onAbort, { once: true })
+    if (hasTrackedLateCleanup) {
+      const lateCleanup = value.then(
+        (result) =>
+          aborted ? Promise.resolve(lateValueCleanup!(result)) : undefined,
+        () => undefined
+      )
+      trackLateValue!(lateCleanup)
+    }
     value.then(
       (result) => {
         if (settled) {
-          void Promise.resolve(lateValueCleanup?.(result)).catch(
-            () => undefined
-          )
+          if (!hasTrackedLateCleanup) {
+            void Promise.resolve(lateValueCleanup?.(result)).catch(
+              () => undefined
+            )
+          }
           return
         }
         settled = true
@@ -190,6 +207,38 @@ export function createRuntimeController(
   let currentActivation: Promise<void> | undefined
   let disposed = false
   let disposal: Promise<void> | undefined
+  const pendingDisposals = new Set<Promise<void>>()
+
+  const trackPendingDisposal = (promise: Promise<void>): void => {
+    pendingDisposals.add(promise)
+    void promise.then(
+      () => pendingDisposals.delete(promise),
+      () => pendingDisposals.delete(promise)
+    )
+  }
+
+  const scheduleDisposal = (
+    cleanup: () => void | Promise<void>
+  ): Promise<void> => {
+    const disposal = Promise.resolve().then(cleanup)
+    trackPendingDisposal(disposal)
+    return disposal
+  }
+
+  const waitForPendingDisposals = async (): Promise<void> => {
+    let firstError: unknown
+    while (pendingDisposals.size > 0) {
+      const pending = [...pendingDisposals]
+      const results = await Promise.allSettled(pending)
+      if (firstError === undefined) {
+        firstError = results.find(
+          (result): result is PromiseRejectedResult =>
+            result.status === "rejected"
+        )?.reason
+      }
+    }
+    if (firstError !== undefined) throw firstError
+  }
 
   const publish = (next: RuntimeSnapshot) => {
     snapshot = next
@@ -227,7 +276,7 @@ export function createRuntimeController(
       if (currentRuntime === previous) currentRuntime = undefined
     }
     if (!isCurrent(operationId)) {
-      await next.dispose().catch(() => undefined)
+      scheduleDisposal(() => next.dispose())
       return false
     }
     currentRuntime = next
@@ -335,7 +384,8 @@ export function createRuntimeController(
       signal,
       async (lateSession) => {
         await lateSession.destroy()
-      }
+      },
+      trackPendingDisposal
     )
     try {
       throwIfAborted(signal)
@@ -365,7 +415,8 @@ export function createRuntimeController(
       return await awaitWithAbort(
         Promise.resolve(result),
         signal,
-        (lateRuntime) => lateRuntime.dispose()
+        (lateRuntime) => lateRuntime.dispose(),
+        trackPendingDisposal
       )
     }
 
@@ -379,15 +430,16 @@ export function createRuntimeController(
     const runtime = await awaitWithAbort(
       Promise.resolve(result),
       signal,
-      (lateRuntime) => lateRuntime.dispose()
+      (lateRuntime) => lateRuntime.dispose(),
+      trackPendingDisposal
     )
     try {
       await runtime.prepare?.(signal)
       return runtime
     } catch (cause) {
-      // Preserve the preparation error while still awaiting shared pipeline
-      // cleanup. This is especially important for cancellation.
-      await runtime.dispose().catch(() => undefined)
+      // Preserve the preparation error while disposing the shared pipeline in
+      // the background. The controller's disposal barrier still awaits it.
+      scheduleDisposal(() => runtime.dispose())
       throw cause
     }
   }
@@ -420,26 +472,28 @@ export function createRuntimeController(
     })
 
     let runtime: BrowserGenerationRuntime | undefined
+    let installed = false
     try {
       throwIfAborted(signal)
       runtime = await loadRuntime(kind, operationId, signal, publishProgress)
       throwIfAborted(signal)
       if (!isCurrent(operationId)) {
-        await runtime.dispose()
+        scheduleDisposal(() => runtime!.dispose())
         return
       }
       if (!(await replaceRuntime(runtime, operationId))) return
+      installed = true
       throwIfAborted(signal)
       publishProgress(1)
       if (isCurrent(operationId)) {
         publish({ status: "ready", kind, disclosure })
       }
     } catch (cause) {
-      if (runtime && currentRuntime === runtime && isCurrent(operationId)) {
+      if (runtime && installed && currentRuntime === runtime) {
         currentRuntime = undefined
-        await runtime.dispose().catch(() => undefined)
+        scheduleDisposal(() => runtime!.dispose())
       }
-      if (runtime && !isCurrent(operationId)) await runtime.dispose()
+      if (runtime && !installed) scheduleDisposal(() => runtime!.dispose())
       if (!isCurrent(operationId)) return
       publishError(operationId, cause, kind)
       throw cause
@@ -488,7 +542,22 @@ export function createRuntimeController(
       await Promise.allSettled(pending)
       const runtime = currentRuntime
       currentRuntime = undefined
-      if (runtime) await runtime.dispose()
+      let runtimeError: unknown
+      if (runtime) {
+        try {
+          await runtime.dispose()
+        } catch (cause) {
+          runtimeError = cause
+        }
+      }
+      let pendingDisposalError: unknown
+      try {
+        await waitForPendingDisposals()
+      } catch (cause) {
+        pendingDisposalError = cause
+      }
+      if (runtimeError !== undefined) throw runtimeError
+      if (pendingDisposalError !== undefined) throw pendingDisposalError
     })()
     return disposal
   }

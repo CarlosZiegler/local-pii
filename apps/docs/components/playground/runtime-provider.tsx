@@ -71,9 +71,17 @@ export function RuntimeProvider({
       return controller
         .activate(kind, abort.signal)
         .catch((cause) => {
-          setActionError(
+          const error =
             cause instanceof Error ? cause : new Error(String(cause))
-          )
+          const current = controller.getSnapshot()
+          if (
+            current.status === "error" &&
+            (current.error === error || current.error.message === error.message)
+          ) {
+            setActionError(undefined)
+            return
+          }
+          setActionError(error)
         })
         .finally(() => {
           if (activeAbort.current === abort) activeAbort.current = null

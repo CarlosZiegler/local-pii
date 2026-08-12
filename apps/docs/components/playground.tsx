@@ -81,8 +81,8 @@ function RuntimePlayground() {
         <AlertTitle>Browser-only inference</AlertTitle>
         <AlertDescription>
           Prompts stay in this browser. There is no gateway, API route, server
-          action, or API key. Explicit artifact downloads contain no user
-          content and never send generation requests.
+          action, or API key. Explicit artifact downloads contain only static
+          model resources and no user content.
         </AlertDescription>
       </Alert>
 

@@ -6,6 +6,7 @@ import {
   hasCachedGemmaArtifacts,
   type RuntimeControllerDependencies,
 } from "./runtime-controller"
+import { createGemmaBrowserRuntime } from "./gemma-runtime"
 import type { BrowserGenerationRuntime, RuntimeDisclosure } from "./types"
 import type { ChromePromptFactory } from "./chrome-runtime"
 
@@ -216,6 +217,67 @@ describe("browser runtime controller", () => {
     })
   })
 
+  it("rejects prewarm abort promptly while disposal drains a late pipeline", async () => {
+    let releaseLoader!: (value: unknown) => void
+    const loading = new Promise<unknown>((resolve) => {
+      releaseLoader = resolve
+    })
+    const generatorDispose = vi.fn(async () => undefined)
+    const loadTransformers = vi.fn(() => loading)
+    const candidate = createGemmaBrowserRuntime({
+      loadTransformers,
+    })
+    const controller = createRuntimeController(
+      controllerDependencies({ loadGemma: async () => candidate })
+    )
+    await controller.check()
+
+    const abort = new AbortController()
+    const reason = new DOMException("Preparation stopped", "AbortError")
+    const activation = controller.activate("gemma-3-270m", abort.signal)
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+    abort.abort(reason)
+    const timeout = Symbol("timed out")
+    const started = performance.now()
+    const result = await Promise.race([
+      activation.then(
+        () => "resolved" as const,
+        (cause) => cause
+      ),
+      new Promise<typeof timeout>((resolve) =>
+        setTimeout(() => resolve(timeout), 50)
+      ),
+    ])
+
+    expect(result).toBe(reason)
+    expect(performance.now() - started).toBeLessThan(50)
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "error",
+      error: reason,
+      recovery: ["retry-activation", "choose-runtime"],
+    })
+
+    let disposalSettled = false
+    const disposing = controller.dispose().finally(() => {
+      disposalSettled = true
+    })
+    await Promise.resolve()
+    expect(disposalSettled).toBe(false)
+
+    releaseLoader({
+      env: {},
+      InterruptableStoppingCriteria: class {},
+      pipeline: async () => ({
+        tokenizer: { apply_chat_template: () => "" },
+        dispose: generatorDispose,
+      }),
+      TextStreamer: class {},
+    })
+    await disposing
+    await expect(activation).rejects.toBe(reason)
+    expect(generatorDispose).toHaveBeenCalledOnce()
+  })
+
   it("fails overlapping activation visibly", async () => {
     const native = nativeFactory("downloadable")
     let release!: (value: BrowserGenerationRuntime) => void
@@ -379,5 +441,38 @@ describe("browser runtime controller", () => {
 
     await controller.dispose()
     expect(replacement.dispose).toHaveBeenCalledOnce()
+  })
+
+  it("disposes an uninstalled candidate when replacement cleanup fails", async () => {
+    const native = nativeFactory("downloadable")
+    const previous = runtime("gemini-nano")
+    const previousFailure = new Error("previous runtime cleanup")
+    previous.dispose = vi.fn(async () => {
+      throw previousFailure
+    })
+    const candidate = runtime("gemma-3-270m")
+    const controller = createRuntimeController(
+      controllerDependencies({
+        getNative: () => native,
+        createNativeRuntime: () => previous,
+        loadGemma: async () => candidate,
+      })
+    )
+    await controller.check()
+    await controller.activate("gemini-nano")
+    await controller.check()
+
+    await expect(controller.activate("gemma-3-270m")).rejects.toBe(
+      previousFailure
+    )
+    expect(controller.getRuntime()).toBe(previous)
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "error",
+      error: previousFailure,
+    })
+    expect(candidate.dispose).toHaveBeenCalledOnce()
+
+    await expect(controller.dispose()).rejects.toBe(previousFailure)
+    expect(candidate.dispose).toHaveBeenCalledOnce()
   })
 })
