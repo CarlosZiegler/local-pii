@@ -10,6 +10,8 @@ import {
 } from "./protected-request"
 import type { BrowserGenerationRuntime, ProtectedBrowserTurn } from "./types"
 import {
+  GEMMA_ARTIFACT_URLS,
+  GEMMA_CACHE_NAME,
   GEMMA_MODEL_ID,
   GEMMA_MODEL_REVISION,
   GEMMA_RUNTIME_DISCLOSURE,
@@ -77,7 +79,11 @@ interface TransformersRuntime {
       device: "webgpu"
       dtype: "q4f16"
       revision: string
-      progress_callback(event: { progress?: number; status?: string }): void
+      local_files_only: boolean
+      progress_callback?: (event: {
+        progress?: number
+        status?: string
+      }) => void
     }
   ): Promise<TextGenerator>
   TextStreamer: new (
@@ -90,10 +96,25 @@ interface TransformersRuntime {
   ) => TextStreamerInstance
 }
 
+interface GemmaArtifactCache {
+  match(request: string): Promise<Response | undefined>
+  put(request: string, response: Response): Promise<void>
+}
+
+interface GemmaArtifactCacheStorage {
+  open(name: string): Promise<GemmaArtifactCache>
+}
+
 export interface GemmaRuntimeDependencies {
   /** Injected by tests; production uses the lazy Transformers.js import. */
   loadTransformers?: () => Promise<unknown>
   onProgress?: (progress: number) => void
+  /** Internal seams for the cancellable, pinned artifact prefetch. */
+  fetch?: (
+    input: string,
+    init?: { readonly signal?: AbortSignal }
+  ) => Promise<Response>
+  cacheStorage?: GemmaArtifactCacheStorage
 }
 
 export interface PreparedGemmaBrowserRuntime extends BrowserGenerationRuntime {
@@ -211,6 +232,44 @@ function awaitSignal<T>(value: Promise<T>, signal?: AbortSignal): Promise<T> {
       }
     )
   })
+}
+
+async function ensurePinnedArtifacts(
+  dependencies: GemmaRuntimeDependencies,
+  signal: AbortSignal | undefined,
+  onProgress: ((progress: number) => void) | undefined
+): Promise<void> {
+  const storage =
+    dependencies.cacheStorage ??
+    (typeof caches === "undefined" ? undefined : caches)
+  if (!storage) {
+    throw new Error("The browser Cache API is required for Gemma activation")
+  }
+  const cache = await storage.open(GEMMA_CACHE_NAME)
+  const missing: string[] = []
+  for (const url of GEMMA_ARTIFACT_URLS) {
+    if (!(await cache.match(url))) missing.push(url)
+  }
+  let complete = GEMMA_ARTIFACT_URLS.length - missing.length
+  onProgress?.(complete / GEMMA_ARTIFACT_URLS.length)
+  const fetchArtifact =
+    dependencies.fetch ??
+    (typeof fetch === "function"
+      ? (input: string, init?: { readonly signal?: AbortSignal }) =>
+          fetch(input, init)
+      : undefined)
+  if (!fetchArtifact) throw new Error("Fetch is required for Gemma activation")
+
+  for (const url of missing) {
+    signal?.throwIfAborted()
+    const response = await fetchArtifact(url, { signal })
+    if (!response.ok) {
+      throw new Error(`Unable to download Gemma artifact: ${response.status}`)
+    }
+    await cache.put(url, response)
+    complete += 1
+    onProgress?.(complete / GEMMA_ARTIFACT_URLS.length)
+  }
 }
 
 function protectedMessages(
@@ -748,6 +807,10 @@ class GemmaCompatibilitySession extends EventTarget implements LanguageModel {
 export function createGemmaBrowserRuntime(
   dependencies: GemmaRuntimeDependencies = {}
 ): PreparedGemmaBrowserRuntime {
+  const shouldPrefetchArtifacts =
+    dependencies.loadTransformers === undefined ||
+    dependencies.fetch !== undefined ||
+    dependencies.cacheStorage !== undefined
   const loadTransformers =
     dependencies.loadTransformers ??
     (async () =>
@@ -781,10 +844,17 @@ export function createGemmaBrowserRuntime(
     return disposal
   }
 
-  const loadGenerator = () => {
+  const loadGenerator = (signal?: AbortSignal) => {
     generatorPromise ??= loadTransformers()
       .then(async (loaded) => {
         const transformers = loaded as TransformersRuntime
+        if (shouldPrefetchArtifacts) {
+          await ensurePinnedArtifacts(
+            dependencies,
+            signal,
+            dependencies.onProgress
+          )
+        }
         if (transformers.env) {
           transformers.env.experimental_useCrossOriginStorage = false
         }
@@ -795,15 +865,23 @@ export function createGemmaBrowserRuntime(
             device: "webgpu",
             dtype: "q4f16",
             revision: MODEL_REVISION,
-            progress_callback(event) {
-              if (event.status === "ready") dependencies.onProgress?.(1)
-              else if (
-                event.status === "progress_total" &&
-                event.progress !== undefined
-              ) {
-                dependencies.onProgress?.(event.progress / 100)
-              }
-            },
+            local_files_only: shouldPrefetchArtifacts,
+            ...(shouldPrefetchArtifacts
+              ? {}
+              : {
+                  progress_callback(event: {
+                    progress?: number
+                    status?: string
+                  }) {
+                    if (event.status === "ready") dependencies.onProgress?.(1)
+                    else if (
+                      event.status === "progress_total" &&
+                      event.progress !== undefined
+                    ) {
+                      dependencies.onProgress?.(event.progress / 100)
+                    }
+                  },
+                }),
           }
         )
         return { generator, transformers }
@@ -821,7 +899,7 @@ export function createGemmaBrowserRuntime(
     async prepare(signal) {
       if (disposed) throw new Error("The Gemma browser runtime is disposed")
       signal?.throwIfAborted()
-      await awaitSignal(loadGenerator(), signal)
+      await awaitSignal(loadGenerator(signal), signal)
     },
     generate(input) {
       const request = input

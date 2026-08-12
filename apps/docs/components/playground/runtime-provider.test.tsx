@@ -4,6 +4,7 @@ import { StrictMode } from "react"
 import { describe, expect, it, vi } from "vitest"
 import {
   createRuntimeController,
+  RuntimeActivationBusyError,
   type RuntimeActivationLoadOptions,
   type RuntimeController,
 } from "./model/runtime-controller"
@@ -271,6 +272,50 @@ describe("RuntimeProvider", () => {
     await waitFor(() =>
       expect(screen.getByTestId("status")).toHaveTextContent("ready")
     )
+    expect(screen.queryByTestId("action-error")).not.toBeInTheDocument()
+  })
+
+  it("does not carry an action error across controller replacement", async () => {
+    const controllerA = createRuntimeController({
+      getNative: () => undefined,
+      isGemmaCached: async () => false,
+    })
+    const controllerB = createRuntimeController({
+      getNative: () => undefined,
+      isGemmaCached: async () => false,
+    })
+    let activationCalls = 0
+    vi.spyOn(controllerA, "activate").mockImplementation(() => {
+      activationCalls += 1
+      return activationCalls === 1
+        ? new Promise<void>(() => {})
+        : Promise.reject(new RuntimeActivationBusyError())
+    })
+    const user = userEvent.setup()
+    const { rerender, unmount } = render(
+      <RuntimeProvider controller={controllerA}>
+        <RuntimeActions />
+      </RuntimeProvider>
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("choice-required")
+    )
+    const activate = screen.getByRole("button", { name: "Activate Gemma" })
+    await user.click(activate)
+    await user.click(activate)
+    expect(await screen.findByTestId("action-error")).toHaveTextContent(
+      "already in progress"
+    )
+
+    rerender(
+      <RuntimeProvider controller={controllerB}>
+        <RuntimeActions />
+      </RuntimeProvider>
+    )
+    expect(screen.queryByTestId("action-error")).not.toBeInTheDocument()
+    unmount()
+    await Promise.resolve()
   })
 
   it("does not duplicate an activation failure already in the controller snapshot", async () => {

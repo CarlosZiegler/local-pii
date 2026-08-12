@@ -7,6 +7,7 @@ import {
   type RuntimeControllerDependencies,
 } from "./runtime-controller"
 import { createGemmaBrowserRuntime } from "./gemma-runtime"
+import { CHROME_TEXT_EXPECTATIONS } from "./chrome-runtime"
 import type { BrowserGenerationRuntime, RuntimeDisclosure } from "./types"
 import type { ChromePromptFactory } from "./chrome-runtime"
 
@@ -67,6 +68,14 @@ function controllerDependencies(
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((res) => {
+    resolve = res
+  })
+  return { promise, resolve }
+}
+
 describe("browser runtime controller", () => {
   it("recognizes only the complete pinned Gemma cache", async () => {
     const cached = new Set(GEMMA_ARTIFACT_URLS)
@@ -100,6 +109,34 @@ describe("browser runtime controller", () => {
     })
     expect(controller.getRuntime()?.id).toBe("gemini-nano")
     expect(native.create).not.toHaveBeenCalled()
+  })
+
+  it("uses the shared English text expectations for native availability", async () => {
+    const native = nativeFactory("downloadable")
+    const controller = createRuntimeController(
+      controllerDependencies({ getNative: () => native })
+    )
+
+    await controller.check()
+
+    expect(native.availability).toHaveBeenCalledWith(CHROME_TEXT_EXPECTATIONS)
+  })
+
+  it("hides the runtime whenever the public snapshot is not ready", async () => {
+    const native = nativeFactory("available")
+    const controller = createRuntimeController(
+      controllerDependencies({ getNative: () => native })
+    )
+
+    await controller.check()
+    expect(controller.getSnapshot().status).toBe("ready")
+    expect(controller.getRuntime()).toBeDefined()
+
+    native.availability = vi.fn(async () => "downloadable" as Availability)
+    await controller.check()
+
+    expect(controller.getSnapshot().status).toBe("choice-required")
+    expect(controller.getRuntime()).toBeUndefined()
   })
 
   it("requires an explicit choice when native needs activation", async () => {
@@ -193,6 +230,63 @@ describe("browser runtime controller", () => {
       true
     )
     expect(native.create).toHaveBeenCalledOnce()
+    expect(native.create).toHaveBeenCalledWith(
+      expect.objectContaining(CHROME_TEXT_EXPECTATIONS)
+    )
+  })
+
+  it("preserves an abort reason over a warm-session cleanup failure", async () => {
+    const abort = new AbortController()
+    const reason = new DOMException("Stop warming", "AbortError")
+    const cleanupFailure = new Error("session cleanup")
+    const destroyStarted = deferred<void>()
+    const releaseDestroy = deferred<void>()
+    const session = {
+      destroy: vi.fn(async () => {
+        destroyStarted.resolve()
+        await releaseDestroy.promise
+        throw cleanupFailure
+      }),
+    }
+    const native = {
+      availability: vi.fn(async () => "downloadable" as Availability),
+      create: vi.fn(async () => session as unknown as LanguageModel),
+    }
+    const controller = createRuntimeController(
+      controllerDependencies({ getNative: () => native })
+    )
+    await controller.check()
+
+    const activation = controller.activate("gemini-nano", abort.signal)
+    await destroyStarted.promise
+    abort.abort(reason)
+    releaseDestroy.resolve()
+
+    await expect(activation).rejects.toBe(reason)
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "error",
+      error: reason,
+    })
+  })
+
+  it("reports a warm-session cleanup failure when activation succeeds", async () => {
+    const cleanupFailure = new Error("session cleanup")
+    const native = {
+      availability: vi.fn(async () => "downloadable" as Availability),
+      create: vi.fn(async () => ({
+        destroy: vi.fn(async () => {
+          throw cleanupFailure
+        }),
+      })) as unknown as ChromePromptFactory["create"],
+    }
+    const controller = createRuntimeController(
+      controllerDependencies({ getNative: () => native })
+    )
+    await controller.check()
+
+    await expect(controller.activate("gemini-nano")).rejects.toBe(
+      cleanupFailure
+    )
   })
 
   it("prepares Gemma before ready without starting generation", async () => {
@@ -465,7 +559,7 @@ describe("browser runtime controller", () => {
     await expect(controller.activate("gemma-3-270m")).rejects.toBe(
       previousFailure
     )
-    expect(controller.getRuntime()).toBe(previous)
+    expect(controller.getRuntime()).toBeUndefined()
     expect(controller.getSnapshot()).toMatchObject({
       status: "error",
       error: previousFailure,

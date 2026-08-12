@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest"
 import {
+  CHROME_TEXT_EXPECTATIONS,
   createChromeBrowserRuntime,
   discoverChromePromptFactory,
   type ChromePromptSession,
@@ -54,6 +55,7 @@ describe("Chrome browser-generation runtime", () => {
     await expect(collect(runtime.generate(request()))).resolves.toBe("onetwo")
     expect(create).toHaveBeenCalledOnce()
     expect(create).toHaveBeenCalledWith({
+      ...CHROME_TEXT_EXPECTATIONS,
       initialPrompts: [{ role: "user", content: "Earlier" }],
     })
     expect(promptStreaming).toHaveBeenCalledWith("Current", {})

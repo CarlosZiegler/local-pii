@@ -4,6 +4,7 @@ import {
   createGemmaLanguageModelFactory,
 } from "./gemma-runtime"
 import { createProtectedBrowserRequest } from "./protected-request"
+import { GEMMA_ARTIFACT_URLS, GEMMA_CACHE_NAME } from "./runtime-metadata"
 
 class FakeStoppingCriteria {
   interrupted = false
@@ -111,6 +112,82 @@ async function collect(source: AsyncIterable<string>): Promise<string> {
 }
 
 describe("Gemma browser-generation runtime", () => {
+  it("cancels artifact fetches and retries only missing artifacts", async () => {
+    const fake = fakeTransformers()
+    const entries = new Map<string, Response>()
+    const cache = {
+      match: vi.fn(async (url: string) => entries.get(url)),
+      put: vi.fn(async (url: string, response: Response) => {
+        entries.set(url, response.clone())
+      }),
+    }
+    const cacheStorage = {
+      open: vi.fn(async (name: string) => {
+        expect(name).toBe(GEMMA_CACHE_NAME)
+        return cache
+      }),
+    }
+    let firstAttempt = true
+    const fetchArtifact = vi.fn(
+      async (url: string, options?: { signal?: AbortSignal }) => {
+        if (firstAttempt && url === GEMMA_ARTIFACT_URLS[1]) {
+          return new Promise<Response>((_, reject) => {
+            options?.signal?.addEventListener(
+              "abort",
+              () => reject(options.signal?.reason),
+              { once: true }
+            )
+          })
+        }
+        return new Response(`artifact:${url}`)
+      }
+    )
+    const first = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+      fetch: fetchArtifact,
+      cacheStorage,
+    })
+    const abort = new AbortController()
+    const reason = new DOMException("Stop artifact download", "AbortError")
+    const preparation = first.prepare(abort.signal)
+    await vi.waitFor(() =>
+      expect(fetchArtifact).toHaveBeenCalledWith(
+        GEMMA_ARTIFACT_URLS[1],
+        expect.objectContaining({ signal: abort.signal })
+      )
+    )
+    abort.abort(reason)
+
+    await expect(preparation).rejects.toBe(reason)
+    await first.dispose()
+    firstAttempt = false
+
+    const second = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+      fetch: fetchArtifact,
+      cacheStorage,
+    })
+    await second.prepare()
+    await collect(second.generate(request()))
+
+    expect(fake.pipeline).toHaveBeenCalledOnce()
+    expect(fake.pipeline).toHaveBeenCalledWith(
+      "text-generation",
+      expect.any(String),
+      expect.objectContaining({ local_files_only: true })
+    )
+    expect(fetchArtifact).toHaveBeenCalledTimes(GEMMA_ARTIFACT_URLS.length + 1)
+    expect(fetchArtifact).toHaveBeenCalledWith(
+      GEMMA_ARTIFACT_URLS[0],
+      expect.anything()
+    )
+    expect(fetchArtifact).toHaveBeenCalledWith(
+      GEMMA_ARTIFACT_URLS[1],
+      expect.anything()
+    )
+    await second.dispose()
+  })
+
   it("prepares the shared pipeline without starting a generation", async () => {
     const fake = fakeTransformers()
     const runtime = createGemmaBrowserRuntime({

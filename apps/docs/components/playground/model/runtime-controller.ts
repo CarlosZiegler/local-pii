@@ -1,4 +1,5 @@
 import {
+  CHROME_TEXT_EXPECTATIONS,
   createChromeBrowserRuntime,
   discoverChromePromptFactory,
   type ChromePromptFactory,
@@ -22,11 +23,6 @@ export { GEMMA_ARTIFACT_URLS } from "./runtime-metadata"
 type NativeFactory = ChromePromptFactory & {
   availability(options?: LanguageModelCreateCoreOptions): Promise<Availability>
 }
-
-const TEXT_EXPECTATIONS = {
-  expectedInputs: [{ type: "text", languages: ["en"] }],
-  expectedOutputs: [{ type: "text", languages: ["en"] }],
-} as const
 
 const DISCLOSURES: Record<RuntimeKind, RuntimeDisclosure> = {
   "gemini-nano": {
@@ -317,7 +313,7 @@ export function createRuntimeController(
 
       let timeout: ReturnType<typeof setTimeout> | undefined
       const nativeAvailability = await Promise.race([
-        native.availability(TEXT_EXPECTATIONS as never),
+        native.availability(CHROME_TEXT_EXPECTATIONS),
         new Promise<"timeout">((resolve) => {
           timeout = setTimeout(() => resolve("timeout"), availabilityTimeoutMs)
         }),
@@ -374,6 +370,8 @@ export function createRuntimeController(
   ): Promise<void> => {
     throwIfAborted(signal)
     type NativeCreate = (options: {
+      readonly expectedInputs: readonly LanguageModelExpected[]
+      readonly expectedOutputs: readonly LanguageModelExpected[]
       readonly initialPrompts: readonly []
       readonly signal?: AbortSignal
       readonly monitor: (monitor: EventTarget) => void
@@ -381,6 +379,7 @@ export function createRuntimeController(
     const create = factory.create as unknown as NativeCreate
     const session = await awaitWithAbort(
       create({
+        ...CHROME_TEXT_EXPECTATIONS,
         initialPrompts: [],
         ...(signal === undefined ? {} : { signal }),
         monitor(monitor) {
@@ -396,12 +395,31 @@ export function createRuntimeController(
       },
       trackPendingDisposal
     )
+    let hasPrimaryFailure = false
+    let primaryFailure: unknown
     try {
       throwIfAborted(signal)
       if (!isCurrent(operationId)) return
-    } finally {
-      await session.destroy()
+    } catch (cause) {
+      hasPrimaryFailure = true
+      primaryFailure = cause
     }
+
+    let hasCleanupFailure = false
+    let cleanupFailure: unknown
+    try {
+      await session.destroy()
+    } catch (cause) {
+      hasCleanupFailure = true
+      cleanupFailure = cause
+    }
+
+    if (!hasPrimaryFailure && signal?.aborted) {
+      hasPrimaryFailure = true
+      primaryFailure = signal.reason
+    }
+    if (hasPrimaryFailure) throw primaryFailure
+    if (hasCleanupFailure) throw cleanupFailure
   }
 
   const loadRuntime = async (
@@ -579,7 +597,8 @@ export function createRuntimeController(
     check,
     activate,
     getSnapshot: () => snapshot,
-    getRuntime: () => currentRuntime,
+    getRuntime: () =>
+      snapshot.status === "ready" ? currentRuntime : undefined,
     subscribe(listener) {
       listeners.add(listener)
       return () => listeners.delete(listener)

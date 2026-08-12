@@ -31,6 +31,10 @@ type RuntimeContextValue = RuntimeSnapshot & {
 
 const RuntimeContext = createContext<RuntimeContextValue | null>(null)
 const SERVER_SNAPSHOT: RuntimeSnapshot = { status: "checking", operationId: 0 }
+type RuntimeActionError = {
+  readonly error: Error
+  readonly generation: number
+}
 
 export interface RuntimeProviderProps {
   children: ReactNode
@@ -54,12 +58,13 @@ export function RuntimeProvider({
   const mounted = useRef(false)
   const effectGeneration = useRef(0)
   const effectController = useRef<RuntimeController | undefined>(undefined)
-  const [actionError, setActionError] = useState<Error>()
+  const [actionError, setActionError] = useState<RuntimeActionError>()
 
   useEffect(() => {
     const generation = ++effectGeneration.current
     effectController.current = controller
     mounted.current = true
+    setActionError(undefined)
     void controller.check().catch(() => {
       // The controller publishes check failures in its snapshot. Observe the
       // rejection here so an unmounted or replaced provider cannot leak it.
@@ -95,6 +100,7 @@ export function RuntimeProvider({
   const activate = useCallback(
     (kind: RuntimeKind) => {
       if (!mounted.current) return Promise.resolve()
+      const generation = effectGeneration.current
       const abort = new AbortController()
       setActionError(undefined)
       if (activeAbort.current === null) activeAbort.current = abort
@@ -114,7 +120,17 @@ export function RuntimeProvider({
             setActionError(undefined)
             return
           }
-          setActionError(error)
+          setActionError({ error, generation })
+        })
+        .then(() => {
+          if (
+            mounted.current &&
+            effectController.current === controller &&
+            effectGeneration.current === generation &&
+            controller.getSnapshot().status === "ready"
+          ) {
+            setActionError(undefined)
+          }
         })
         .finally(() => {
           if (activeAbort.current === abort) activeAbort.current = null
@@ -129,12 +145,22 @@ export function RuntimeProvider({
     )
   }, [])
 
+  const visibleActionError =
+    actionError !== undefined &&
+    actionError.generation === effectGeneration.current &&
+    effectController.current === controller &&
+    snapshot.status !== "ready"
+      ? actionError.error
+      : undefined
+
   const value = useMemo<RuntimeContextValue>(() => {
     const runtime = controller.getRuntime()
     return {
       ...snapshot,
       ...(runtime === undefined ? {} : { runtime }),
-      ...(actionError === undefined ? {} : { actionError }),
+      ...(visibleActionError === undefined
+        ? {}
+        : { actionError: visibleActionError }),
       activate,
       abort,
       check: () => {
@@ -143,7 +169,7 @@ export function RuntimeProvider({
         return controller.check().catch(() => undefined)
       },
     }
-  }, [abort, actionError, activate, controller, snapshot])
+  }, [abort, activate, controller, snapshot, visibleActionError])
 
   return (
     <RuntimeContext.Provider value={value}>{children}</RuntimeContext.Provider>

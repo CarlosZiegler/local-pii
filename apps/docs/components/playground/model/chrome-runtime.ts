@@ -18,14 +18,26 @@ export interface ChromePromptSession {
   destroy: () => void | Promise<void>
 }
 
+export const CHROME_TEXT_EXPECTATIONS = {
+  expectedInputs: [{ type: "text", languages: ["en"] }],
+  expectedOutputs: [{ type: "text", languages: ["en"] }],
+} satisfies Pick<
+  LanguageModelCreateCoreOptions,
+  "expectedInputs" | "expectedOutputs"
+>
+
+export interface ChromePromptCreateOptions {
+  readonly expectedInputs?: readonly LanguageModelExpected[]
+  readonly expectedOutputs?: readonly LanguageModelExpected[]
+  readonly initialPrompts?: readonly {
+    readonly role: ProtectedBrowserTurn["role"]
+    readonly content: string
+  }[]
+  readonly signal?: AbortSignal
+}
+
 export interface ChromePromptFactory {
-  create(options?: {
-    readonly initialPrompts?: readonly {
-      readonly role: ProtectedBrowserTurn["role"]
-      readonly content: string
-    }[]
-    readonly signal?: AbortSignal
-  }): Promise<ChromePromptSession>
+  create(options?: ChromePromptCreateOptions): Promise<ChromePromptSession>
 }
 
 const CHROME_DISCLOSURE: RuntimeDisclosure = {
@@ -90,6 +102,7 @@ export function createChromeBrowserRuntime(
               throw new Error("The Chrome browser runtime is disposed")
             }
             const options = {
+              ...CHROME_TEXT_EXPECTATIONS,
               initialPrompts: input.protectedHistory.map(
                 ({ role, protectedContent }) => ({
                   role,
