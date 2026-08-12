@@ -227,8 +227,18 @@ export function observeBrowserRuntime(
     generate(input) {
       assertProtectedBrowserRequest(input)
       const observation = observer.current()
+      let observationOwner: symbol | undefined
       return {
         [Symbol.asyncIterator]() {
+          const token = Symbol("generationIterator")
+          const claimObservation = () => {
+            observationOwner ??= token
+            return observationOwner === token
+          }
+          const discardOwnedObservation = () => {
+            if (observationOwner === undefined) observationOwner = token
+            if (observationOwner === token) observation?.discard()
+          }
           let naturalEnd = false
           const managed = managedGeneration(
             async () => {
@@ -244,14 +254,14 @@ export function observeBrowserRuntime(
                   )
                 },
                 return(reason?: unknown) {
-                  observation?.discard()
+                  discardOwnedObservation()
                   return (
                     upstream.return?.(reason) ??
                     Promise.resolve({ done: true, value: undefined })
                   )
                 },
                 throw(error?: unknown) {
-                  observation?.discard()
+                  discardOwnedObservation()
                   return (
                     upstream.throw?.(error) ??
                     Promise.reject(
@@ -263,32 +273,33 @@ export function observeBrowserRuntime(
             },
             input.signal,
             () => {
-              if (!naturalEnd) observation?.discard()
+              if (!naturalEnd) discardOwnedObservation()
             }
           )[Symbol.asyncIterator]()
 
           return {
             next(...args: [] | [undefined]) {
+              const ownsObservation = claimObservation()
               return managed.next(...args).then(
                 (result) => {
-                  if (result.done) observation?.commit(input)
+                  if (result.done && ownsObservation) observation?.commit(input)
                   return result
                 },
                 (error) => {
-                  observation?.discard()
+                  if (ownsObservation) observation?.discard()
                   throw error
                 }
               )
             },
             return(reason?: unknown) {
-              observation?.discard()
+              discardOwnedObservation()
               return (
                 managed.return?.(reason) ??
                 Promise.resolve({ done: true, value: undefined })
               )
             },
             throw(error?: unknown) {
-              observation?.discard()
+              discardOwnedObservation()
               return (
                 managed.throw?.(error) ??
                 Promise.reject(

@@ -3,6 +3,11 @@ import { describe, expect, it, vi } from "vitest"
 import { createProtectedBrowserRequest } from "./model/protected-request"
 import type { PiiSession } from "local-pii"
 import {
+  createGenerationGate,
+  PlaygroundBusyError,
+  withPlaygroundGate,
+} from "./generation-gate"
+import {
   createProtectionObserver,
   observeBrowserRuntime,
   type PrivacyInspection,
@@ -302,5 +307,63 @@ describe("protection observer", () => {
     expect(publish).not.toHaveBeenCalled()
     await expect(iterator.next()).rejects.toBe(failure)
     expect(publish).not.toHaveBeenCalled()
+  })
+
+  it("does not let a busy sibling iterator discard the winning observation", async () => {
+    let resolveNext!: (result: IteratorResult<string>) => void
+    const nextResult = new Promise<IteratorResult<string>>((resolve) => {
+      resolveNext = resolve
+    })
+    const publish = vi.fn()
+    const observer = createProtectionObserver(session(), publish)
+    observer.begin("winner")
+    const source: BrowserGenerationRuntime = {
+      id: "sibling-observer",
+      disclosure: {
+        label: "Sibling observer",
+        model: "sibling-observer",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate: () => ({
+        [Symbol.asyncIterator]() {
+          return {
+            next: () => nextResult,
+            return: async () => ({ done: true, value: undefined }),
+          }
+        },
+      }),
+      dispose: async () => undefined,
+    }
+    const gate = createGenerationGate()
+    const runtime = observeBrowserRuntime(
+      withPlaygroundGate(source, gate, "vercel"),
+      observer
+    )
+    const generated = runtime.generate(
+      createProtectedBrowserRequest({
+        protectedHistory: [],
+        protectedContent: "protected",
+      })
+    )
+    const winner = generated[Symbol.asyncIterator]()
+    const sibling = generated[Symbol.asyncIterator]()
+    const winnerNext = winner.next()
+    await vi.waitFor(() =>
+      expect(gate.getSnapshot()).toEqual({ owner: "vercel" })
+    )
+
+    await expect(sibling.next()).rejects.toBeInstanceOf(PlaygroundBusyError)
+    resolveNext({ done: true, value: undefined })
+    await expect(winnerNext).resolves.toEqual({
+      done: true,
+      value: undefined,
+    })
+
+    expect(publish).toHaveBeenCalledOnce()
+    expect(publish.mock.calls[0]?.[0]).toMatchObject({
+      generationRunId: "winner",
+      protectedContent: "protected",
+    })
   })
 })
