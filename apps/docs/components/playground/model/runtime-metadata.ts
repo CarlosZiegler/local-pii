@@ -2,6 +2,7 @@ import type { RuntimeDisclosure } from "./types"
 
 export const GEMMA_MODEL_ID = "onnx-community/gemma-3-270m-it-ONNX"
 export const GEMMA_MODEL_REVISION = "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+export const GEMMA_ARTIFACT_BASE_URL = `https://huggingface.co/${GEMMA_MODEL_ID}/resolve/${GEMMA_MODEL_REVISION}`
 
 export const GEMMA_RUNTIME_DISCLOSURE: RuntimeDisclosure = {
   label: "Gemma 3 270M IT",
@@ -26,8 +27,7 @@ export const GEMMA_ARTIFACT_FILENAMES = [
 
 /** Transformers.js uses the remote URL (including revision) as its browser cache key. */
 export const GEMMA_ARTIFACT_URLS = GEMMA_ARTIFACT_FILENAMES.map(
-  (filename) =>
-    `https://huggingface.co/${GEMMA_MODEL_ID}/resolve/${GEMMA_MODEL_REVISION}/${filename}`
+  (filename) => `${GEMMA_ARTIFACT_BASE_URL}/${filename}`
 ) as readonly string[]
 
 export const GEMMA_CACHE_NAME = "transformers-cache"

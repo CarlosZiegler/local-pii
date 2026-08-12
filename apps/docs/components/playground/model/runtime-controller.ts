@@ -245,6 +245,18 @@ export function createRuntimeController(
     if (hasBackgroundFailure) throw firstBackgroundFailure
   }
 
+  /**
+   * A retry must not start another WebGPU construction while an aborted
+   * candidate is still finishing its uncancellable loader. Cleanup failures
+   * remain retained for controller.dispose(), but do not replace the retry's
+   * own primary activation result.
+   */
+  const drainPendingDisposals = async (): Promise<void> => {
+    while (pendingDisposals.size > 0) {
+      await Promise.allSettled([...pendingDisposals])
+    }
+  }
+
   const publish = (next: RuntimeSnapshot) => {
     snapshot = next
     for (const listener of listeners) listener()
@@ -397,9 +409,10 @@ export function createRuntimeController(
     )
     let hasPrimaryFailure = false
     let primaryFailure: unknown
+    let stale = false
     try {
       throwIfAborted(signal)
-      if (!isCurrent(operationId)) return
+      stale = !isCurrent(operationId)
     } catch (cause) {
       hasPrimaryFailure = true
       primaryFailure = cause
@@ -419,6 +432,7 @@ export function createRuntimeController(
       primaryFailure = signal.reason
     }
     if (hasPrimaryFailure) throw primaryFailure
+    if (stale) return
     if (hasCleanupFailure) throw cleanupFailure
   }
 
@@ -428,6 +442,7 @@ export function createRuntimeController(
     signal: AbortSignal | undefined,
     onProgress: (progress: number) => void
   ): Promise<BrowserGenerationRuntime> => {
+    await drainPendingDisposals()
     throwIfAborted(signal)
     if (kind === "gemini-nano") {
       const factory = getNative()
@@ -464,8 +479,9 @@ export function createRuntimeController(
       await runtime.prepare?.(signal)
       return runtime
     } catch (cause) {
-      // Preserve the preparation error while disposing the shared pipeline in
-      // the background. The controller's disposal barrier still awaits it.
+      // The candidate is not returned to runActivation when prepare fails, so
+      // this is the sole owner of its cleanup. The barrier retains any late
+      // disposal failure without replacing the preparation error.
       scheduleDisposal(() => runtime.dispose())
       throw cause
     }

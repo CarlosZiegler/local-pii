@@ -10,9 +10,9 @@ import {
 } from "./protected-request"
 import type { BrowserGenerationRuntime, ProtectedBrowserTurn } from "./types"
 import {
+  GEMMA_ARTIFACT_BASE_URL,
   GEMMA_ARTIFACT_URLS,
   GEMMA_CACHE_NAME,
-  GEMMA_MODEL_ID,
   GEMMA_MODEL_REVISION,
   GEMMA_RUNTIME_DISCLOSURE,
 } from "./runtime-metadata"
@@ -25,7 +25,6 @@ interface LanguageModelFactory {
   create(options?: LanguageModelCreateOptions): Promise<LanguageModel>
 }
 
-const MODEL_ID = GEMMA_MODEL_ID
 const MODEL_REVISION = GEMMA_MODEL_REVISION
 // Pinned Gemma 3 270M config: max_position_embeddings is 32768.
 const CONTEXT_WINDOW = 32_768
@@ -69,23 +68,43 @@ interface TextGenerator {
   dispose: () => void | Promise<void>
 }
 
+interface DisposableResource {
+  dispose?: () => void | Promise<void>
+}
+
+interface TransformersOptions {
+  readonly revision: string
+  readonly config?: unknown
+  readonly device?: "webgpu"
+  readonly dtype?: "q4f16"
+}
+
 interface TransformersRuntime {
   env?: { experimental_useCrossOriginStorage?: boolean }
   InterruptableStoppingCriteria: new () => InterruptableCriteria
-  pipeline(
-    task: "text-generation",
-    model: string,
-    options: {
-      device: "webgpu"
-      dtype: "q4f16"
-      revision: string
-      local_files_only: boolean
-      progress_callback?: (event: {
-        progress?: number
-        status?: string
-      }) => void
-    }
-  ): Promise<TextGenerator>
+  AutoConfig: {
+    from_pretrained(
+      model: string,
+      options: { readonly revision: string }
+    ): Promise<unknown>
+  }
+  AutoTokenizer: {
+    from_pretrained(
+      model: string,
+      options: TransformersOptions
+    ): Promise<TextGenerator["tokenizer"]>
+  }
+  AutoModelForCausalLM: {
+    from_pretrained(
+      model: string,
+      options: TransformersOptions
+    ): Promise<DisposableResource>
+  }
+  TextGenerationPipeline: new (options: {
+    readonly task: "text-generation"
+    readonly model: DisposableResource
+    readonly tokenizer: TextGenerator["tokenizer"]
+  }) => TextGenerator
   TextStreamer: new (
     tokenizer: TextGenerator["tokenizer"],
     options: {
@@ -264,7 +283,15 @@ async function ensurePinnedArtifacts(
     signal?.throwIfAborted()
     const response = await fetchArtifact(url, { signal })
     if (!response.ok) {
-      throw new Error(`Unable to download Gemma artifact: ${response.status}`)
+      const failure = new Error(
+        `Unable to download Gemma artifact: ${response.status}`
+      )
+      try {
+        await response.body?.cancel()
+      } catch {
+        // Preserve the HTTP failure as the primary error.
+      }
+      throw failure
     }
     await cache.put(url, response)
     complete += 1
@@ -815,12 +842,18 @@ export function createGemmaBrowserRuntime(
     dependencies.loadTransformers ??
     (async () =>
       (await import("@huggingface/transformers")) as unknown as TransformersRuntime)
-  let generatorPromise:
-    | Promise<{
-        generator: TextGenerator
-        transformers: TransformersRuntime
-      }>
-    | undefined
+  type GeneratorBundle = {
+    generator: TextGenerator
+    transformers: TransformersRuntime
+  }
+  type Preparation = {
+    readonly abortController: AbortController
+    readonly promise: Promise<GeneratorBundle>
+    waiters: number
+    settled: boolean
+  }
+  let generatorBundle: GeneratorBundle | undefined
+  let preparation: Preparation | undefined
   let disposed = false
   const active = new Set<Promise<void>>()
   let runtimeDisposePromise: Promise<void> | undefined
@@ -844,53 +877,118 @@ export function createGemmaBrowserRuntime(
     return disposal
   }
 
-  const loadGenerator = (signal?: AbortSignal) => {
-    generatorPromise ??= loadTransformers()
-      .then(async (loaded) => {
-        const transformers = loaded as TransformersRuntime
-        if (shouldPrefetchArtifacts) {
-          await ensurePinnedArtifacts(
-            dependencies,
-            signal,
-            dependencies.onProgress
-          )
+  const disposeResource = async (resource: unknown) => {
+    try {
+      if (
+        resource !== null &&
+        (typeof resource === "object" || typeof resource === "function") &&
+        "dispose" in resource &&
+        typeof resource.dispose === "function"
+      ) {
+        await resource.dispose()
+      }
+    } catch {
+      // Preserve the acquisition/abort error as primary. The controller's
+      // disposal barrier owns the complete runtime cleanup failure policy.
+    }
+  }
+
+  const buildGenerator = async (
+    signal: AbortSignal
+  ): Promise<GeneratorBundle> => {
+    const loaded = await loadTransformers()
+    const transformers = loaded as TransformersRuntime
+    if (shouldPrefetchArtifacts) {
+      await ensurePinnedArtifacts(dependencies, signal, dependencies.onProgress)
+    }
+    signal.throwIfAborted()
+    if (transformers.env) {
+      transformers.env.experimental_useCrossOriginStorage = false
+    }
+
+    let tokenizer: TextGenerator["tokenizer"] | undefined
+    let model: DisposableResource | undefined
+    let generator: TextGenerator | undefined
+    try {
+      const config = await transformers.AutoConfig.from_pretrained(
+        GEMMA_ARTIFACT_BASE_URL,
+        { revision: MODEL_REVISION }
+      )
+      signal.throwIfAborted()
+      tokenizer = await transformers.AutoTokenizer.from_pretrained(
+        GEMMA_ARTIFACT_BASE_URL,
+        { revision: MODEL_REVISION, config }
+      )
+      signal.throwIfAborted()
+      model = await transformers.AutoModelForCausalLM.from_pretrained(
+        GEMMA_ARTIFACT_BASE_URL,
+        {
+          revision: MODEL_REVISION,
+          config,
+          device: "webgpu",
+          dtype: "q4f16",
         }
-        if (transformers.env) {
-          transformers.env.experimental_useCrossOriginStorage = false
+      )
+      signal.throwIfAborted()
+      generator = new transformers.TextGenerationPipeline({
+        task: "text-generation",
+        model,
+        tokenizer,
+      })
+      model = undefined
+      signal.throwIfAborted()
+      return { generator, transformers }
+    } catch (cause) {
+      if (generator) await disposeGenerator(generator)
+      else await disposeResource(model)
+      await disposeResource(tokenizer)
+      throw cause
+    }
+  }
+
+  const beginPreparation = (): Preparation => {
+    const abortController = new AbortController()
+    let current!: Preparation
+    const promise = buildGenerator(abortController.signal).then(
+      (bundle) => {
+        current.settled = true
+        if (preparation === current) {
+          preparation = undefined
+          generatorBundle = bundle
         }
-        const generator = await transformers.pipeline(
-          "text-generation",
-          MODEL_ID,
-          {
-            device: "webgpu",
-            dtype: "q4f16",
-            revision: MODEL_REVISION,
-            local_files_only: shouldPrefetchArtifacts,
-            ...(shouldPrefetchArtifacts
-              ? {}
-              : {
-                  progress_callback(event: {
-                    progress?: number
-                    status?: string
-                  }) {
-                    if (event.status === "ready") dependencies.onProgress?.(1)
-                    else if (
-                      event.status === "progress_total" &&
-                      event.progress !== undefined
-                    ) {
-                      dependencies.onProgress?.(event.progress / 100)
-                    }
-                  },
-                }),
-          }
+        return bundle
+      },
+      (cause) => {
+        current.settled = true
+        if (preparation === current) preparation = undefined
+        throw cause
+      }
+    )
+    current = { abortController, promise, settled: false, waiters: 0 }
+    preparation = current
+    return current
+  }
+
+  const loadGenerator = (signal?: AbortSignal): Promise<GeneratorBundle> => {
+    if (generatorBundle) return Promise.resolve(generatorBundle)
+    const current = preparation ?? beginPreparation()
+    current.waiters += 1
+    let released = false
+    const release = () => {
+      if (released) return
+      released = true
+      current.waiters -= 1
+      if (
+        current.waiters === 0 &&
+        !current.settled &&
+        !current.abortController.signal.aborted
+      ) {
+        current.abortController.abort(
+          new DOMException("Gemma preparation abandoned", "AbortError")
         )
-        return { generator, transformers }
-      })
-      .catch((error) => {
-        generatorPromise = undefined
-        throw error
-      })
-    return generatorPromise
+      }
+    }
+    return awaitSignal(current.promise, signal).finally(release)
   }
 
   return {
@@ -963,12 +1061,17 @@ export function createGemmaBrowserRuntime(
         let disposalFailed = false
         let disposalError: unknown
         try {
-          const loaded = generatorPromise
-          generatorPromise = undefined
-          if (loaded) {
-            const { generator } = await loaded
-            await disposeGenerator(generator)
-          }
+          const loading = preparation?.promise
+          preparation?.abortController.abort(
+            new DOMException(
+              "The Gemma browser runtime was disposed",
+              "AbortError"
+            )
+          )
+          await loading?.catch(() => undefined)
+          const loaded = generatorBundle
+          generatorBundle = undefined
+          if (loaded) await disposeGenerator(loaded.generator)
         } catch (error) {
           disposalFailed = true
           disposalError = error

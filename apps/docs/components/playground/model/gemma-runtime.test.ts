@@ -76,11 +76,26 @@ function fakeTransformers(
       dispose,
     }
   )
-  const pipeline = vi.fn(async () => generator)
+  const model = generator
+  const autoConfig = vi.fn(async () => ({ model_type: "gemma3_text" }))
+  const autoTokenizer = vi.fn(async () => generator.tokenizer)
+  const autoModelForCausalLM = vi.fn(async () => model)
+  const TextGenerationPipeline = vi.fn(
+    function FakeTextGenerationPipeline(options: {
+      model: object
+      tokenizer: object
+    }) {
+      Object.assign(options.model, { tokenizer: options.tokenizer })
+      return options.model
+    }
+  )
   const loadTransformers = vi.fn(async () => ({
     env,
     InterruptableStoppingCriteria: FakeStoppingCriteria,
-    pipeline,
+    AutoConfig: { from_pretrained: autoConfig },
+    AutoTokenizer: { from_pretrained: autoTokenizer },
+    AutoModelForCausalLM: { from_pretrained: autoModelForCausalLM },
+    TextGenerationPipeline,
     TextStreamer: FakeTextStreamer,
   }))
   return {
@@ -88,7 +103,10 @@ function fakeTransformers(
     env,
     generator,
     loadTransformers,
-    pipeline,
+    autoConfig,
+    autoTokenizer,
+    autoModelForCausalLM,
+    TextGenerationPipeline,
     promptMessages,
     dispose,
   }
@@ -170,12 +188,7 @@ describe("Gemma browser-generation runtime", () => {
     await second.prepare()
     await collect(second.generate(request()))
 
-    expect(fake.pipeline).toHaveBeenCalledOnce()
-    expect(fake.pipeline).toHaveBeenCalledWith(
-      "text-generation",
-      expect.any(String),
-      expect.objectContaining({ local_files_only: true })
-    )
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
     expect(fetchArtifact).toHaveBeenCalledTimes(GEMMA_ARTIFACT_URLS.length + 1)
     expect(fetchArtifact).toHaveBeenCalledWith(
       GEMMA_ARTIFACT_URLS[0],
@@ -188,6 +201,122 @@ describe("Gemma browser-generation runtime", () => {
     await second.dispose()
   })
 
+  it("cancels a non-OK artifact body and preserves its status error", async () => {
+    const fake = fakeTransformers()
+    const entries = new Map<string, Response>()
+    const cache = {
+      match: vi.fn(async (url: string) => entries.get(url)),
+      put: vi.fn(async (url: string, response: Response) => {
+        entries.set(url, response.clone())
+      }),
+    }
+    const cacheStorage = { open: vi.fn(async () => cache) }
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new TextEncoder().encode("error"))
+      },
+    })
+    const response = new Response(body, { status: 503 })
+    const cancel = vi.spyOn(response.body!, "cancel")
+    const fetchArtifact = vi.fn(async () => response)
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+      fetch: fetchArtifact,
+      cacheStorage,
+    })
+
+    await expect(runtime.prepare()).rejects.toThrow("503")
+    expect(cancel).toHaveBeenCalledOnce()
+    expect(fake.TextGenerationPipeline).not.toHaveBeenCalled()
+    await runtime.dispose()
+  })
+
+  it("does not cross-abort concurrent prepare waiters", async () => {
+    const fake = fakeTransformers()
+    const config = deferred<unknown>()
+    const loadTransformers = vi.fn(async () => ({
+      ...(await fake.loadTransformers()),
+      AutoConfig: { from_pretrained: vi.fn(() => config.promise) },
+    }))
+    const runtime = createGemmaBrowserRuntime({ loadTransformers })
+    const firstAbort = new AbortController()
+    const firstReason = new DOMException("First stopped", "AbortError")
+    const first = runtime.prepare(firstAbort.signal)
+    const second = runtime.prepare()
+
+    await vi.waitFor(() => expect(loadTransformers).toHaveBeenCalledOnce())
+    firstAbort.abort(firstReason)
+    await expect(first).rejects.toBe(firstReason)
+    let secondSettled = false
+    void second.then(() => {
+      secondSettled = true
+    })
+    await Promise.resolve()
+    expect(secondSettled).toBe(false)
+
+    config.resolve({ model_type: "gemma3_text" })
+    await second
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
+    await runtime.dispose()
+  })
+
+  it("fails cache-only component loading without falling back to main", async () => {
+    const fake = fakeTransformers()
+    const entries = new Map(
+      GEMMA_ARTIFACT_URLS.map((url) => [url, new Response(`artifact:${url}`)])
+    )
+    const cache = {
+      match: vi.fn(async (url: string) => entries.get(url)),
+      put: vi.fn(async (url: string, response: Response) => {
+        entries.set(url, response.clone())
+      }),
+    }
+    const cacheStorage = { open: vi.fn(async () => cache) }
+    const fetchArtifact = vi.fn(async () => {
+      throw new Error("network fallback")
+    })
+    const autoConfig = vi.fn(async () => {
+      entries.delete(GEMMA_ARTIFACT_URLS[0]!)
+      throw new Error("cache miss")
+    })
+    const loadTransformers = vi.fn(async () => ({
+      ...(await fake.loadTransformers()),
+      AutoConfig: { from_pretrained: autoConfig },
+    }))
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers,
+      fetch: fetchArtifact,
+      cacheStorage,
+    })
+
+    await expect(runtime.prepare()).rejects.toThrow("cache miss")
+    expect(fetchArtifact).not.toHaveBeenCalled()
+    expect(autoConfig).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/resolve/2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+      ),
+      expect.objectContaining({
+        revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0",
+      })
+    )
+    await runtime.dispose()
+  })
+
+  it("disposes a loaded model when pipeline construction fails", async () => {
+    const fake = fakeTransformers()
+    const constructionFailure = new Error("pipeline construction")
+    fake.TextGenerationPipeline.mockImplementation(() => {
+      throw constructionFailure
+    })
+    const runtime = createGemmaBrowserRuntime({
+      loadTransformers: fake.loadTransformers,
+    })
+
+    await expect(runtime.prepare()).rejects.toBe(constructionFailure)
+    expect(fake.dispose).toHaveBeenCalledOnce()
+    await runtime.dispose()
+  })
+
   it("prepares the shared pipeline without starting a generation", async () => {
     const fake = fakeTransformers()
     const runtime = createGemmaBrowserRuntime({
@@ -197,11 +326,11 @@ describe("Gemma browser-generation runtime", () => {
     await runtime.prepare()
 
     expect(fake.loadTransformers).toHaveBeenCalledOnce()
-    expect(fake.pipeline).toHaveBeenCalledOnce()
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
     expect(fake.generator).not.toHaveBeenCalled()
     await runtime.prepare()
     expect(fake.loadTransformers).toHaveBeenCalledOnce()
-    expect(fake.pipeline).toHaveBeenCalledOnce()
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
     await runtime.dispose()
   })
 
@@ -222,11 +351,15 @@ describe("Gemma browser-generation runtime", () => {
     opening.resolve({
       env: fake.env,
       InterruptableStoppingCriteria: FakeStoppingCriteria,
-      pipeline: fake.pipeline,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
       TextStreamer: FakeTextStreamer,
     })
     await disposal
-    expect(fake.dispose).toHaveBeenCalledOnce()
+    expect(fake.TextGenerationPipeline).not.toHaveBeenCalled()
+    expect(fake.dispose).not.toHaveBeenCalled()
   })
 
   it("loads lazily once and formats supplied protected history per run", async () => {
@@ -242,16 +375,36 @@ describe("Gemma browser-generation runtime", () => {
     await collect(runtime.generate(request()))
 
     expect(fake.loadTransformers).toHaveBeenCalledOnce()
-    expect(fake.pipeline).toHaveBeenCalledOnce()
-    expect(fake.pipeline).toHaveBeenCalledWith(
-      "text-generation",
-      "onnx-community/gemma-3-270m-it-ONNX",
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledOnce()
+    expect(fake.autoConfig).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/resolve/2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+      ),
+      { revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0" }
+    )
+    expect(fake.autoTokenizer).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/resolve/2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+      ),
+      expect.objectContaining({
+        revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0",
+      })
+    )
+    expect(fake.autoModelForCausalLM).toHaveBeenCalledWith(
+      expect.stringContaining(
+        "/resolve/2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0"
+      ),
       expect.objectContaining({
         device: "webgpu",
         dtype: "q4f16",
         revision: "2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0",
       })
     )
+    expect(fake.TextGenerationPipeline).toHaveBeenCalledWith({
+      task: "text-generation",
+      model: fake.generator,
+      tokenizer: fake.generator.tokenizer,
+    })
     expect(fake.env.experimental_useCrossOriginStorage).toBe(false)
     expect(fake.promptMessages).toEqual([
       { role: "user", content: "Earlier" },
@@ -808,7 +961,10 @@ describe("Gemma browser-generation runtime", () => {
     opening.resolve({
       env: fake.env,
       InterruptableStoppingCriteria: FakeStoppingCriteria,
-      pipeline: fake.pipeline,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
       TextStreamer: FakeTextStreamer,
     })
     await expect(next).rejects.toThrow("disposed")
@@ -892,7 +1048,10 @@ describe("Gemma browser-generation runtime", () => {
     opening.resolve({
       env: fake.env,
       InterruptableStoppingCriteria: FakeStoppingCriteria,
-      pipeline: fake.pipeline,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
       TextStreamer: FakeTextStreamer,
     })
     await expect(next).rejects.toBe(disposalError)
@@ -921,7 +1080,10 @@ describe("Gemma browser-generation runtime", () => {
     opening.resolve({
       env: fake.env,
       InterruptableStoppingCriteria: FakeStoppingCriteria,
-      pipeline: fake.pipeline,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
       TextStreamer: FakeTextStreamer,
     })
     await expect(secondNext).resolves.toEqual({
@@ -959,7 +1121,10 @@ describe("Gemma browser-generation runtime", () => {
     opening.resolve({
       env: fake.env,
       InterruptableStoppingCriteria: FakeStoppingCriteria,
-      pipeline: fake.pipeline,
+      AutoConfig: { from_pretrained: fake.autoConfig },
+      AutoTokenizer: { from_pretrained: fake.autoTokenizer },
+      AutoModelForCausalLM: { from_pretrained: fake.autoModelForCausalLM },
+      TextGenerationPipeline: fake.TextGenerationPipeline,
       TextStreamer: FakeTextStreamer,
     })
     await expect(secondNext).rejects.toThrow("disposed")

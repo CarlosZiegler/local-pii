@@ -289,6 +289,31 @@ describe("browser runtime controller", () => {
     )
   })
 
+  it("destroys a warm session when its activation becomes stale", async () => {
+    const native = nativeFactory("downloadable")
+    const opening = deferred<LanguageModel>()
+    const session = {
+      promptStreaming: vi.fn(),
+      destroy: vi.fn(async () => undefined),
+    }
+    native.create = vi.fn(() => opening.promise as Promise<LanguageModel>)
+    const controller = createRuntimeController(
+      controllerDependencies({ getNative: () => native })
+    )
+
+    await controller.check()
+    const activation = controller.activate("gemini-nano")
+    await vi.waitFor(() => expect(native.create).toHaveBeenCalledOnce())
+
+    await controller.check()
+    opening.resolve(session as unknown as LanguageModel)
+    await activation
+
+    expect(session.destroy).toHaveBeenCalledOnce()
+    await controller.dispose()
+    expect(session.destroy).toHaveBeenCalledOnce()
+  })
+
   it("prepares Gemma before ready without starting generation", async () => {
     const selected = runtime("gemma-3-270m") as BrowserGenerationRuntime & {
       prepare: ReturnType<typeof vi.fn>
@@ -309,6 +334,24 @@ describe("browser runtime controller", () => {
       status: "ready",
       kind: "gemma-3-270m",
     })
+  })
+
+  it("owns failed preparation cleanup exactly once", async () => {
+    const candidate = runtime("gemma-3-270m") as BrowserGenerationRuntime & {
+      prepare: ReturnType<typeof vi.fn>
+    }
+    const failure = new Error("preparation failed")
+    candidate.prepare = vi.fn(async () => {
+      throw failure
+    })
+    const controller = createRuntimeController(
+      controllerDependencies({ loadGemma: async () => candidate })
+    )
+
+    await controller.check()
+    await expect(controller.activate("gemma-3-270m")).rejects.toBe(failure)
+    await controller.dispose()
+    expect(candidate.dispose).toHaveBeenCalledOnce()
   })
 
   it("rejects prewarm abort promptly while disposal drains a late pipeline", async () => {
@@ -358,18 +401,28 @@ describe("browser runtime controller", () => {
     await Promise.resolve()
     expect(disposalSettled).toBe(false)
 
+    const model = {
+      tokenizer: { apply_chat_template: () => "" },
+      dispose: generatorDispose,
+    }
     releaseLoader({
       env: {},
       InterruptableStoppingCriteria: class {},
-      pipeline: async () => ({
-        tokenizer: { apply_chat_template: () => "" },
-        dispose: generatorDispose,
+      AutoConfig: { from_pretrained: vi.fn(async () => ({})) },
+      AutoTokenizer: {
+        from_pretrained: vi.fn(async () => model.tokenizer),
+      },
+      AutoModelForCausalLM: {
+        from_pretrained: vi.fn(async () => model),
+      },
+      TextGenerationPipeline: vi.fn(function (options: { model: object }) {
+        return options.model
       }),
       TextStreamer: class {},
     })
     await disposing
     await expect(activation).rejects.toBe(reason)
-    expect(generatorDispose).toHaveBeenCalledOnce()
+    expect(generatorDispose).not.toHaveBeenCalled()
   })
 
   it("fails overlapping activation visibly", async () => {
