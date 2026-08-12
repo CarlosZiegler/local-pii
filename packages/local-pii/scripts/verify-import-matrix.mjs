@@ -1,11 +1,10 @@
 import { readFile } from "node:fs/promises"
-import { createRequire, registerHooks } from "node:module"
+import { spawnSync } from "node:child_process"
 import { dirname, resolve } from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { fileURLToPath } from "node:url"
 import { build } from "esbuild"
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..")
-const require = createRequire(import.meta.url)
 const manifest = JSON.parse(
   await readFile(resolve(packageRoot, "package.json"), "utf8")
 )
@@ -28,70 +27,29 @@ function assert(condition, message) {
   if (!condition) throw new Error(message)
 }
 
-async function loadDirectTarget(subpath, target, kind) {
+function loadDirectTarget(subpath, target, kind) {
   const absolute = resolve(packageRoot, target)
-  const loaded =
-    kind === "import"
-      ? await import(`${pathToFileURL(absolute).href}?matrix=${Date.now()}`)
-      : require(absolute)
   const expected = expectedRuntimeExport.get(subpath)
+  const runner = resolve(packageRoot, "scripts/load-export-target.mjs")
+  const loader = resolve(packageRoot, "scripts/expo-matrix-loader.mjs")
+  const result = spawnSync(
+    process.execPath,
+    [
+      "--no-warnings",
+      "--experimental-loader",
+      loader,
+      runner,
+      kind,
+      absolute,
+      expected,
+    ],
+    { encoding: "utf8" }
+  )
   assert(
-    typeof loaded[expected] === "function",
-    `${subpath} ${kind} target did not expose ${expected}`
+    result.status === 0,
+    `${subpath} ${kind} target failed direct execution:\n${result.stderr || result.stdout}`
   )
 }
-
-const expoStubs = new Map([
-  [
-    "expo-asset",
-    `export class Asset {
-      static fromModule() {
-        return { localUri: "file:///rampart.onnx", uri: "file:///rampart.onnx", async downloadAsync() {} }
-      }
-    }`,
-  ],
-  [
-    "expo-file-system",
-    "export const cacheDirectory = null; export async function copyAsync() {}",
-  ],
-  [
-    "expo-crypto",
-    "export function getRandomBytes(length) { return new Uint8Array(length) }",
-  ],
-  [
-    "expo-secure-store",
-    "export async function getItemAsync() { return null }; export async function setItemAsync() {}",
-  ],
-  [
-    "onnxruntime-react-native",
-    "export const InferenceSession = {}; export class Tensor {}",
-  ],
-  [
-    "@local-pii/model-rampart",
-    "export const vocab = []; export const labels = []; export default { vocab, labels }",
-  ],
-])
-
-const expoStubPrefix = "local-pii-matrix-stub:"
-registerHooks({
-  resolve(specifier, context, nextResolve) {
-    if (expoStubs.has(specifier)) {
-      return { shortCircuit: true, url: `${expoStubPrefix}${specifier}` }
-    }
-    return nextResolve(specifier, context)
-  },
-  load(url, context, nextLoad) {
-    if (url.startsWith(expoStubPrefix)) {
-      const specifier = url.slice(expoStubPrefix.length)
-      return {
-        format: "module",
-        shortCircuit: true,
-        source: expoStubs.get(specifier),
-      }
-    }
-    return nextLoad(url, context)
-  },
-})
 
 for (const [subpath, targets] of publicExports) {
   assert(typeof targets === "object", `${subpath} must use conditional exports`)
@@ -100,7 +58,7 @@ for (const [subpath, targets] of publicExports) {
     await readFile(absolute)
   }
   for (const condition of ["import", "require"]) {
-    await loadDirectTarget(subpath, targets[condition], condition)
+    loadDirectTarget(subpath, targets[condition], condition)
   }
 }
 
@@ -109,7 +67,7 @@ assert(
   "package.json must advertise a react-native target"
 )
 await readFile(resolve(packageRoot, manifest["react-native"]))
-await loadDirectTarget(".", manifest["react-native"], "import")
+loadDirectTarget(".", manifest["react-native"], "import")
 
 const fixtureRoot = resolve(packageRoot, "test/import-matrix")
 const permittedExternal = {

@@ -1,9 +1,35 @@
 import { expect, test, type Page } from "@playwright/test"
-import { readdir } from "node:fs/promises"
-import { resolve } from "node:path"
+import { readdir, stat } from "node:fs/promises"
+import { extname, resolve, sep } from "node:path"
 
 const BASE_ORIGIN = "http://127.0.0.1:4173"
 const TEST_EMAIL = "ana@acme.com"
+const STATIC_ROOT = resolve(process.cwd(), "out")
+
+async function isEmittedStaticPath(pathname: string) {
+  try {
+    const relative = decodeURIComponent(pathname).replace(/^\/+/, "")
+    const candidates = extname(relative)
+      ? [relative]
+      : relative === ""
+        ? ["index.html"]
+        : [`${relative}.html`, `${relative}/index.html`]
+    for (const candidate of candidates) {
+      const file = resolve(STATIC_ROOT, candidate)
+      if (file !== STATIC_ROOT && !file.startsWith(`${STATIC_ROOT}${sep}`)) {
+        continue
+      }
+      try {
+        if ((await stat(file)).isFile()) return true
+      } catch {
+        // Try the next static-export candidate.
+      }
+    }
+  } catch {
+    // Invalid and non-emitted paths are not allowed static requests.
+  }
+  return false
+}
 
 async function installFakeChromePromptApi(page: Page) {
   await page.addInitScript(() => {
@@ -98,18 +124,13 @@ test.beforeEach(async ({ page }) => {
       (url.protocol === "https:" && url.hostname.endsWith(".cdn.hf.co"))
     const serverAction = "next-action" in headers
     const mutating = !["GET", "HEAD"].includes(request.method())
-    const apiPath = url.pathname === "/api" || url.pathname.startsWith("/api/")
-    const backendLikePath =
-      /(^|\/)(api|graphql|inference|rpc|server-action|telemetry)(\/|$)/i.test(
-        url.pathname
-      )
+    const allowedSameOrigin =
+      sameOrigin && !mutating && (await isEmittedStaticPath(url.pathname))
 
     if (!sameOrigin) externalRequests.push(request.url())
     if (
       serverAction ||
-      mutating ||
-      apiPath ||
-      (sameOrigin && backendLikePath) ||
+      (sameOrigin && !allowedSameOrigin) ||
       (!sameOrigin && (!artifactOrigin || request.method() !== "GET"))
     ) {
       violations.push(`${request.method()} ${request.url()}`)
@@ -268,4 +289,31 @@ test("blocks WebSocket inference transports", async ({ page }) => {
     "WEBSOCKET ws://127.0.0.1:4173/inference",
   ])
   matrix?.violations.splice(0)
+})
+
+test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
+  await page.goto("/en/docs/playground")
+  await page.evaluate(async () => {
+    await Promise.allSettled([
+      fetch("/v1/chat/completions?prompt=secret"),
+      fetch("/generate?prompt=secret"),
+    ])
+  })
+  const matrix = (
+    page as Page & {
+      __matrix?: { consoleErrors: string[]; violations: string[] }
+    }
+  ).__matrix
+  expect(matrix?.violations.toSorted()).toEqual(
+    [
+      "GET http://127.0.0.1:4173/v1/chat/completions?prompt=secret",
+      "GET http://127.0.0.1:4173/generate?prompt=secret",
+    ].toSorted()
+  )
+  expect(matrix?.consoleErrors).toHaveLength(2)
+  for (const error of matrix?.consoleErrors ?? []) {
+    expect(error).toContain("ERR_BLOCKED_BY_CLIENT")
+  }
+  matrix?.violations.splice(0)
+  matrix?.consoleErrors.splice(0)
 })
