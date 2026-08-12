@@ -102,11 +102,12 @@ test.beforeEach(async ({ page }) => {
     const serverAction = "next-action" in headers
     const mutating = !["GET", "HEAD"].includes(request.method())
     const eventSource = request.resourceType() === "eventsource"
+    const rscToken = url.searchParams.get("_rsc")
     const allowedStaticQuery =
       url.searchParams.size === 1 &&
       url.searchParams.has("_rsc") &&
-      Boolean(url.searchParams.get("_rsc")) &&
-      !url.searchParams.get("_rsc")?.includes(TEST_EMAIL)
+      Boolean(rscToken && /^[A-Za-z0-9_-]{16}$/.test(rscToken)) &&
+      url.pathname.includes("/__next.")
     const allowedSameOrigin =
       sameOrigin &&
       (url.search === "" || allowedStaticQuery) &&
