@@ -101,7 +101,7 @@ export function ChatShell({
             <ConversationContent aria-live="polite">
               {messages.length === 0 ? (
                 <ConversationEmptyState
-                  description="Try: Email ana@acme.com and ask the model to repeat it."
+                  description="Try: Draft a support reply for Ana about a delayed order (ana@acme.com)."
                   icon={<ShieldCheckIcon className="size-6" />}
                   title="Private local chat"
                 />

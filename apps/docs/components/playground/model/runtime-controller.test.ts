@@ -182,6 +182,42 @@ describe("browser runtime controller", () => {
     expect(loadGemma).not.toHaveBeenCalled()
   })
 
+  it("clears the explicit Gemma cache and rechecks availability", async () => {
+    const deleteGemmaCache = vi.fn(async () => undefined)
+    let cached = true
+    const controller = createRuntimeController(
+      controllerDependencies({
+        isGemmaCached: async () => cached,
+        deleteGemmaCache: async () => {
+          deleteGemmaCache()
+          cached = false
+        },
+      })
+    )
+
+    await controller.check()
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "choice-required",
+      options: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "gemma-3-270m",
+          availability: "ready",
+        }),
+      ]),
+    })
+    await controller.clearGemmaCache()
+    expect(deleteGemmaCache).toHaveBeenCalledOnce()
+    expect(controller.getSnapshot()).toMatchObject({
+      status: "choice-required",
+      options: expect.arrayContaining([
+        expect.objectContaining({
+          kind: "gemma-3-270m",
+          availability: "requires-activation",
+        }),
+      ]),
+    })
+  })
+
   it("treats an injected create-only native capability as unavailable", async () => {
     const createOnly = {
       create: vi.fn(),

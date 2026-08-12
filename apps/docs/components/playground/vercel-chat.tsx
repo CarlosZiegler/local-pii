@@ -1,5 +1,10 @@
 import { useChat } from "@ai-sdk/react"
-import { createAnonymizer, token, type PiiSession } from "local-pii"
+import {
+  createAnonymizer,
+  token,
+  type NerBackend,
+  type PiiSession,
+} from "local-pii"
 import { withPii } from "local-pii/ai-sdk"
 import { DirectChatTransport, ToolLoopAgent, type ChatStatus } from "ai"
 import { useCallback, useMemo, useRef, useState } from "react"
@@ -32,22 +37,27 @@ import { useOptionalLocalRuntime } from "./runtime-provider"
 export interface VercelChatProps {
   runtime?: BrowserGenerationRuntime
   runtimeName: string
+  detection?: NerBackend
 }
 
-function createSession(): PiiSession {
-  return createAnonymizer({ placeholders: token() }).createSession()
+function createSession(detection?: NerBackend): PiiSession {
+  return createAnonymizer({ detection, placeholders: token() }).createSession()
 }
 
 function toError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause))
 }
 
-export function VercelChat({ runtime, runtimeName }: VercelChatProps) {
+export function VercelChat({
+  runtime,
+  runtimeName,
+  detection,
+}: VercelChatProps) {
   const localRuntime = useOptionalLocalRuntime()
   const selectedRuntime = runtime ?? localRuntime?.runtime
   const gate = localRuntime?.gate
   const gateSnapshot = localRuntime?.gateSnapshot
-  const [session, setSession] = useState(createSession)
+  const [session, setSession] = useState(() => createSession(detection))
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const [controlError, setControlError] = useState<Error>()
   const [resetting, setResetting] = useState(false)
@@ -141,7 +151,7 @@ export function VercelChat({ runtime, runtimeName }: VercelChatProps) {
         setInspection(undefined)
       },
       createNewSession() {
-        setSession(createSession())
+        setSession(createSession(detection))
       },
     })
     setControlError(failure)

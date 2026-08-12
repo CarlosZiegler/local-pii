@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import type { NerBackend } from "local-pii"
 import { describe, expect, it, vi } from "vitest"
 import type {
   BrowserGenerationRuntime,
@@ -34,6 +35,60 @@ function tokenFrom(request: ProtectedBrowserRequest): string {
 }
 
 describe("VercelChat", () => {
+  it("uses the supplied local Detection adapter before browser generation", async () => {
+    const requests: ProtectedBrowserRequest[] = []
+    const detection: NerBackend = {
+      name: "test-rampart",
+      async load() {},
+      async detect(text) {
+        const start = text.indexOf("Carlos")
+        return start < 0
+          ? []
+          : [
+              {
+                type: "GIVEN_NAME",
+                source: "ner",
+                confidence: 1,
+                text: "Carlos",
+                start,
+                end: start + "Carlos".length,
+              },
+            ]
+      },
+      async dispose() {},
+    }
+    const runtime: BrowserGenerationRuntime = {
+      id: "detection-runtime",
+      disclosure: DISCLOSURE,
+      generate(request) {
+        requests.push(request)
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield "Drafted a support reply."
+          },
+        }
+      },
+      dispose: vi.fn(async () => undefined),
+    }
+    const user = userEvent.setup()
+    render(
+      <VercelChat
+        detection={detection}
+        runtime={runtime}
+        runtimeName="Fake local model"
+      />
+    )
+
+    await user.type(
+      screen.getByLabelText("Message"),
+      "Draft a support reply for Carlos about a delayed order."
+    )
+    await user.click(screen.getByRole("button", { name: "Submit" }))
+    await waitFor(() => expect(requests).toHaveLength(1))
+    expect(requests[0]?.protectedContent).not.toContain("Carlos")
+    expect(requests[0]?.protectedContent).toMatch(/PII[0-9A-HJKMNP-TV-Z]+/)
+  })
+
   it("protects the real runtime request once, restores output, and inspects that exact request", async () => {
     const requests: ProtectedBrowserRequest[] = []
     const descriptor = Object.getOwnPropertyDescriptor(

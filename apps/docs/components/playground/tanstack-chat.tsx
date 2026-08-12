@@ -1,5 +1,10 @@
 import { useChat } from "@tanstack/ai-react"
-import { createAnonymizer, token, type PiiSession } from "local-pii"
+import {
+  createAnonymizer,
+  token,
+  type NerBackend,
+  type PiiSession,
+} from "local-pii"
 import type { ChatStatus } from "ai"
 import { useCallback, useMemo, useRef, useState } from "react"
 import {
@@ -27,23 +32,29 @@ import { createTanStackPlaygroundConnection } from "./tanstack-playground-connec
 export interface TanStackChatProps {
   runtime: BrowserGenerationRuntime
   runtimeName: string
+  detection?: NerBackend
 }
 
-function createSession(): PiiSession {
-  return createAnonymizer({ placeholders: token() }).createSession()
+function createSession(detection?: NerBackend): PiiSession {
+  return createAnonymizer({ detection, placeholders: token() }).createSession()
 }
 
 function toError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause))
 }
 
-export function TanStackChat({ runtime, runtimeName }: TanStackChatProps) {
+export function TanStackChat({
+  runtime,
+  runtimeName,
+  detection,
+}: TanStackChatProps) {
   const [conversationKey, setConversationKey] = useState(0)
 
   return (
     <TanStackPrivateConversation
       key={conversationKey}
       onConversationReset={() => setConversationKey((key) => key + 1)}
+      detection={detection}
       runtime={runtime}
       runtimeName={runtimeName}
     />
@@ -58,11 +69,12 @@ function TanStackPrivateConversation({
   onConversationReset,
   runtime,
   runtimeName,
+  detection,
 }: TanStackPrivateConversationProps) {
   const localRuntime = useOptionalLocalRuntime()
   const gate = localRuntime?.gate
   const gateSnapshot = localRuntime?.gateSnapshot
-  const [session] = useState(createSession)
+  const [session] = useState(() => createSession(detection))
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const [controlError, setControlError] = useState<Error>()
   const [resetting, setResetting] = useState(false)

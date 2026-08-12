@@ -46,6 +46,8 @@ export interface RuntimeControllerDependencies {
   readonly getNative?: () => DiscoverableChromePromptFactory | undefined
   /** Inspect the complete static Gemma artifact cache without loading it. */
   readonly isGemmaCached?: () => Promise<boolean>
+  /** Delete the complete explicit Gemma artifact cache on user request. */
+  readonly deleteGemmaCache?: () => Promise<void>
   /** Construct the native runtime after explicit activation. */
   readonly createNativeRuntime?: (
     factory: ChromePromptFactory
@@ -60,6 +62,7 @@ export interface RuntimeControllerDependencies {
 export interface RuntimeController {
   check(): Promise<void>
   activate(kind: RuntimeKind, signal?: AbortSignal): Promise<void>
+  clearGemmaCache(): Promise<void>
   getSnapshot(): RuntimeSnapshot
   getRuntime(): BrowserGenerationRuntime | undefined
   subscribe(listener: () => void): () => void
@@ -204,6 +207,12 @@ export function createRuntimeController(
   }
   const isGemmaCached =
     dependencies.isGemmaCached ?? (() => hasCachedGemmaArtifacts())
+  const deleteGemmaCache =
+    dependencies.deleteGemmaCache ??
+    (async () => {
+      const storage = typeof caches === "undefined" ? undefined : caches
+      await storage?.delete(GEMMA_CACHE_NAME)
+    })
 
   let snapshot: RuntimeSnapshot = { status: "checking", operationId: 0 }
   let currentRuntime: BrowserGenerationRuntime | undefined
@@ -640,9 +649,26 @@ export function createRuntimeController(
     return disposal
   }
 
+  const clearGemmaCache = async (): Promise<void> => {
+    if (disposed) throw new Error("The runtime controller is disposed")
+    if (currentActivation) throw new RuntimeActivationBusyError()
+    const runtime = currentRuntime
+    if (
+      runtime &&
+      snapshot.status === "ready" &&
+      snapshot.kind === "gemma-3-270m"
+    ) {
+      currentRuntime = undefined
+      await runtime.dispose()
+    }
+    await deleteGemmaCache()
+    await check()
+  }
+
   return {
     check,
     activate,
+    clearGemmaCache,
     getSnapshot: () => snapshot,
     getRuntime: () =>
       snapshot.status === "ready" ? currentRuntime : undefined,

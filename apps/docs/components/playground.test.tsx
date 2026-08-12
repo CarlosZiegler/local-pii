@@ -92,6 +92,7 @@ describe("runtime choice accessibility", () => {
     const controller: RuntimeController = {
       activate: vi.fn(async () => undefined),
       check: vi.fn(async () => undefined),
+      clearGemmaCache: vi.fn(async () => undefined),
       dispose: vi.fn(async () => undefined),
       getRuntime: () => runtime,
       getSnapshot: () => readySnapshot,
