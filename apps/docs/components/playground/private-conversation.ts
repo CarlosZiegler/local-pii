@@ -1,5 +1,6 @@
 import type { BrowserGenerationRuntime } from "./model/types"
 import { isExpectedChatCancellation } from "./model/settle-chat-stop"
+import { createProtectedBrowserRequest } from "./model/protected-request"
 
 export interface PrivateConversationReset {
   blockSubmissions(blocked: boolean): void
@@ -96,7 +97,13 @@ export function recordGenerationRunFailures(
       let source: AsyncIterable<string>
       try {
         source = runtime.generate(
-          signal === input.signal ? input : { ...input, signal }
+          signal === input.signal
+            ? input
+            : createProtectedBrowserRequest({
+                protectedContent: input.protectedContent,
+                protectedHistory: input.protectedHistory,
+                signal,
+              })
         )
       } catch (cause) {
         run?.recordFailure(cause)

@@ -1,4 +1,5 @@
 import { useChat } from "@tanstack/ai-react"
+import type { ConnectConnectionAdapter } from "@tanstack/ai-client"
 import { createAnonymizer, token, type PiiSession } from "local-pii"
 import { piiConnection } from "local-pii/tanstack"
 import type { ChatStatus } from "ai"
@@ -14,8 +15,9 @@ import {
 import {
   createProtectionObserver,
   observeBrowserRuntime,
+  type ProtectionObserver,
 } from "./protection-observer"
-import { withPlaygroundGate } from "./generation-gate"
+import { withPlaygroundGate, type GenerationGate } from "./generation-gate"
 import { isExpectedChatCancellation } from "./model/settle-chat-stop"
 import { createBrowserConnection } from "./model/tanstack-connection"
 import type { BrowserGenerationRuntime } from "./model/types"
@@ -33,6 +35,28 @@ function createSession(): PiiSession {
 
 function toError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause))
+}
+
+interface TanStackPlaygroundConnectionOptions {
+  readonly gate?: GenerationGate
+  readonly getRun: () => GenerationRun | null
+  readonly observer: ProtectionObserver
+  readonly runtime: BrowserGenerationRuntime
+}
+
+/** Compose the exact public adapter path used by the TanStack playground. */
+export function createTanStackPlaygroundConnection({
+  gate,
+  getRun,
+  observer,
+  runtime,
+}: TanStackPlaygroundConnectionOptions): ConnectConnectionAdapter {
+  const gated = gate ? withPlaygroundGate(runtime, gate, "tanstack") : runtime
+  const tracked = recordGenerationRunFailures(gated, getRun)
+  const observed = observeBrowserRuntime(tracked, observer)
+  return piiConnection(createBrowserConnection(observed), {
+    session: observer.session,
+  })
 }
 
 export function TanStackChat({ runtime, runtimeName }: TanStackChatProps) {
@@ -72,11 +96,11 @@ function TanStackPrivateConversation({
     [session]
   )
   const connection = useMemo(() => {
-    const gated = gate ? withPlaygroundGate(runtime, gate, "tanstack") : runtime
-    const tracked = recordGenerationRunFailures(gated, () => activeRun.current)
-    const observed = observeBrowserRuntime(tracked, observer)
-    return piiConnection(createBrowserConnection(observed), {
-      session: observer.session,
+    return createTanStackPlaygroundConnection({
+      gate,
+      getRun: () => activeRun.current,
+      observer,
+      runtime,
     })
   }, [gate, observer, runtime])
   const { clear, error, isLoading, messages, sendMessage, stop } = useChat({

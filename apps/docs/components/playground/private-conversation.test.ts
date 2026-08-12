@@ -5,6 +5,10 @@ import {
   resetPrivateConversation,
 } from "./private-conversation"
 import type { BrowserGenerationRuntime } from "./model/types"
+import {
+  assertProtectedBrowserRequest,
+  createProtectedBrowserRequest,
+} from "./model/protected-request"
 
 describe("private conversation lifecycle", () => {
   it("runs the reset sequence in order and returns the primary failure", async () => {
@@ -221,9 +225,9 @@ describe("private conversation lifecycle", () => {
     const run = registry.begin()
     const framework = new AbortController()
     const runReason = new DOMException("reset", "AbortError")
-    const request = Object.freeze({
+    const request = createProtectedBrowserRequest({
       protectedContent: "hello",
-      protectedHistory: Object.freeze([]),
+      protectedHistory: [],
       signal: framework.signal,
     })
     let receivedSignal: AbortSignal | undefined
@@ -236,6 +240,7 @@ describe("private conversation lifecycle", () => {
         artifacts: { kind: "browser-managed" },
       },
       generate(input) {
+        assertProtectedBrowserRequest(input)
         receivedSignal = input.signal
         return {
           async *[Symbol.asyncIterator]() {
