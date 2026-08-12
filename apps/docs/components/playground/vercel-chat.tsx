@@ -4,10 +4,11 @@ import {
   token,
   type NerBackend,
   type PiiSession,
+  type PiiType,
 } from "local-pii"
 import { withPii } from "local-pii/ai-sdk"
 import { DirectChatTransport, ToolLoopAgent, type ChatStatus } from "ai"
-import { useCallback, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ChatShell,
   OTHER_CONVERSATION_BUSY_REASON,
@@ -33,15 +34,29 @@ import { withPlaygroundGate } from "./generation-gate"
 import type { BrowserGenerationRuntime } from "./model/types"
 import type { PrivacyInspection } from "./privacy-inspector"
 import { useOptionalLocalRuntime } from "./runtime-provider"
+import { serializeDetectionKeep } from "../playground"
 
 export interface VercelChatProps {
   runtime?: BrowserGenerationRuntime
   runtimeName: string
   detection?: NerBackend
+  /**
+   * Model Detection categories retained in protected text (anonymizer `keep`).
+   * Always pass an explicit list from the playground policy; `[]` means redact
+   * every listed model category.
+   */
+  keep?: readonly PiiType[]
 }
 
-function createSession(detection?: NerBackend): PiiSession {
-  return createAnonymizer({ detection, placeholders: token() }).createSession()
+function createSession(
+  detection: NerBackend | undefined,
+  keep: readonly PiiType[]
+): PiiSession {
+  return createAnonymizer({
+    detection,
+    placeholders: token(),
+    keep: [...keep],
+  }).createSession()
 }
 
 function toError(cause: unknown): Error {
@@ -52,18 +67,25 @@ export function VercelChat({
   runtime,
   runtimeName,
   detection,
+  keep = [],
 }: VercelChatProps) {
   const localRuntime = useOptionalLocalRuntime()
   const selectedRuntime = runtime ?? localRuntime?.runtime
   const gate = localRuntime?.gate
   const gateSnapshot = localRuntime?.gateSnapshot
-  const [session, setSession] = useState(() => createSession(detection))
+  const [session, setSession] = useState(() => createSession(detection, keep))
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const [controlError, setControlError] = useState<Error>()
   const [resetting, setResetting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const runs = useRef<GenerationRunRegistry>(createGenerationRunRegistry())
   const activeRun = useRef<GenerationRun | null>(null)
+  const keepKey = serializeDetectionKeep(keep)
+  const keepRef = useRef(keep)
+  keepRef.current = keep
+  const detectionRef = useRef(detection)
+  detectionRef.current = detection
+  const policyMounted = useRef(false)
 
   const observer = useMemo(
     () => createProtectionObserver(session, setInspection),
@@ -151,11 +173,22 @@ export function VercelChat({
         setInspection(undefined)
       },
       createNewSession() {
-        setSession(createSession(detection))
+        setSession(createSession(detectionRef.current, keepRef.current))
       },
     })
     setControlError(failure)
   }, [clearError, session, setMessages, stop])
+
+  const handleNewChatRef = useRef(handleNewChat)
+  handleNewChatRef.current = handleNewChat
+
+  useEffect(() => {
+    if (!policyMounted.current) {
+      policyMounted.current = true
+      return
+    }
+    void handleNewChatRef.current()
+  }, [keepKey])
 
   const handleSubmit = useCallback(
     async (text: string) => {

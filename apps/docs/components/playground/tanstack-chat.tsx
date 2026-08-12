@@ -4,9 +4,10 @@ import {
   token,
   type NerBackend,
   type PiiSession,
+  type PiiType,
 } from "local-pii"
 import type { ChatStatus } from "ai"
-import { useCallback, useMemo, useRef, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {
   ChatShell,
   OTHER_CONVERSATION_BUSY_REASON,
@@ -14,7 +15,6 @@ import {
 } from "./chat-shell"
 import {
   createGenerationRunRegistry,
-  recordGenerationRunFailures,
   resetPrivateConversation,
   type GenerationRun,
   type GenerationRunRegistry,
@@ -28,15 +28,29 @@ import type { BrowserGenerationRuntime } from "./model/types"
 import type { PrivacyInspection } from "./privacy-inspector"
 import { useOptionalLocalRuntime } from "./runtime-provider"
 import { createTanStackPlaygroundConnection } from "./tanstack-playground-connection"
+import { serializeDetectionKeep } from "../playground"
 
 export interface TanStackChatProps {
   runtime: BrowserGenerationRuntime
   runtimeName: string
   detection?: NerBackend
+  /**
+   * Model Detection categories retained in protected text (anonymizer `keep`).
+   * Always pass an explicit list from the playground policy; `[]` means redact
+   * every listed model category.
+   */
+  keep?: readonly PiiType[]
 }
 
-function createSession(detection?: NerBackend): PiiSession {
-  return createAnonymizer({ detection, placeholders: token() }).createSession()
+function createSession(
+  detection: NerBackend | undefined,
+  keep: readonly PiiType[]
+): PiiSession {
+  return createAnonymizer({
+    detection,
+    placeholders: token(),
+    keep: [...keep],
+  }).createSession()
 }
 
 function toError(cause: unknown): Error {
@@ -47,6 +61,7 @@ export function TanStackChat({
   runtime,
   runtimeName,
   detection,
+  keep = [],
 }: TanStackChatProps) {
   const [conversationKey, setConversationKey] = useState(0)
 
@@ -55,14 +70,19 @@ export function TanStackChat({
       key={conversationKey}
       onConversationReset={() => setConversationKey((key) => key + 1)}
       detection={detection}
+      keep={keep}
       runtime={runtime}
       runtimeName={runtimeName}
     />
   )
 }
 
-interface TanStackPrivateConversationProps extends TanStackChatProps {
+interface TanStackPrivateConversationProps extends Omit<
+  TanStackChatProps,
+  "keep"
+> {
   onConversationReset(): void
+  keep: readonly PiiType[]
 }
 
 function TanStackPrivateConversation({
@@ -70,17 +90,20 @@ function TanStackPrivateConversation({
   runtime,
   runtimeName,
   detection,
+  keep,
 }: TanStackPrivateConversationProps) {
   const localRuntime = useOptionalLocalRuntime()
   const gate = localRuntime?.gate
   const gateSnapshot = localRuntime?.gateSnapshot
-  const [session] = useState(() => createSession(detection))
+  const [session] = useState(() => createSession(detection, keep))
   const [inspection, setInspection] = useState<PrivacyInspection>()
   const [controlError, setControlError] = useState<Error>()
   const [resetting, setResetting] = useState(false)
   const [stopping, setStopping] = useState(false)
   const runs = useRef<GenerationRunRegistry>(createGenerationRunRegistry())
   const activeRun = useRef<GenerationRun | null>(null)
+  const keepKey = serializeDetectionKeep(keep)
+  const policyMounted = useRef(false)
   const observer = useMemo(
     () => createProtectionObserver(session, setInspection),
     [session]
@@ -152,6 +175,17 @@ function TanStackPrivateConversation({
     })
     setControlError(failure)
   }, [clear, onConversationReset, session, stop])
+
+  const handleNewChatRef = useRef(handleNewChat)
+  handleNewChatRef.current = handleNewChat
+
+  useEffect(() => {
+    if (!policyMounted.current) {
+      policyMounted.current = true
+      return
+    }
+    void handleNewChatRef.current()
+  }, [keepKey])
 
   const handleSubmit = useCallback(
     async (text: string) => {
