@@ -94,6 +94,7 @@ export function RuntimePlayground() {
         model: "/models/rampart-q4.onnx",
         vocab: rampartAssets.vocab,
         labels: rampartAssets.labels,
+        executionProviders: ["wasm"],
       }),
     []
   )
