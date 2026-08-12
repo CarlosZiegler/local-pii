@@ -1,35 +1,11 @@
 import { expect, test, type Page } from "@playwright/test"
-import { readdir, stat } from "node:fs/promises"
-import { extname, resolve, sep } from "node:path"
+import { readdir } from "node:fs/promises"
+import { resolve } from "node:path"
+import { findStaticFile } from "./static-path.mjs"
 
 const BASE_ORIGIN = "http://127.0.0.1:4173"
 const TEST_EMAIL = "ana@acme.com"
 const STATIC_ROOT = resolve(process.cwd(), "out")
-
-async function isEmittedStaticPath(pathname: string) {
-  try {
-    const relative = decodeURIComponent(pathname).replace(/^\/+/, "")
-    const candidates = extname(relative)
-      ? [relative]
-      : relative === ""
-        ? ["index.html"]
-        : [`${relative}.html`, `${relative}/index.html`]
-    for (const candidate of candidates) {
-      const file = resolve(STATIC_ROOT, candidate)
-      if (file !== STATIC_ROOT && !file.startsWith(`${STATIC_ROOT}${sep}`)) {
-        continue
-      }
-      try {
-        if ((await stat(file)).isFile()) return true
-      } catch {
-        // Try the next static-export candidate.
-      }
-    }
-  } catch {
-    // Invalid and non-emitted paths are not allowed static requests.
-  }
-  return false
-}
 
 async function installFakeChromePromptApi(page: Page) {
   await page.addInitScript(() => {
@@ -126,7 +102,10 @@ test.beforeEach(async ({ page }) => {
     const mutating = !["GET", "HEAD"].includes(request.method())
     const eventSource = request.resourceType() === "eventsource"
     const allowedSameOrigin =
-      sameOrigin && !mutating && (await isEmittedStaticPath(url.pathname))
+      sameOrigin &&
+      url.search === "" &&
+      !mutating &&
+      Boolean(await findStaticFile(STATIC_ROOT, url.pathname))
 
     if (!sameOrigin) externalRequests.push(request.url())
     if (
@@ -303,6 +282,7 @@ test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
     await Promise.allSettled([
       fetch("/v1/chat/completions?prompt=secret"),
       fetch("/generate?prompt=secret"),
+      fetch(`/en/docs/playground?email=${encodeURIComponent(TEST_EMAIL)}`),
       new Promise<void>((resolveAttempt) => {
         const events = new EventSource("/en/docs/playground")
         events.addEventListener(
@@ -325,6 +305,7 @@ test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
     [
       "GET http://127.0.0.1:4173/v1/chat/completions?prompt=secret",
       "GET http://127.0.0.1:4173/generate?prompt=secret",
+      "GET http://127.0.0.1:4173/en/docs/playground?email=ana%40acme.com",
       "EVENTSOURCE http://127.0.0.1:4173/en/docs/playground",
     ].toSorted()
   )

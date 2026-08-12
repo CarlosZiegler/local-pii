@@ -1,7 +1,5 @@
 import { useChat } from "@tanstack/ai-react"
-import type { ConnectConnectionAdapter } from "@tanstack/ai-client"
 import { createAnonymizer, token, type PiiSession } from "local-pii"
-import { piiConnection } from "local-pii/tanstack"
 import type { ChatStatus } from "ai"
 import { useCallback, useMemo, useRef, useState } from "react"
 import {
@@ -18,15 +16,13 @@ import {
 } from "./private-conversation"
 import {
   createProtectionObserver,
-  observeBrowserRuntime,
   type ProtectionObserver,
 } from "./protection-observer"
-import { withPlaygroundGate, type GenerationGate } from "./generation-gate"
 import { isExpectedChatCancellation } from "./model/settle-chat-stop"
-import { createBrowserConnection } from "./model/tanstack-connection"
 import type { BrowserGenerationRuntime } from "./model/types"
 import type { PrivacyInspection } from "./privacy-inspector"
 import { useOptionalLocalRuntime } from "./runtime-provider"
+import { createTanStackPlaygroundConnection } from "./tanstack-playground-connection"
 
 export interface TanStackChatProps {
   runtime: BrowserGenerationRuntime
@@ -39,28 +35,6 @@ function createSession(): PiiSession {
 
 function toError(cause: unknown): Error {
   return cause instanceof Error ? cause : new Error(String(cause))
-}
-
-interface TanStackPlaygroundConnectionOptions {
-  readonly gate?: GenerationGate
-  readonly getRun: () => GenerationRun | null
-  readonly observer: ProtectionObserver
-  readonly runtime: BrowserGenerationRuntime
-}
-
-/** Compose the exact public adapter path used by the TanStack playground. */
-export function createTanStackPlaygroundConnection({
-  gate,
-  getRun,
-  observer,
-  runtime,
-}: TanStackPlaygroundConnectionOptions): ConnectConnectionAdapter {
-  const gated = gate ? withPlaygroundGate(runtime, gate, "tanstack") : runtime
-  const tracked = recordGenerationRunFailures(gated, getRun)
-  const observed = observeBrowserRuntime(tracked, observer)
-  return piiConnection(createBrowserConnection(observed), {
-    session: observer.session,
-  })
 }
 
 export function TanStackChat({ runtime, runtimeName }: TanStackChatProps) {

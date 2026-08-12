@@ -18,6 +18,16 @@ export interface PrivacyInspectorProps {
   runtimeName: string
 }
 
+function keyedHistory(history: CommittedPrivacyInspection["protectedHistory"]) {
+  const occurrences = new Map<string, number>()
+  return history.map((turn) => {
+    const contentKey = `${turn.role}\u0000${turn.protectedContent}`
+    const occurrence = (occurrences.get(contentKey) ?? 0) + 1
+    occurrences.set(contentKey, occurrence)
+    return { key: `${contentKey}\u0000${occurrence}`, turn }
+  })
+}
+
 export function PrivacyInspector({
   inspection,
   runtimeName,
@@ -64,14 +74,16 @@ export function PrivacyInspector({
                   className="max-h-36 space-y-1 overflow-auto rounded-md border bg-muted/40 p-3 text-xs"
                   tabIndex={0}
                 >
-                  {committed.protectedHistory.map((turn, index) => (
-                    <li key={`${turn.role}-${index}`}>
-                      <span className="font-medium">{turn.role}:</span>{" "}
-                      <span className="break-words whitespace-pre-wrap">
-                        {turn.protectedContent}
-                      </span>
-                    </li>
-                  ))}
+                  {keyedHistory(committed.protectedHistory).map(
+                    ({ key, turn }) => (
+                      <li key={key}>
+                        <span className="font-medium">{turn.role}:</span>{" "}
+                        <span className="break-words whitespace-pre-wrap">
+                          {turn.protectedContent}
+                        </span>
+                      </li>
+                    )
+                  )}
                 </ol>
               ) : (
                 <p className="text-xs text-muted-foreground">No prior turns.</p>

@@ -3,10 +3,8 @@ import userEvent from "@testing-library/user-event"
 import type { ModelMessage } from "@tanstack/ai/client"
 import { createAnonymizer } from "local-pii"
 import { describe, expect, it, vi } from "vitest"
-import {
-  createTanStackPlaygroundConnection,
-  TanStackChat,
-} from "./tanstack-chat"
+import { TanStackChat } from "./tanstack-chat"
+import { createTanStackPlaygroundConnection } from "./tanstack-playground-connection"
 import { createProtectionObserver } from "./protection-observer"
 import type {
   BrowserGenerationRuntime,

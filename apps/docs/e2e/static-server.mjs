@@ -1,7 +1,7 @@
 import { createReadStream } from "node:fs"
-import { stat } from "node:fs/promises"
 import { createServer } from "node:http"
-import { extname, resolve, sep } from "node:path"
+import { extname, resolve } from "node:path"
+import { findStaticFile } from "./static-path.mjs"
 
 const root = resolve(import.meta.dirname, "../out")
 const port = Number.parseInt(process.env.PORT ?? "4173", 10)
@@ -22,25 +22,6 @@ const contentTypes = new Map([
   [".woff2", "font/woff2"],
 ])
 
-function candidates(pathname) {
-  const relative = pathname.replace(/^\/+/, "")
-  if (extname(relative)) return [relative]
-  if (relative === "") return ["index.html"]
-  return [`${relative}.html`, `${relative}/index.html`]
-}
-
-async function findFile(pathname) {
-  for (const candidate of candidates(pathname)) {
-    const file = resolve(root, candidate)
-    if (file !== root && !file.startsWith(`${root}${sep}`)) continue
-    try {
-      if ((await stat(file)).isFile()) return file
-    } catch {
-      // Try the next static-export candidate.
-    }
-  }
-}
-
 const server = createServer(async (request, response) => {
   try {
     const method = request.method ?? "GET"
@@ -52,7 +33,7 @@ const server = createServer(async (request, response) => {
     const pathname = decodeURIComponent(
       new URL(request.url ?? "/", "http://127.0.0.1").pathname
     )
-    const file = await findFile(pathname)
+    const file = await findStaticFile(root, pathname)
     if (!file) {
       response.writeHead(404).end()
       return

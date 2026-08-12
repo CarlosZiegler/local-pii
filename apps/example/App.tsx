@@ -35,7 +35,7 @@ export default function App() {
   const t = scheme === "dark" ? dark : light
 
   const [text, setText] = useState(SAMPLE)
-  const [useNer, setUseNer] = useState(false)
+  const [useDetection, setUseDetection] = useState(false)
   const [privateMode, setPrivateMode] = useState(false)
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<AnonymizeResult | null>(null)
@@ -43,13 +43,13 @@ export default function App() {
   const [restored, setRestored] = useState<string | null>(null)
   const [note, setNote] = useState<string | null>(null)
 
-  // Recreate the anonymizer when the NER toggle changes. Deterministic
-  // detectors always run; Rampart NER is added on demand (needs a dev client).
+  // Recreate the anonymizer when the Detection model toggle changes.
+  // Deterministic detectors always run; Rampart Detection is added on demand.
   const anonymizer = useMemo(() => {
-    if (!useNer) return createAnonymizer()
+    if (!useDetection) return createAnonymizer()
     try {
-      // Lazily required so the native ONNX runtime only loads when AI is on —
-      // the deterministic path keeps working in Expo Go.
+      // Lazily require the native ONNX runtime so deterministic detection keeps
+      // working in Expo Go.
       const { rampart } =
         require("local-pii/expo") as typeof import("local-pii/expo")
       return createAnonymizer({
@@ -57,13 +57,15 @@ export default function App() {
           model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
         }),
         onDegraded: (e) =>
-          setNote(`AI model unavailable, using rules only: ${e.message}`),
+          setNote(
+            `Detection model unavailable, using rules only: ${e.message}`
+          ),
       })
     } catch (e) {
       setNote(`Could not load the model: ${(e as Error).message}`)
       return createAnonymizer()
     }
-  }, [useNer])
+  }, [useDetection])
 
   async function run() {
     setBusy(true)
@@ -109,9 +111,9 @@ export default function App() {
 
         <View style={styles.row}>
           <Toggle
-            label="On-device AI (Rampart)"
-            value={useNer}
-            onValueChange={setUseNer}
+            label="Detection model (Rampart)"
+            value={useDetection}
+            onValueChange={setUseDetection}
             t={t}
           />
           <Toggle
