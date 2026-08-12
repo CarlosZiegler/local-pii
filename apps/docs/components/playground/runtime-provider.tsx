@@ -51,26 +51,57 @@ export function RuntimeProvider({
     () => SERVER_SNAPSHOT
   )
   const activeAbort = useRef<AbortController | null>(null)
+  const mounted = useRef(false)
+  const effectGeneration = useRef(0)
+  const effectController = useRef<RuntimeController | undefined>(undefined)
   const [actionError, setActionError] = useState<Error>()
 
   useEffect(() => {
-    void controller.check()
+    const generation = ++effectGeneration.current
+    effectController.current = controller
+    mounted.current = true
+    void controller.check().catch(() => {
+      // The controller publishes check failures in its snapshot. Observe the
+      // rejection here so an unmounted or replaced provider cannot leak it.
+    })
     return () => {
+      mounted.current = false
       activeAbort.current?.abort(
         new DOMException("The runtime provider was unmounted", "AbortError")
       )
-      void controller.dispose()
+      queueMicrotask(() => {
+        if (
+          effectController.current === controller &&
+          effectGeneration.current !== generation
+        ) {
+          return
+        }
+        let disposal: Promise<void>
+        try {
+          disposal = controller.dispose()
+        } catch {
+          return
+        }
+        void disposal.catch(() => {
+          // Disposal is best-effort during unmount; observe failures so they
+          // cannot become unhandled rejections after the provider is gone.
+        })
+      })
     }
   }, [controller])
 
   const activate = useCallback(
     (kind: RuntimeKind) => {
+      if (!mounted.current) return Promise.resolve()
       const abort = new AbortController()
       setActionError(undefined)
       if (activeAbort.current === null) activeAbort.current = abort
       return controller
         .activate(kind, abort.signal)
         .catch((cause) => {
+          if (!mounted.current || effectController.current !== controller) {
+            return
+          }
           const error =
             cause instanceof Error ? cause : new Error(String(cause))
           const current = controller.getSnapshot()
@@ -105,8 +136,9 @@ export function RuntimeProvider({
       activate,
       abort,
       check: () => {
+        if (!mounted.current) return Promise.resolve()
         setActionError(undefined)
-        return controller.check()
+        return controller.check().catch(() => undefined)
       },
     }
   }, [abort, actionError, activate, controller, snapshot])

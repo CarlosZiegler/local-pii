@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { StrictMode } from "react"
 import { describe, expect, it, vi } from "vitest"
 import {
   createRuntimeController,
@@ -47,6 +48,93 @@ function RuntimeActions() {
 }
 
 describe("RuntimeProvider", () => {
+  it("survives StrictMode effect replay with a usable controller", async () => {
+    const cached = vi.fn(async () => false)
+    const controller = createRuntimeController({
+      getNative: () => undefined,
+      isGemmaCached: cached,
+    })
+    const check = vi.spyOn(controller, "check")
+    const dispose = vi.spyOn(controller, "dispose")
+
+    const { unmount } = render(
+      <StrictMode>
+        <RuntimeProvider controller={controller}>
+          <RuntimeActions />
+        </RuntimeProvider>
+      </StrictMode>
+    )
+
+    await waitFor(() =>
+      expect(screen.getByTestId("status")).toHaveTextContent("choice-required")
+    )
+    expect(check).toHaveBeenCalledTimes(2)
+    expect(cached).toHaveBeenCalledOnce()
+    expect(dispose).not.toHaveBeenCalled()
+
+    unmount()
+    await Promise.resolve()
+    expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it("observes a rejecting controller disposal on unmount", async () => {
+    const controller = createRuntimeController({
+      getNative: () => undefined,
+      isGemmaCached: async () => false,
+    })
+    const disposalFailure = new Error("provider cleanup failed")
+    const dispose = vi
+      .spyOn(controller, "dispose")
+      .mockRejectedValue(disposalFailure)
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on("unhandledRejection", onUnhandled)
+
+    try {
+      const { unmount } = render(
+        <RuntimeProvider controller={controller}>
+          <RuntimeActions />
+        </RuntimeProvider>
+      )
+      await waitFor(() =>
+        expect(screen.getByTestId("status")).toHaveTextContent(
+          "choice-required"
+        )
+      )
+
+      unmount()
+      await Promise.resolve()
+      expect(dispose).toHaveBeenCalledOnce()
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
+  })
+
+  it("observes an initial check rejection without a second action error", async () => {
+    const failure = new Error("runtime check failed")
+    const controller = createRuntimeController({
+      getNative: () => {
+        throw failure
+      },
+    })
+    const { unmount } = render(
+      <RuntimeProvider controller={controller}>
+        <RuntimeActions />
+      </RuntimeProvider>
+    )
+
+    expect(await screen.findByTestId("snapshot-error")).toHaveTextContent(
+      failure.message
+    )
+    expect(screen.queryByTestId("action-error")).not.toBeInTheDocument()
+
+    unmount()
+    await Promise.resolve()
+  })
+
   it("keeps the first activation running and exposes a busy second action", async () => {
     let release!: (value: BrowserGenerationRuntime) => void
     const loading = new Promise<BrowserGenerationRuntime>((resolve) => {
