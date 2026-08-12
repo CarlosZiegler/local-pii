@@ -14,10 +14,12 @@ downloads automáticos nem troca silenciosa de runtime.
 
 ## Experimente
 
-- Envie `Email ana@acme.com e repita.` em qualquer chat.
+- Envie `Escreva uma resposta de suporte para Ana sobre um pedido atrasado (ana@acme.com).` em qualquer chat.
 - O inspector mostra o histórico protegido e o conteúdo atual exatos entregues
   ao runtime, nunca o mapping privado nem o input original.
 - A resposta é restaurada localmente e a UI mostra o email original.
+- Quando o Gemma está em cache, **Clear cached model** remove o cache do
+  navegador; isso não afeta o Gemini Nano gerenciado separadamente pelo Chrome.
 - **New chat** espera stop e limpeza do runtime; só então limpa histórico,
   sessão, erro e inspection da aba e cria uma nova sessão.
 

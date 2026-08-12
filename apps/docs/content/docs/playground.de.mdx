@@ -15,11 +15,13 @@ Runtime-Wechsel.
 
 ## Ausprobieren
 
-- Sende `E-Mail ana@acme.com und wiederhole sie.` in einem Chat.
+- Sende `Formuliere eine Supportantwort für Ana zu einer verspäteten Bestellung (ana@acme.com).` in einem Chat.
 - Der Inspector zeigt den exakten geschützten Verlauf und aktuellen Inhalt, den
   der Browser-Runtime erhält, niemals Mapping oder Originaleingabe.
 - Die Antwort wird lokal wiederhergestellt; die UI zeigt die ursprüngliche
   E-Mail.
+- Wenn Gemma im Cache liegt, entfernt **Clear cached model** den Browser-Cache;
+  das separat von Chrome verwaltete Gemini Nano bleibt unberührt.
 - **New chat** wartet auf Stop und Runtime-Cleanup, leert erst danach Verlauf,
   Session, Fehler und Inspector und erzeugt eine neue Session.
 

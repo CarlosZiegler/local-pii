@@ -5,6 +5,8 @@ import { Button } from "@/components/ui/button"
 import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { CpuIcon, DownloadIcon, ShieldCheckIcon, XIcon } from "lucide-react"
+import { rampartAssets, rampartWeb } from "local-pii/web"
+import { useMemo } from "react"
 import type { RuntimeOption } from "./playground/model/types"
 import { RuntimeProvider, useLocalRuntime } from "./playground/runtime-provider"
 import { runtimeChoiceAriaLabel } from "./playground/runtime-choice"
@@ -44,7 +46,13 @@ function RuntimeDisclosure({ option }: { option: RuntimeOption }) {
   )
 }
 
-function RuntimeChoice({ option }: { option: RuntimeOption }) {
+function RuntimeChoice({
+  option,
+  onClear,
+}: {
+  option: RuntimeOption
+  onClear?: () => void
+}) {
   const runtime = useLocalRuntime()
   const unavailable = option.availability === "unavailable"
   const cached = option.availability === "ready"
@@ -52,27 +60,43 @@ function RuntimeChoice({ option }: { option: RuntimeOption }) {
   return (
     <li className="flex flex-col gap-4 rounded-lg border bg-background p-4 sm:flex-row sm:items-start sm:justify-between">
       <RuntimeDisclosure option={option} />
-      <Button
-        aria-label={runtimeChoiceAriaLabel(option)}
-        disabled={unavailable}
-        onClick={() => {
-          void runtime.activate(option.kind)
-        }}
-        type="button"
-      >
-        {cached ? <CpuIcon /> : <DownloadIcon />}
-        {unavailable
-          ? "Unavailable"
-          : cached
-            ? "Use cached runtime"
-            : "Activate runtime"}
-      </Button>
+      <div className="flex flex-wrap gap-2">
+        <Button
+          aria-label={runtimeChoiceAriaLabel(option)}
+          disabled={unavailable}
+          onClick={() => {
+            void runtime.activate(option.kind)
+          }}
+          type="button"
+        >
+          {cached ? <CpuIcon /> : <DownloadIcon />}
+          {unavailable
+            ? "Unavailable"
+            : cached
+              ? "Use cached runtime"
+              : "Activate runtime"}
+        </Button>
+        {onClear ? (
+          <Button onClick={onClear} type="button" variant="outline">
+            Clear cached model
+          </Button>
+        ) : null}
+      </div>
     </li>
   )
 }
 
 export function RuntimePlayground() {
   const runtime = useLocalRuntime()
+  const detection = useMemo(
+    () =>
+      rampartWeb({
+        model: "/models/rampart-q4.onnx",
+        vocab: rampartAssets.vocab,
+        labels: rampartAssets.labels,
+      }),
+    []
+  )
   const ready = runtime.status === "ready" && runtime.runtime
 
   return (
@@ -115,7 +139,16 @@ export function RuntimePlayground() {
           </div>
           <ul className="mt-4 space-y-3">
             {runtime.options.map((option) => (
-              <RuntimeChoice key={option.kind} option={option} />
+              <RuntimeChoice
+                key={option.kind}
+                onClear={
+                  option.kind === "gemma-3-270m" &&
+                  option.availability === "ready"
+                    ? () => void runtime.clearGemmaCache()
+                    : undefined
+                }
+                option={option}
+              />
             ))}
           </ul>
         </section>
@@ -228,6 +261,7 @@ export function RuntimePlayground() {
             value="vercel"
           >
             <VercelChat
+              detection={detection}
               runtime={ready}
               runtimeName={runtime.disclosure.label}
             />
@@ -238,6 +272,7 @@ export function RuntimePlayground() {
             value="tanstack"
           >
             <TanStackChat
+              detection={detection}
               runtime={ready}
               runtimeName={runtime.disclosure.label}
             />

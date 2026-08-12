@@ -25,6 +25,7 @@ type RuntimeContextValue = RuntimeSnapshot & {
   readonly runtime?: BrowserGenerationRuntime
   readonly actionError?: Error
   activate(kind: RuntimeKind): Promise<void>
+  clearGemmaCache(): Promise<void>
   abort(): void
   check(): Promise<void>
   readonly gate: GenerationGate
@@ -172,6 +173,18 @@ export function RuntimeProviderCore({
         ? {}
         : { actionError: visibleActionError }),
       activate,
+      clearGemmaCache: () => {
+        if (!mounted.current) return Promise.resolve()
+        setActionError(undefined)
+        return controller.clearGemmaCache().catch((cause) => {
+          if (!mounted.current || effectController.current !== controller)
+            return
+          setActionError({
+            error: cause instanceof Error ? cause : new Error(String(cause)),
+            generation: effectGeneration.current,
+          })
+        })
+      },
       abort,
       check: () => {
         if (!mounted.current) return Promise.resolve()
