@@ -2,49 +2,48 @@ import type { StreamChunk } from "@tanstack/ai/client"
 import type { ConnectConnectionAdapter } from "@tanstack/ai-client"
 import type { PiiSession } from "./session"
 import {
+  activateNextPhase,
+  activateThrowPhase,
+  canPreemptWaitingNext,
+  cancelThrowPhase,
+  clearAssistedNext,
+  clearNextWaitingSource,
+  completeThrowPhase,
+  detectConcurrentThrow,
+  discardQueuedOperations,
+  enqueueOperation,
+  hasQueuedKind,
+  idleActiveSlot,
+  isNextPreempted,
+  isNextSettled,
+  isThrowCanceled,
+  isThrowCompleted,
+  isThrowConcurrent,
+  markNextWaitingSource,
+  nextActiveSlot,
+  preemptNextPhase,
+  queuedNextPhase,
+  queuedThrowPhase,
+  settlePublicNextPhase,
+  shiftQueuedOperation,
+  takeQueuedByKind,
+  tanStackIteratorControl,
+  throwActiveSlot,
+  withAssistedNext,
+  type TanStackActiveSlot,
+  type TanStackNextPhase,
+  type TanStackThrowPhase,
+} from "./tanstack-arbitration"
+import {
   assertTanStackArrayPrototypeStable,
   protectTanStackMessages,
   UnsupportedTanStackSemanticContentError,
 } from "./tanstack-content"
-import {
-  markTanStackThrowConcurrent,
-  unwrapRecoverableTanStackNext,
-  recoverableTanStackNextError,
-  restoreTanStackStream,
-} from "./tanstack-stream"
+import { restoreTanStackStream } from "./tanstack-stream"
 
 export { UnsupportedTanStackSemanticContentError }
 
 const TRUSTED_REFLECT_APPLY = Reflect.apply
-const TRUSTED_ARRAY_FIND_INDEX = Array.prototype.findIndex
-const TRUSTED_ARRAY_PUSH = Array.prototype.push
-const TRUSTED_ARRAY_SHIFT = Array.prototype.shift
-const TRUSTED_ARRAY_SOME = Array.prototype.some
-const TRUSTED_ARRAY_SPLICE = Array.prototype.splice
-
-function arrayFindIndex<T>(items: T[], predicate: (item: T) => boolean) {
-  return TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_FIND_INDEX, items, [predicate])
-}
-
-function arrayPush<T>(items: T[], item: T) {
-  TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_PUSH, items, [item])
-}
-
-function arrayShift<T>(items: T[]) {
-  return TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_SHIFT, items, []) as T | undefined
-}
-
-function arraySome<T>(items: T[], predicate: (item: T) => boolean) {
-  return TRUSTED_REFLECT_APPLY(TRUSTED_ARRAY_SOME, items, [predicate])
-}
-
-function arraySplice<T>(items: T[], start: number, deleteCount?: number) {
-  return TRUSTED_REFLECT_APPLY(
-    TRUSTED_ARRAY_SPLICE,
-    items,
-    deleteCount === undefined ? [start] : [start, deleteCount]
-  ) as T[]
-}
 
 export interface PiiConnectionOptions {
   /** One caller-owned privacy session per private conversation. */
@@ -81,36 +80,28 @@ function lazyStream<T>(
       let closeReason: unknown
       let delegate: AsyncIterator<T> | undefined
       let initialization: Promise<AsyncIterator<T> | undefined> | undefined
-      const pendingNext = new Set<{
-        settled: boolean
-        resolve: (result: IteratorResult<T>) => void
-        reject: (error: unknown) => void
-      }>()
       type NextOperation = {
         kind: "next"
+        phase: TanStackNextPhase
         pending: {
-          settled: boolean
           resolve: (result: IteratorResult<T>) => void
           reject: (error: unknown) => void
         }
         value?: unknown
-        preempted?: boolean
-        waitingSource?: boolean
       }
       type ThrowOperation = {
         kind: "throw"
+        phase: TanStackThrowPhase
         error: unknown
-        canceled?: boolean
-        concurrent?: boolean
-        completed?: boolean
         resolve: (result: IteratorResult<T>) => void
         reject: (error: unknown) => void
       }
       type Operation = NextOperation | ThrowOperation
+      const pendingNext = new Set<NextOperation>()
       const operations: Operation[] = []
       const activeThrows = new Set<ThrowOperation>()
-      let activeOperation: Operation | undefined
-      let activeAssistedNext: NextOperation | undefined
+      let active: TanStackActiveSlot<NextOperation, ThrowOperation> =
+        idleActiveSlot()
       let pump = () => {}
       let removeAbortListener = () => {}
       const detachAbortListener = () => {
@@ -124,12 +115,16 @@ function lazyStream<T>(
         value?: unknown,
         recoverable = false
       ) => {
-        for (const pending of pendingNext) {
-          pending.settled = true
-          if (kind === "return") pending.resolve(completed<T>())
+        const terminal = kind !== "throw" || !recoverable
+        for (const operation of pendingNext) {
+          if (isNextSettled(operation.phase)) continue
+          operation.phase = settlePublicNextPhase(operation.phase, terminal)
+          if (kind === "return") operation.pending.resolve(completed<T>())
           else
-            pending.reject(
-              recoverable ? recoverableTanStackNextError(value) : value
+            operation.pending.reject(
+              recoverable
+                ? tanStackIteratorControl.createRecoverableNextError(value)
+                : value
             )
         }
         pendingNext.clear()
@@ -140,7 +135,7 @@ function lazyStream<T>(
         value?: unknown
       ) => {
         activeThrows.forEach((operation) => {
-          operation.canceled = true
+          operation.phase = cancelThrowPhase(operation.phase)
           if (kind === "return") operation.resolve(completed<T>(value))
           else operation.reject(value)
         })
@@ -197,9 +192,11 @@ function lazyStream<T>(
         closed = true
         closeKind = "abort"
         closeReason = signal?.reason
-        arraySplice(operations, 0)
-        if (activeOperation?.kind === "next") activeOperation.preempted = true
-        activeOperation = undefined
+        discardQueuedOperations(operations)
+        if (active.kind === "next") {
+          active.operation.phase = preemptNextPhase(active.operation.phase)
+        }
+        active = idleActiveSlot()
         settleThrows("abort", closeReason)
         settlePending("abort", closeReason)
         detachAbortListener()
@@ -216,18 +213,23 @@ function lazyStream<T>(
 
       const resolveNext = (
         operation: NextOperation,
-        result: IteratorResult<T>
+        result: IteratorResult<T>,
+        terminal = true
       ) => {
-        if (operation.pending.settled) return
-        operation.pending.settled = true
-        pendingNext.delete(operation.pending)
+        if (isNextSettled(operation.phase)) return
+        operation.phase = settlePublicNextPhase(operation.phase, terminal)
+        pendingNext.delete(operation)
         operation.pending.resolve(result)
       }
 
-      const rejectNext = (operation: NextOperation, error: unknown) => {
-        if (operation.pending.settled) return
-        operation.pending.settled = true
-        pendingNext.delete(operation.pending)
+      const rejectNext = (
+        operation: NextOperation,
+        error: unknown,
+        terminal = true
+      ) => {
+        if (isNextSettled(operation.phase)) return
+        operation.phase = settlePublicNextPhase(operation.phase, terminal)
+        pendingNext.delete(operation)
         operation.pending.reject(error)
       }
 
@@ -235,7 +237,7 @@ function lazyStream<T>(
         closed = true
         closeKind = "return"
         closeReason = value
-        arraySplice(operations, 0)
+        discardQueuedOperations(operations)
         settleThrows("return", value)
         settlePending("return")
         detachAbortListener()
@@ -245,14 +247,14 @@ function lazyStream<T>(
         closed = true
         closeKind = "throw"
         closeReason = error
-        arraySplice(operations, 0)
+        discardQueuedOperations(operations)
         settleThrows("throw", error)
         settlePending("throw", error)
         detachAbortListener()
       }
 
       const failThrow = (operation: ThrowOperation, error: unknown) => {
-        if (operation.canceled) return
+        if (isThrowCanceled(operation.phase)) return
         activeThrows.delete(operation)
         closeAfterError(error)
         operation.reject(error)
@@ -262,7 +264,7 @@ function lazyStream<T>(
         operation: ThrowOperation,
         result: IteratorResult<T>
       ) => {
-        if (operation.canceled) return
+        if (isThrowCanceled(operation.phase)) return
         activeThrows.delete(operation)
         if (result.done) {
           closeAfterDone(result.value)
@@ -273,23 +275,23 @@ function lazyStream<T>(
       }
 
       const completeAssistedNext = (operation: NextOperation) => {
-        if (activeAssistedNext !== operation) return
-        activeAssistedNext = undefined
-        const active = activeOperation
-        if (active?.kind === "throw" && active.completed) {
-          activeOperation = undefined
+        if (active.kind !== "throw" || active.assistedNext !== operation) return
+        const throwOp = active.operation
+        active = clearAssistedNext(active)
+        if (isThrowCompleted(throwOp.phase)) {
+          active = idleActiveSlot()
           pump()
         }
       }
 
       const failNext = (operation: NextOperation, error: unknown) => {
-        const control = unwrapRecoverableTanStackNext(error)
+        const control = tanStackIteratorControl.unwrapRecoverableNext(error)
         if (control.recoverable) {
-          rejectNext(operation, control.value)
+          rejectNext(operation, control.value, false)
           pump()
           return
         }
-        if (operation.pending.settled) return
+        if (isNextSettled(operation.phase)) return
         closeAfterError(error)
         rejectNext(operation, error)
       }
@@ -298,7 +300,8 @@ function lazyStream<T>(
         operation: NextOperation,
         result: IteratorResult<T>
       ) => {
-        if (operation.preempted || operation.pending.settled) return
+        if (isNextPreempted(operation.phase) || isNextSettled(operation.phase))
+          return
         if (result.done) {
           resolveNext(operation, result)
           closeAfterDone(result.value)
@@ -307,9 +310,11 @@ function lazyStream<T>(
         resolveNext(operation, result)
       }
 
-      const selectOperation = (): Operation | undefined => arrayShift(operations)
+      const selectOperation = (): Operation | undefined =>
+        shiftQueuedOperation(operations)
 
       const startNext = (operation: NextOperation, assisted: boolean) => {
+        operation.phase = activateNextPhase(operation.phase)
         const delegated = Promise.resolve()
           .then(async () => {
             if (closed) {
@@ -325,43 +330,55 @@ function lazyStream<T>(
             }
             if (!current) return completed<T>()
             const result = current.next(operation.value)
-            operation.waitingSource = true
+            operation.phase = markNextWaitingSource(operation.phase)
             if (
               !assisted &&
-              activeOperation === operation &&
-              arraySome(operations, (queued) => queued.kind === "throw")
+              active.kind === "next" &&
+              active.operation === operation &&
+              hasQueuedKind(operations, "throw")
             ) {
-              operation.preempted = true
-              activeOperation = undefined
+              operation.phase = preemptNextPhase(operation.phase)
+              active = idleActiveSlot()
               pump()
             }
             return result
           })
           .then(
             (result) => {
-              operation.waitingSource = false
-              if (operation.preempted) {
+              operation.phase = clearNextWaitingSource(operation.phase)
+              if (isNextPreempted(operation.phase)) {
                 if (assisted) completeAssistedNext(operation)
                 return result
               }
-              if (!assisted && activeOperation === operation)
-                activeOperation = undefined
+              if (
+                !assisted &&
+                active.kind === "next" &&
+                active.operation === operation
+              )
+                active = idleActiveSlot()
               completeNext(operation, result)
               if (assisted) completeAssistedNext(operation)
               else pump()
               return result
             },
             (error: unknown) => {
-              operation.waitingSource = false
-              if (operation.preempted) {
-                const control = unwrapRecoverableTanStackNext(error)
-                if (control.recoverable) rejectNext(operation, control.value)
-                else if (!operation.pending.settled) failNext(operation, error)
+              operation.phase = clearNextWaitingSource(operation.phase)
+              if (isNextPreempted(operation.phase)) {
+                const control =
+                  tanStackIteratorControl.unwrapRecoverableNext(error)
+                if (control.recoverable)
+                  rejectNext(operation, control.value, false)
+                else if (!isNextSettled(operation.phase))
+                  failNext(operation, error)
                 if (assisted) completeAssistedNext(operation)
                 return Promise.reject(error)
               }
-              if (!assisted && activeOperation === operation)
-                activeOperation = undefined
+              if (
+                !assisted &&
+                active.kind === "next" &&
+                active.operation === operation
+              )
+                active = idleActiveSlot()
               failNext(operation, error)
               if (assisted) completeAssistedNext(operation)
               else pump()
@@ -373,53 +390,68 @@ function lazyStream<T>(
 
       pump = () => {
         if (closed) return
-        if (activeOperation?.kind === "throw" && !activeAssistedNext) {
-          const nextIndex = arrayFindIndex(
-            operations,
-            (operation) => operation.kind === "next"
-          )
-          if (nextIndex >= 0) {
-            const candidate = arraySplice(operations, nextIndex, 1)[0]
-            if (candidate?.kind === "next") {
-              activeAssistedNext = candidate
-              startNext(candidate, true)
-            }
+        if (active.kind === "throw" && active.assistedNext === undefined) {
+          const candidate = takeQueuedByKind(operations, "next")
+          if (candidate?.kind === "next") {
+            active = withAssistedNext(active, candidate)
+            startNext(candidate, true)
           }
           return
         }
-        if (activeOperation) return
+        if (active.kind !== "idle") return
         const operation = selectOperation()
         if (!operation) return
-        activeOperation = operation
 
         if (operation.kind === "next") {
+          active = nextActiveSlot(operation, false)
           startNext(operation, false)
           return
         }
 
+        operation.phase = activateThrowPhase(operation.phase)
+        active = throwActiveSlot(operation)
         const delegated = Promise.resolve()
           .then(async () => {
             if (closed) throw closeReason
             const current = delegate ?? (await ensureDelegate())
             if (!current?.throw) throw operation.error
-            if (operation.concurrent) markTanStackThrowConcurrent(current)
+            if (isThrowConcurrent(operation.phase))
+              tanStackIteratorControl.markConcurrentThrow(current)
             return current.throw(operation.error)
           })
           .then(
             (result) => {
-              operation.completed = true
-              if (activeOperation === operation && !activeAssistedNext)
-                activeOperation = undefined
+              operation.phase = completeThrowPhase(operation.phase)
+              if (
+                active.kind === "throw" &&
+                active.operation === operation &&
+                active.assistedNext === undefined
+              )
+                active = idleActiveSlot()
               completeThrow(operation, result)
-              if (!activeAssistedNext) pump()
+              if (!(
+                active.kind === "throw" &&
+                active.operation === operation &&
+                active.assistedNext !== undefined
+              ))
+                pump()
               return result
             },
             (error: unknown) => {
-              operation.completed = true
-              if (activeOperation === operation && !activeAssistedNext)
-                activeOperation = undefined
+              operation.phase = completeThrowPhase(operation.phase)
+              if (
+                active.kind === "throw" &&
+                active.operation === operation &&
+                active.assistedNext === undefined
+              )
+                active = idleActiveSlot()
               failThrow(operation, error)
-              if (!activeAssistedNext) pump()
+              if (!(
+                active.kind === "throw" &&
+                active.operation === operation &&
+                active.assistedNext !== undefined
+              ))
+                pump()
               return Promise.reject(error)
             }
           )
@@ -436,12 +468,12 @@ function lazyStream<T>(
           let resolve!: (result: IteratorResult<T>) => void
           let reject!: (error: unknown) => void
           const pending = {
-            settled: false,
             resolve: (result: IteratorResult<T>) => resolve(result),
             reject: (error: unknown) => reject(error),
           }
           const operation: NextOperation = {
             kind: "next",
+            phase: queuedNextPhase(),
             pending,
             value,
           }
@@ -451,8 +483,8 @@ function lazyStream<T>(
               reject = rejectResult
             }
           )
-          pendingNext.add(pending)
-          arrayPush(operations, operation)
+          pendingNext.add(operation)
+          enqueueOperation(operations, operation)
           pump()
           return result
         },
@@ -461,9 +493,11 @@ function lazyStream<T>(
           closed = true
           closeKind = "return"
           closeReason = value
-          arraySplice(operations, 0)
-          if (activeOperation?.kind === "next") activeOperation.preempted = true
-          activeOperation = undefined
+          discardQueuedOperations(operations)
+          if (active.kind === "next") {
+            active.operation.phase = preemptNextPhase(active.operation.phase)
+          }
+          active = idleActiveSlot()
           settleThrows("return", value)
           settlePending("return")
           detachAbortListener()
@@ -475,10 +509,10 @@ function lazyStream<T>(
           let reject!: (throwError: unknown) => void
           const operation: ThrowOperation = {
             kind: "throw",
+            phase: queuedThrowPhase(
+              detectConcurrentThrow(operations, active.kind === "throw", false)
+            ),
             error,
-            concurrent:
-              activeOperation?.kind === "throw" ||
-              arraySome(operations, (queued) => queued.kind === "throw"),
             resolve: (result: IteratorResult<T>) => resolve(result),
             reject: (throwError: unknown) => reject(throwError),
           }
@@ -490,14 +524,13 @@ function lazyStream<T>(
           )
           activeThrows.add(operation)
           if (
-            activeOperation?.kind === "next" &&
-            activeOperation.waitingSource &&
-            !activeOperation.preempted
+            active.kind === "next" &&
+            canPreemptWaitingNext(active.operation.phase)
           ) {
-            activeOperation.preempted = true
-            activeOperation = undefined
+            active.operation.phase = preemptNextPhase(active.operation.phase)
+            active = idleActiveSlot()
           }
-          arrayPush(operations, operation)
+          enqueueOperation(operations, operation)
           pump()
           void result.catch(() => undefined)
           return result
