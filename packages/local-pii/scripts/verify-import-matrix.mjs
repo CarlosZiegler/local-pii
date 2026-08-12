@@ -1,5 +1,5 @@
 import { readFile } from "node:fs/promises"
-import { createRequire } from "node:module"
+import { createRequire, registerHooks } from "node:module"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { build } from "esbuild"
@@ -72,55 +72,26 @@ const expoStubs = new Map([
   ],
 ])
 
-const stubExpoPeers = {
-  name: "stub-expo-peers",
-  setup(buildContext) {
-    buildContext.onResolve({ filter: /.*/ }, (args) =>
-      expoStubs.has(args.path)
-        ? { path: args.path, namespace: "expo-matrix-stub" }
-        : undefined
-    )
-    buildContext.onLoad(
-      { filter: /.*/, namespace: "expo-matrix-stub" },
-      (args) => ({ contents: expoStubs.get(args.path), loader: "js" })
-    )
+const expoStubPrefix = "local-pii-matrix-stub:"
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (expoStubs.has(specifier)) {
+      return { shortCircuit: true, url: `${expoStubPrefix}${specifier}` }
+    }
+    return nextResolve(specifier, context)
   },
-}
-
-async function loadExpoTarget(target, kind) {
-  const result = await build({
-    entryPoints: [resolve(packageRoot, target)],
-    bundle: true,
-    write: false,
-    platform: "node",
-    target: "node20",
-    format: kind === "import" ? "esm" : "cjs",
-    plugins: [stubExpoPeers],
-  })
-  const source = result.outputFiles[0].text
-  let loaded
-  if (kind === "import") {
-    loaded = await import(
-      `data:text/javascript;base64,${Buffer.from(source).toString("base64")}`
-    )
-  } else {
-    const module = { exports: {} }
-    const execute = new Function(
-      "require",
-      "module",
-      "exports",
-      "__filename",
-      "__dirname",
-      source
-    )
-    execute(require, module, module.exports, "expo-matrix.cjs", packageRoot)
-    loaded = module.exports
-  }
-  assert(
-    typeof loaded.rampart === "function",
-    `./expo ${kind} target did not expose rampart`
-  )
-}
+  load(url, context, nextLoad) {
+    if (url.startsWith(expoStubPrefix)) {
+      const specifier = url.slice(expoStubPrefix.length)
+      return {
+        format: "module",
+        shortCircuit: true,
+        source: expoStubs.get(specifier),
+      }
+    }
+    return nextLoad(url, context)
+  },
+})
 
 for (const [subpath, targets] of publicExports) {
   assert(typeof targets === "object", `${subpath} must use conditional exports`)
@@ -129,9 +100,7 @@ for (const [subpath, targets] of publicExports) {
     await readFile(absolute)
   }
   for (const condition of ["import", "require"]) {
-    if (subpath === "./expo")
-      await loadExpoTarget(targets[condition], condition)
-    else await loadDirectTarget(subpath, targets[condition], condition)
+    await loadDirectTarget(subpath, targets[condition], condition)
   }
 }
 
@@ -220,6 +189,41 @@ async function verifyBundle(
   }
 }
 
+async function verifyReactNativeTarget() {
+  const result = await build({
+    entryPoints: [resolve(packageRoot, manifest["react-native"])],
+    bundle: true,
+    write: false,
+    metafile: true,
+    platform: "neutral",
+    target: "es2022",
+    format: "esm",
+    conditions: ["react-native"],
+    mainFields: ["react-native", "module", "main"],
+    logLevel: "silent",
+  })
+  const inputs = Object.keys(result.metafile.inputs)
+  const nativeOnly = inputs.find(nativeOnlyInput)
+  assert(
+    !nativeOnly,
+    `react-native target included an optional native runtime: ${nativeOnly}`
+  )
+  const webRuntime = inputs.find((input) =>
+    dependencyInput(input, "onnxruntime-web")
+  )
+  assert(
+    !webRuntime,
+    `react-native target included the web runtime: ${webRuntime}`
+  )
+  const loaded = await import(
+    `data:text/javascript;base64,${Buffer.from(result.outputFiles[0].text).toString("base64")}`
+  )
+  assert(
+    typeof loaded.createAnonymizer === "function",
+    "bundled react-native target did not expose createAnonymizer"
+  )
+}
+
 for (const name of ["core", "inline", "openai", "ai-sdk", "tanstack"])
   await verifyBundle(name, "browser")
 await verifyBundle("web", "browser", { allowWebRuntime: true })
@@ -228,6 +232,7 @@ for (const name of ["core", "inline", "openai", "ai-sdk", "tanstack", "metro"])
   await verifyBundle(name, "node")
 
 await verifyBundle("expo", "node", { allowNativeRuntime: true })
+await verifyReactNativeTarget()
 
 console.log(
   `verified ${publicExports.length} public subpaths, the react-native target, and 13 isolated bundles`

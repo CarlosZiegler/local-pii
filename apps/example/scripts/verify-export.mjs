@@ -20,7 +20,17 @@ try {
   await new Promise((resolve, reject) => {
     const child = spawn(
       "bun",
-      ["x", "expo", "export", "--platform", "android", "--output-dir", output],
+      [
+        "x",
+        "expo",
+        "export",
+        "--platform",
+        "android",
+        "--output-dir",
+        output,
+        "--dump-assetmap",
+        "--source-maps",
+      ],
       { stdio: "inherit" }
     )
     child.on("error", reject)
@@ -35,24 +45,68 @@ try {
     })
   })
 
-  const files = await filesBelow(output)
-  const sizes = await Promise.all(
-    files.map((file) => stat(file).then((item) => item.size))
+  const metadata = JSON.parse(await readFile(join(output, "metadata.json")))
+  const assetMap = JSON.parse(await readFile(join(output, "assetmap.json")))
+  const android = metadata.fileMetadata?.android
+  const onnxAssets = android?.assets?.filter((asset) => asset.ext === "onnx")
+  if (onnxAssets?.length !== 1) {
+    throw new Error("Expo export must emit exactly one Android ONNX asset")
+  }
+  const emittedAsset = onnxAssets[0]
+  const hash = emittedAsset.path.split("/").at(-1)
+  const rampartAsset = assetMap[hash]
+  const rampartSource = rampartAsset?.files?.[0]
+  if (
+    rampartAsset?.name !== "rampart-q4" ||
+    rampartAsset?.type !== "onnx" ||
+    typeof rampartSource !== "string" ||
+    !rampartSource
+      .replaceAll("\\", "/")
+      .endsWith("/packages/model-rampart/assets/rampart-q4.onnx")
+  ) {
+    throw new Error("Expo asset map did not trace the ONNX asset to Rampart")
+  }
+  const emittedSize = (await stat(join(output, emittedAsset.path))).size
+  const sourceSize = (await stat(rampartSource)).size
+  if (emittedSize !== sourceSize || emittedSize <= 10_000_000) {
+    throw new Error("Exported Rampart ONNX bytes do not match the source asset")
+  }
+
+  const sourceMap = JSON.parse(
+    await readFile(join(output, `${android.bundle}.map`), "utf8")
   )
-  if (!sizes.some((size) => size > 10_000_000)) {
-    throw new Error("Expo export did not emit the Rampart ONNX asset")
+  const normalizedSources = sourceMap.sources.map((source) =>
+    source.replaceAll("\\", "/")
+  )
+  if (
+    !normalizedSources.some(
+      (source) =>
+        source.endsWith("/packages/local-pii/src/expo.ts") ||
+        source.endsWith("/packages/local-pii/dist/expo.js") ||
+        source.endsWith("/packages/local-pii/dist/expo.cjs")
+    )
+  ) {
+    throw new Error("Expo source map did not include the local-pii Expo entry")
   }
-  for (const file of files) {
-    const content = await readFile(file)
-    if (
-      content.includes(Buffer.from("onnxruntime-web")) ||
-      content.includes(Buffer.from("@local-pii/model-rampart/web"))
-    ) {
-      throw new Error(
-        `Expo export included a browser-only dependency in ${file}`
-      )
-    }
+  if (
+    !normalizedSources.some((source) =>
+      source.includes("onnxruntime-react-native")
+    )
+  ) {
+    throw new Error("Expo source map did not include onnxruntime-react-native")
   }
+  const forbiddenSource = normalizedSources.find(
+    (source) =>
+      source.includes("onnxruntime-web") ||
+      source.includes("@local-pii/model-rampart/web")
+  )
+  if (forbiddenSource) {
+    throw new Error(
+      `Expo source map included browser runtime: ${forbiddenSource}`
+    )
+  }
+
+  const files = await filesBelow(output)
   console.log(`verified Android Expo export with ${files.length} emitted files`)
 } finally {
   await rm(output, { force: true, recursive: true })

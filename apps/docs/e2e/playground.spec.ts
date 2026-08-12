@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test"
+import { readdir } from "node:fs/promises"
+import { resolve } from "node:path"
 
 const BASE_ORIGIN = "http://127.0.0.1:4173"
 const TEST_EMAIL = "ana@acme.com"
@@ -108,13 +110,17 @@ test.beforeEach(async ({ page }) => {
       mutating ||
       apiPath ||
       (sameOrigin && backendLikePath) ||
-      (!sameOrigin && !artifactOrigin)
+      (!sameOrigin && (!artifactOrigin || request.method() !== "GET"))
     ) {
       violations.push(`${request.method()} ${request.url()}`)
       await route.abort("blockedbyclient")
       return
     }
     await route.continue()
+  })
+  await page.routeWebSocket("**/*", async (socket) => {
+    violations.push(`WEBSOCKET ${socket.url()}`)
+    await socket.close({ code: 1008, reason: "Backend-free playground" })
   })
   await installFakeChromePromptApi(page)
 
@@ -217,11 +223,49 @@ test("runs both protected chats in a static backend-free build", async ({
 
 test("renders localized static playground pages", async ({ page }) => {
   await page.goto("/pt/docs/playground")
+  await expect(page.getByRole("heading", { name: "Experimente" })).toBeVisible()
   await expect(
     page.getByText("Tudo abaixo usa Geração local no navegador")
   ).toBeVisible()
   await page.goto("/de/docs/playground")
   await expect(
+    page.getByRole("heading", { name: "Ausprobieren" })
+  ).toBeVisible()
+  await expect(
     page.getByText("Alles unten nutzt browserlokale Generierung")
   ).toBeVisible()
+})
+
+test("serves emitted runtime modules as JavaScript", async ({ request }) => {
+  const media = resolve(process.cwd(), "out/_next/static/media")
+  const runtimeModule = (await readdir(media)).find(
+    (file) => file.startsWith("ort.webgpu.bundle") && file.endsWith(".mjs")
+  )
+  expect(runtimeModule).toBeDefined()
+  const response = await request.head(`/_next/static/media/${runtimeModule}`)
+  expect(response.ok()).toBe(true)
+  expect(response.headers()["content-type"]).toBe(
+    "text/javascript; charset=utf-8"
+  )
+})
+
+test("blocks WebSocket inference transports", async ({ page }) => {
+  await page.goto("/en/docs/playground")
+  await page.evaluate(
+    () =>
+      new Promise<void>((resolveAttempt) => {
+        const socket = new WebSocket("ws://127.0.0.1:4173/inference")
+        socket.addEventListener("close", () => resolveAttempt(), { once: true })
+        socket.addEventListener("error", () => resolveAttempt(), { once: true })
+      })
+  )
+  const matrix = (
+    page as Page & {
+      __matrix?: { violations: string[] }
+    }
+  ).__matrix
+  expect(matrix?.violations).toEqual([
+    "WEBSOCKET ws://127.0.0.1:4173/inference",
+  ])
+  matrix?.violations.splice(0)
 })
