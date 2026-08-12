@@ -3,6 +3,7 @@ import {
   createChromeBrowserRuntime,
   discoverChromePromptFactory,
   type ChromePromptFactory,
+  type DiscoverableChromePromptFactory,
 } from "./chrome-runtime"
 import type {
   BrowserGenerationRuntime,
@@ -19,10 +20,6 @@ import {
 } from "./runtime-metadata"
 
 export { GEMMA_ARTIFACT_URLS } from "./runtime-metadata"
-
-type NativeFactory = ChromePromptFactory & {
-  availability(options?: LanguageModelCreateCoreOptions): Promise<Availability>
-}
 
 const DISCLOSURES: Record<RuntimeKind, RuntimeDisclosure> = {
   "gemini-nano": {
@@ -46,7 +43,7 @@ interface ActivatableBrowserRuntime extends BrowserGenerationRuntime {
 
 export interface RuntimeControllerDependencies {
   /** Read-only access to Chrome's browser-managed Prompt API. */
-  readonly getNative?: () => ChromePromptFactory | undefined
+  readonly getNative?: () => DiscoverableChromePromptFactory | undefined
   /** Inspect the complete static Gemma artifact cache without loading it. */
   readonly isGemmaCached?: () => Promise<boolean>
   /** Construct the native runtime after explicit activation. */
@@ -192,6 +189,19 @@ export function createRuntimeController(
   const listeners = new Set<() => void>()
   const availabilityTimeoutMs = dependencies.availabilityTimeoutMs ?? 5_000
   const getNative = dependencies.getNative ?? discoverChromePromptFactory
+
+  const discoverNative = (): DiscoverableChromePromptFactory | undefined => {
+    const candidate = getNative()
+    if (
+      candidate === null ||
+      (typeof candidate !== "object" && typeof candidate !== "function") ||
+      typeof candidate.create !== "function" ||
+      typeof candidate.availability !== "function"
+    ) {
+      return undefined
+    }
+    return candidate
+  }
   const isGemmaCached =
     dependencies.isGemmaCached ?? (() => hasCachedGemmaArtifacts())
 
@@ -329,7 +339,7 @@ export function createRuntimeController(
 
   const runCheck = async (operationId: number): Promise<void> => {
     try {
-      const native = getNative() as NativeFactory | undefined
+      const native = discoverNative()
       if (!native) {
         const gemmaAvailability = await inspectGemma()
         if (isCurrent(operationId)) {
@@ -465,7 +475,7 @@ export function createRuntimeController(
     if (kind === "gemma-3-270m") await drainGemmaDisposals(signal)
     throwIfAborted(signal)
     if (kind === "gemini-nano") {
-      const factory = getNative()
+      const factory = discoverNative()
       if (!factory) throw new Error("Chrome Prompt API is not available")
       await warmNative(factory, operationId, signal, onProgress)
       throwIfAborted(signal)
@@ -556,7 +566,8 @@ export function createRuntimeController(
         currentRuntime = undefined
         scheduleDisposal(() => runtime!.dispose(), kind)
       }
-      if (runtime && !installed) scheduleDisposal(() => runtime!.dispose(), kind)
+      if (runtime && !installed)
+        scheduleDisposal(() => runtime!.dispose(), kind)
       if (!isCurrent(operationId)) return
       publishError(operationId, cause, kind)
       throw cause

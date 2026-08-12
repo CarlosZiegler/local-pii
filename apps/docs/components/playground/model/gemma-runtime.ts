@@ -80,7 +80,6 @@ interface TransformersOptions {
 }
 
 interface TransformersRuntime {
-  env?: { experimental_useCrossOriginStorage?: boolean }
   InterruptableStoppingCriteria: new () => InterruptableCriteria
   AutoConfig: {
     from_pretrained(
@@ -921,10 +920,6 @@ export function createGemmaBrowserRuntime(
       await ensurePinnedArtifacts(dependencies, signal, dependencies.onProgress)
     }
     signal.throwIfAborted()
-    if (transformers.env) {
-      transformers.env.experimental_useCrossOriginStorage = false
-    }
-
     let tokenizer: TextGenerator["tokenizer"] | undefined
     let model: DisposableResource | undefined
     let generator: TextGenerator | undefined

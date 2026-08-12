@@ -30,7 +30,9 @@ function fakeTransformers(
   failure?: Error,
   stuckAfterFirst = false
 ) {
-  const env: { experimental_useCrossOriginStorage?: boolean } = {}
+  const env: { experimental_useCrossOriginStorage?: boolean } = {
+    experimental_useCrossOriginStorage: true,
+  }
   const promptMessages: Array<{ role: string; content: string }> = []
   const criteria: FakeStoppingCriteria[] = []
   let disposed = false
@@ -444,7 +446,7 @@ describe("Gemma browser-generation runtime", () => {
       model: fake.generator,
       tokenizer: fake.generator.tokenizer,
     })
-    expect(fake.env.experimental_useCrossOriginStorage).toBe(false)
+    expect(fake.env.experimental_useCrossOriginStorage).toBe(true)
     expect(fake.promptMessages).toEqual([
       { role: "user", content: "Earlier" },
       { role: "assistant", content: "Answer" },

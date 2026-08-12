@@ -40,6 +40,10 @@ export interface ChromePromptFactory {
   create(options?: ChromePromptCreateOptions): Promise<ChromePromptSession>
 }
 
+export interface DiscoverableChromePromptFactory extends ChromePromptFactory {
+  availability(options?: LanguageModelCreateCoreOptions): Promise<Availability>
+}
+
 const CHROME_DISCLOSURE: RuntimeDisclosure = {
   label: "Chrome built-in Prompt API",
   model: "Gemini Nano",
@@ -146,7 +150,8 @@ export function createChromeBrowserRuntime(
 }
 
 /** Read-only Chrome Prompt API discovery. It never installs or replaces it. */
-export function discoverChromePromptFactory(): ChromePromptFactory | undefined {
+export function discoverChromePromptFactory():
+  DiscoverableChromePromptFactory | undefined {
   if (typeof window === "undefined" || !("LanguageModel" in window)) {
     return undefined
   }
@@ -155,9 +160,10 @@ export function discoverChromePromptFactory(): ChromePromptFactory | undefined {
   if (
     candidate === null ||
     (typeof candidate !== "object" && typeof candidate !== "function") ||
-    typeof (candidate as { create?: unknown }).create !== "function"
+    typeof (candidate as { create?: unknown }).create !== "function" ||
+    typeof (candidate as { availability?: unknown }).availability !== "function"
   ) {
     return undefined
   }
-  return candidate as ChromePromptFactory
+  return candidate as DiscoverableChromePromptFactory
 }

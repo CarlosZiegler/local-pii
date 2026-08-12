@@ -9,7 +9,7 @@ import {
   type RuntimeController,
 } from "./model/runtime-controller"
 import type { BrowserGenerationRuntime } from "./model/types"
-import { RuntimeProvider, useLocalRuntime } from "./runtime-provider"
+import { RuntimeProviderCore, useLocalRuntime } from "./runtime-provider-core"
 
 function runtime(): BrowserGenerationRuntime {
   return {
@@ -61,9 +61,9 @@ describe("RuntimeProvider", () => {
 
     const { unmount } = render(
       <StrictMode>
-        <RuntimeProvider controller={controller}>
+        <RuntimeProviderCore controller={controller}>
           <RuntimeActions />
-        </RuntimeProvider>
+        </RuntimeProviderCore>
       </StrictMode>
     )
 
@@ -133,9 +133,9 @@ describe("RuntimeProvider", () => {
 
     try {
       const { rerender, unmount } = render(
-        <RuntimeProvider controller={controllerA}>
+        <RuntimeProviderCore controller={controllerA}>
           <RuntimeActions />
-        </RuntimeProvider>
+        </RuntimeProviderCore>
       )
       await waitFor(() =>
         expect(screen.getByTestId("status")).toHaveTextContent(
@@ -146,9 +146,9 @@ describe("RuntimeProvider", () => {
       await vi.waitFor(() => expect(loadA).toHaveBeenCalledOnce())
 
       rerender(
-        <RuntimeProvider controller={controllerB}>
+        <RuntimeProviderCore controller={controllerB}>
           <RuntimeActions />
-        </RuntimeProvider>
+        </RuntimeProviderCore>
       )
       await waitFor(() =>
         expect(screen.getByTestId("status")).toHaveTextContent(
@@ -198,9 +198,9 @@ describe("RuntimeProvider", () => {
 
     try {
       const { unmount } = render(
-        <RuntimeProvider controller={controller}>
+        <RuntimeProviderCore controller={controller}>
           <RuntimeActions />
-        </RuntimeProvider>
+        </RuntimeProviderCore>
       )
       await waitFor(() =>
         expect(screen.getByTestId("status")).toHaveTextContent(
@@ -225,9 +225,9 @@ describe("RuntimeProvider", () => {
       },
     })
     const { unmount } = render(
-      <RuntimeProvider controller={controller}>
+      <RuntimeProviderCore controller={controller}>
         <RuntimeActions />
-      </RuntimeProvider>
+      </RuntimeProviderCore>
     )
 
     expect(await screen.findByTestId("snapshot-error")).toHaveTextContent(
@@ -251,9 +251,9 @@ describe("RuntimeProvider", () => {
     })
     const user = userEvent.setup()
     render(
-      <RuntimeProvider controller={controller}>
+      <RuntimeProviderCore controller={controller}>
         <RuntimeActions />
-      </RuntimeProvider>
+      </RuntimeProviderCore>
     )
 
     await waitFor(() =>
@@ -293,9 +293,9 @@ describe("RuntimeProvider", () => {
     })
     const user = userEvent.setup()
     const { rerender, unmount } = render(
-      <RuntimeProvider controller={controllerA}>
+      <RuntimeProviderCore controller={controllerA}>
         <RuntimeActions />
-      </RuntimeProvider>
+      </RuntimeProviderCore>
     )
 
     await waitFor(() =>
@@ -309,9 +309,9 @@ describe("RuntimeProvider", () => {
     )
 
     rerender(
-      <RuntimeProvider controller={controllerB}>
+      <RuntimeProviderCore controller={controllerB}>
         <RuntimeActions />
-      </RuntimeProvider>
+      </RuntimeProviderCore>
     )
     expect(screen.queryByTestId("action-error")).not.toBeInTheDocument()
     unmount()
@@ -329,9 +329,9 @@ describe("RuntimeProvider", () => {
     })
     const user = userEvent.setup()
     render(
-      <RuntimeProvider controller={controller}>
+      <RuntimeProviderCore controller={controller}>
         <RuntimeActions />
-      </RuntimeProvider>
+      </RuntimeProviderCore>
     )
 
     await waitFor(() =>

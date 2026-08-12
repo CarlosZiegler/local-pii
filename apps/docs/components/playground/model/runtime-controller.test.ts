@@ -9,7 +9,10 @@ import {
 import { createGemmaBrowserRuntime } from "./gemma-runtime"
 import { CHROME_TEXT_EXPECTATIONS } from "./chrome-runtime"
 import type { BrowserGenerationRuntime, RuntimeDisclosure } from "./types"
-import type { ChromePromptFactory } from "./chrome-runtime"
+import type {
+  ChromePromptFactory,
+  DiscoverableChromePromptFactory,
+} from "./chrome-runtime"
 
 const disclosure: RuntimeDisclosure = {
   label: "Test runtime",
@@ -177,6 +180,19 @@ describe("browser runtime controller", () => {
       status: "choice-required",
     })
     expect(loadGemma).not.toHaveBeenCalled()
+  })
+
+  it("treats an injected create-only native capability as unavailable", async () => {
+    const createOnly = {
+      create: vi.fn(),
+    } as unknown as DiscoverableChromePromptFactory
+    const controller = createRuntimeController(
+      controllerDependencies({ getNative: () => createOnly })
+    )
+
+    await controller.check()
+
+    expect(controller.getSnapshot().status).toBe("choice-required")
   })
 
   it("coalesces concurrent checks", async () => {

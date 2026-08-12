@@ -7,6 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
 import { CpuIcon, DownloadIcon, ShieldCheckIcon, XIcon } from "lucide-react"
 import type { RuntimeOption } from "./playground/model/types"
 import { RuntimeProvider, useLocalRuntime } from "./playground/runtime-provider"
+import { runtimeChoiceAriaLabel } from "./playground/runtime-choice"
 import { TanStackChat } from "./playground/tanstack-chat"
 import { VercelChat } from "./playground/vercel-chat"
 
@@ -52,7 +53,7 @@ function RuntimeChoice({ option }: { option: RuntimeOption }) {
     <li className="flex flex-col gap-4 rounded-lg border bg-background p-4 sm:flex-row sm:items-start sm:justify-between">
       <RuntimeDisclosure option={option} />
       <Button
-        aria-label={`${cached ? "Use" : "Activate"} ${option.disclosure.label}`}
+        aria-label={runtimeChoiceAriaLabel(option)}
         disabled={unavailable}
         onClick={() => {
           void runtime.activate(option.kind)

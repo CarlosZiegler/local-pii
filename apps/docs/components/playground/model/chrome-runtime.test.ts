@@ -25,12 +25,25 @@ describe("Chrome browser-generation runtime", () => {
   it("discovers a class-shaped Chrome LanguageModel without writing to it", () => {
     class NativeLanguageModel {
       static create = vi.fn()
+      static availability = vi.fn()
     }
     try {
       vi.stubGlobal("LanguageModel", NativeLanguageModel)
       expect(discoverChromePromptFactory()).toBe(NativeLanguageModel)
 
       vi.stubGlobal("LanguageModel", function malformed() {})
+      expect(discoverChromePromptFactory()).toBeUndefined()
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it("rejects a create-only global as unavailable", () => {
+    class CreateOnlyLanguageModel {
+      static create = vi.fn()
+    }
+    try {
+      vi.stubGlobal("LanguageModel", CreateOnlyLanguageModel)
       expect(discoverChromePromptFactory()).toBeUndefined()
     } finally {
       vi.unstubAllGlobals()
