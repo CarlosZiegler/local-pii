@@ -4,6 +4,7 @@ import { StrictMode } from "react"
 import { describe, expect, it, vi } from "vitest"
 import {
   createRuntimeController,
+  type RuntimeActivationLoadOptions,
   type RuntimeController,
 } from "./model/runtime-controller"
 import type { BrowserGenerationRuntime } from "./model/types"
@@ -75,6 +76,108 @@ describe("RuntimeProvider", () => {
     unmount()
     await Promise.resolve()
     expect(dispose).toHaveBeenCalledOnce()
+  })
+
+  it("transfers abort ownership when the supplied controller changes", async () => {
+    let releaseA!: (value: BrowserGenerationRuntime) => void
+    let releaseB!: (value: BrowserGenerationRuntime) => void
+    let signalA: AbortSignal | undefined
+    let signalB: AbortSignal | undefined
+    const loadingA = new Promise<BrowserGenerationRuntime>((resolve) => {
+      releaseA = resolve
+    })
+    const loadingB = new Promise<BrowserGenerationRuntime>((resolve) => {
+      releaseB = resolve
+    })
+    const loadA = vi.fn(({ signal }: RuntimeActivationLoadOptions) => {
+      signalA = signal
+      return loadingA
+    })
+    const loadB = vi.fn(({ signal }: RuntimeActivationLoadOptions) => {
+      signalB = signal
+      return loadingB
+    })
+    const controllerA = createRuntimeController({
+      getNative: () => undefined,
+      isGemmaCached: async () => false,
+      loadGemma: loadA,
+    })
+    const controllerB = createRuntimeController({
+      getNative: () => undefined,
+      isGemmaCached: async () => false,
+      loadGemma: loadB,
+    })
+    let settleProviderA!: () => void
+    const activateA = controllerA.activate.bind(controllerA)
+    vi.spyOn(controllerA, "activate").mockImplementation((kind, signal) =>
+      activateA(kind, signal).then(
+        () =>
+          new Promise<void>((resolve) => {
+            settleProviderA = resolve
+          }),
+        (cause) =>
+          new Promise<void>((_, reject) => {
+            settleProviderA = () => reject(cause)
+          })
+      )
+    )
+    const disposeA = vi.spyOn(controllerA, "dispose")
+    const disposeB = vi.spyOn(controllerB, "dispose")
+    const user = userEvent.setup()
+    const unhandled: unknown[] = []
+    const onUnhandled = (reason: unknown) => {
+      unhandled.push(reason)
+    }
+    process.on("unhandledRejection", onUnhandled)
+
+    try {
+      const { rerender, unmount } = render(
+        <RuntimeProvider controller={controllerA}>
+          <RuntimeActions />
+        </RuntimeProvider>
+      )
+      await waitFor(() =>
+        expect(screen.getByTestId("status")).toHaveTextContent(
+          "choice-required"
+        )
+      )
+      await user.click(screen.getByRole("button", { name: "Activate Gemma" }))
+      await vi.waitFor(() => expect(loadA).toHaveBeenCalledOnce())
+
+      rerender(
+        <RuntimeProvider controller={controllerB}>
+          <RuntimeActions />
+        </RuntimeProvider>
+      )
+      await waitFor(() =>
+        expect(screen.getByTestId("status")).toHaveTextContent(
+          "choice-required"
+        )
+      )
+      expect(signalA?.aborted).toBe(true)
+      expect(signalA?.reason).toMatchObject({ name: "AbortError" })
+
+      await user.click(screen.getByRole("button", { name: "Activate Gemma" }))
+      expect(loadB).toHaveBeenCalledOnce()
+
+      unmount()
+      expect(signalB?.aborted).toBe(true)
+      expect(signalB?.reason).toMatchObject({ name: "AbortError" })
+      settleProviderA()
+      releaseA(runtime())
+      releaseB(runtime())
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(disposeA).toHaveBeenCalledOnce()
+      expect(disposeB).toHaveBeenCalledOnce()
+      const disposalA = disposeA.mock.results[0]?.value as Promise<void>
+      const disposalB = disposeB.mock.results[0]?.value as Promise<void>
+      await Promise.all([disposalA, disposalB])
+      expect(unhandled).toEqual([])
+    } finally {
+      process.off("unhandledRejection", onUnhandled)
+    }
   })
 
   it("observes a rejecting controller disposal on unmount", async () => {

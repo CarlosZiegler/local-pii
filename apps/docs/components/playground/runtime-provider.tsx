@@ -66,7 +66,9 @@ export function RuntimeProvider({
     })
     return () => {
       mounted.current = false
-      activeAbort.current?.abort(
+      const abort = activeAbort.current
+      activeAbort.current = null
+      abort?.abort(
         new DOMException("The runtime provider was unmounted", "AbortError")
       )
       queueMicrotask(() => {
