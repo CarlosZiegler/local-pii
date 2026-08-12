@@ -95,7 +95,7 @@ function anonymizeJsonValue(
 }
 
 /**
- * Observe the exact PiiSession calls used by a protected browser run.
+ * Observe the exact PiiSession calls used by a browser generation run.
  * Observation is deliberately separate from the private mapping: publishing
  * a committed generation run never copies or serializes that mapping.
  */

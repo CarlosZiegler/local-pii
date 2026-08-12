@@ -68,7 +68,7 @@ export function createGenerationGate(): GenerationGate {
 
 /**
  * Decorate a runtime without moving gate state into the runtime. The source
- * runtime and its model-session cleanup remain authoritative; the lease is
+ * browser runtime and its generation cleanup remain authoritative; the lease is
  * released by the outer managed iterator after that cleanup settles.
  */
 export function withPlaygroundGate(
