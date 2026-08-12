@@ -317,6 +317,10 @@ export function RuntimePlayground() {
         vocab: rampartAssets.vocab,
         labels: rampartAssets.labels,
         executionProviders: ["wasm"],
+        // Next fingerprints ORT's WASM asset during production builds. The
+        // deploy script also copies a stable browser path; keep unit tests on
+        // ORT's default resolver so they do not depend on public assets.
+        wasmPaths: process.env.NODE_ENV === "production" ? "/ort/" : undefined,
       }),
     []
   )
