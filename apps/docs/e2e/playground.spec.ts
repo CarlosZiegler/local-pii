@@ -124,16 +124,22 @@ test.beforeEach(async ({ page }) => {
       (url.protocol === "https:" && url.hostname.endsWith(".cdn.hf.co"))
     const serverAction = "next-action" in headers
     const mutating = !["GET", "HEAD"].includes(request.method())
+    const eventSource = request.resourceType() === "eventsource"
     const allowedSameOrigin =
       sameOrigin && !mutating && (await isEmittedStaticPath(url.pathname))
 
     if (!sameOrigin) externalRequests.push(request.url())
     if (
       serverAction ||
+      eventSource ||
       (sameOrigin && !allowedSameOrigin) ||
       (!sameOrigin && (!artifactOrigin || request.method() !== "GET"))
     ) {
-      violations.push(`${request.method()} ${request.url()}`)
+      violations.push(
+        eventSource
+          ? `EVENTSOURCE ${request.url()}`
+          : `${request.method()} ${request.url()}`
+      )
       await route.abort("blockedbyclient")
       return
     }
@@ -297,6 +303,17 @@ test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
     await Promise.allSettled([
       fetch("/v1/chat/completions?prompt=secret"),
       fetch("/generate?prompt=secret"),
+      new Promise<void>((resolveAttempt) => {
+        const events = new EventSource("/en/docs/playground")
+        events.addEventListener(
+          "error",
+          () => {
+            events.close()
+            resolveAttempt()
+          },
+          { once: true }
+        )
+      }),
     ])
   })
   const matrix = (
@@ -308,6 +325,7 @@ test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
     [
       "GET http://127.0.0.1:4173/v1/chat/completions?prompt=secret",
       "GET http://127.0.0.1:4173/generate?prompt=secret",
+      "EVENTSOURCE http://127.0.0.1:4173/en/docs/playground",
     ].toSorted()
   )
   expect(matrix?.consoleErrors).toHaveLength(2)

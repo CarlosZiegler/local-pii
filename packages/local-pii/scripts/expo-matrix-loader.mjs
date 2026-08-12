@@ -1,38 +1,9 @@
-const stubs = new Map([
-  [
-    "expo-asset",
-    `export class Asset {
-      static fromModule() {
-        return { localUri: "file:///rampart.onnx", uri: "file:///rampart.onnx", async downloadAsync() {} }
-      }
-    }`,
-  ],
-  [
-    "expo-file-system",
-    "export const cacheDirectory = null; export async function copyAsync() {}",
-  ],
-  [
-    "expo-crypto",
-    "export function getRandomBytes(length) { return new Uint8Array(length) }",
-  ],
-  [
-    "expo-secure-store",
-    "export async function getItemAsync() { return null }; export async function setItemAsync() {}",
-  ],
-  [
-    "onnxruntime-react-native",
-    "export const InferenceSession = {}; export class Tensor {}",
-  ],
-  [
-    "@local-pii/model-rampart",
-    "export const vocab = []; export const labels = []; export default { vocab, labels }",
-  ],
-])
+import { expoStubSources } from "./expo-matrix-stubs.mjs"
 
 const prefix = "local-pii-matrix-stub:"
 
 export async function resolve(specifier, context, nextResolve) {
-  if (stubs.has(specifier)) {
+  if (expoStubSources.has(specifier)) {
     return {
       shortCircuit: true,
       url: `${prefix}${encodeURIComponent(specifier)}`,
@@ -47,7 +18,7 @@ export async function load(url, context, nextLoad) {
     return {
       format: "module",
       shortCircuit: true,
-      source: stubs.get(specifier),
+      source: expoStubSources.get(specifier),
     }
   }
   return nextLoad(url, context)
