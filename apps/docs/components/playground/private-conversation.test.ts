@@ -1,8 +1,10 @@
-import { describe, expect, it } from "vitest"
+import { describe, expect, it, vi } from "vitest"
 import {
   createGenerationRunRegistry,
+  recordGenerationRunFailures,
   resetPrivateConversation,
 } from "./private-conversation"
+import type { BrowserGenerationRuntime } from "./model/types"
 
 describe("private conversation lifecycle", () => {
   it("runs the reset sequence in order and returns the primary failure", async () => {
@@ -131,6 +133,7 @@ describe("private conversation lifecycle", () => {
     const first = registry.begin()
     const second = registry.begin()
 
+    expect(first.id).not.toBe(second.id)
     expect(registry.isCurrent(first.id)).toBe(false)
     expect(registry.isCurrent(second.id)).toBe(true)
     first.settle()
@@ -172,6 +175,44 @@ describe("private conversation lifecycle", () => {
 
     releaseCleanup()
     await settlement
+    expect(registry.isCurrent(run.id)).toBe(false)
+  })
+
+  it("settles the owning run after an upstream next failure", async () => {
+    const registry = createGenerationRunRegistry()
+    const run = registry.begin()
+    const failure = new Error("stream failed")
+    const runtime: BrowserGenerationRuntime = {
+      id: "failed-runtime",
+      disclosure: {
+        label: "Failed runtime",
+        model: "test",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate() {
+        return {
+          [Symbol.asyncIterator]() {
+            return {
+              next: vi.fn(async () => {
+                throw failure
+              }),
+            }
+          },
+        }
+      },
+      dispose: vi.fn(async () => undefined),
+    }
+    const observed = recordGenerationRunFailures(runtime, () => run)
+    const iterator = observed
+      .generate({ protectedContent: "hello", protectedHistory: [] })
+      [Symbol.asyncIterator]()
+    const settlement = registry.waitForActive()
+
+    await expect(iterator.next()).rejects.toBe(failure)
+    run.settle()
+
+    await expect(settlement).rejects.toBe(failure)
     expect(registry.isCurrent(run.id)).toBe(false)
   })
 })

@@ -79,7 +79,7 @@ export interface GenerationRun {
 }
 
 export interface GenerationRunRegistry {
-  begin(runId?: string): GenerationRun
+  begin(): GenerationRun
   settle(runId: string): void
   abort(runId: string, reason?: unknown): void
   isCurrent(runId: string): boolean
@@ -148,11 +148,10 @@ export function recordGenerationRunFailures(
               try {
                 return Promise.resolve(upstream.next(...args)).then(
                   complete,
-                  record
+                  fail
                 )
               } catch (cause) {
-                run?.recordFailure(cause)
-                return Promise.reject(cause)
+                return rejectFailure(cause)
               }
             },
             return(reason?: unknown) {
@@ -192,7 +191,7 @@ export function createGenerationRunRegistry(): GenerationRunRegistry {
     (GenerationRun & { readonly settlement: Promise<void> }) | undefined
 
   return {
-    begin(requestedId) {
+    begin() {
       active?.abort(
         new DOMException("A newer generation started", "AbortError")
       )
@@ -217,7 +216,7 @@ export function createGenerationRunRegistry(): GenerationRunRegistry {
         if (active?.id === run.id) active = undefined
       }
       const run: GenerationRun & { readonly settlement: Promise<void> } = {
-        id: requestedId ?? `run-${++nextId}`,
+        id: `run-${++nextId}`,
         signal: controller.signal,
         settlement,
         recordFailure(cause) {
