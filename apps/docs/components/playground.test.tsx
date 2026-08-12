@@ -25,6 +25,57 @@ const option = {
 }
 
 describe("runtime choice accessibility", () => {
+  it("exposes shared Detection category controls with the documented defaults", async () => {
+    const runtime: BrowserGenerationRuntime = {
+      id: "selector-runtime",
+      disclosure: option.disclosure,
+      generate: () => ({
+        async *[Symbol.asyncIterator]() {
+          yield "ok"
+        },
+      }),
+      dispose: vi.fn(async () => undefined),
+    }
+    const readySnapshot = {
+      status: "ready" as const,
+      kind: "gemini-nano" as const,
+      disclosure: option.disclosure,
+    }
+    const controller: RuntimeController = {
+      activate: vi.fn(async () => undefined),
+      check: vi.fn(async () => undefined),
+      clearGemmaCache: vi.fn(async () => undefined),
+      dispose: vi.fn(async () => undefined),
+      getRuntime: () => runtime,
+      getSnapshot: () => readySnapshot,
+      subscribe: () => () => undefined,
+    }
+    const user = userEvent.setup()
+    render(
+      <RuntimeProviderCore
+        controller={controller}
+        gate={createGenerationGate()}
+      >
+        <RuntimePlayground />
+      </RuntimeProviderCore>
+    )
+
+    const chooser = screen.getByRole("button", {
+      name: /Protect these Detection categories, 19 of 22 selected/,
+    })
+    await user.click(chooser)
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "EMAIL" })
+    ).toHaveAttribute("aria-checked", "true")
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "CITY" })
+    ).toHaveAttribute("aria-checked", "false")
+    await user.click(screen.getByRole("menuitemcheckbox", { name: "EMAIL" }))
+    expect(
+      screen.getByRole("menuitemcheckbox", { name: "EMAIL" })
+    ).toHaveAttribute("aria-checked", "false")
+  })
+
   it("names unavailable choices with their visible state and runtime", () => {
     expect(
       runtimeChoiceAriaLabel({ ...option, availability: "unavailable" })

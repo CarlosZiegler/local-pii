@@ -1,17 +1,111 @@
 "use client"
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert"
+import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
+import {
+  DropdownMenu,
+  DropdownMenuCheckboxItem,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu"
 import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import { CpuIcon, DownloadIcon, ShieldCheckIcon, XIcon } from "lucide-react"
+import type { PiiType } from "local-pii"
 import { rampartAssets, rampartWeb } from "local-pii/web"
-import { useMemo } from "react"
+import {
+  ChevronsUpDownIcon,
+  CpuIcon,
+  DownloadIcon,
+  ShieldCheckIcon,
+  XIcon,
+} from "lucide-react"
+import { useCallback, useMemo, useState } from "react"
 import type { RuntimeOption } from "./playground/model/types"
 import { RuntimeProvider, useLocalRuntime } from "./playground/runtime-provider"
 import { runtimeChoiceAriaLabel } from "./playground/runtime-choice"
 import { TanStackChat } from "./playground/tanstack-chat"
 import { VercelChat } from "./playground/vercel-chat"
+
+/** Model-backed Detection categories exposed by the playground multi-select. */
+export const DETECTION_CATEGORY_GROUPS = [
+  {
+    id: "identity",
+    label: "Identity",
+    types: ["GIVEN_NAME", "SURNAME", "PERSON", "ORGANIZATION"],
+  },
+  {
+    id: "contact",
+    label: "Contact",
+    types: ["EMAIL", "PHONE", "URL"],
+  },
+  {
+    id: "address",
+    label: "Address",
+    types: [
+      "BUILDING_NUMBER",
+      "STREET_NAME",
+      "SECONDARY_ADDRESS",
+      "CITY",
+      "STATE",
+      "ZIP_CODE",
+    ],
+  },
+  {
+    id: "documents",
+    label: "Documents",
+    types: ["TAX_ID", "GOVERNMENT_ID", "PASSPORT", "DRIVERS_LICENSE"],
+  },
+  {
+    id: "financial-network",
+    label: "Financial / network",
+    types: [
+      "BANK_ACCOUNT",
+      "ROUTING_NUMBER",
+      "CREDIT_CARD",
+      "IBAN",
+      "IP_ADDRESS",
+    ],
+  },
+] as const satisfies ReadonlyArray<{
+  id: string
+  label: string
+  types: readonly PiiType[]
+}>
+
+export const ALL_DETECTION_CATEGORIES: readonly PiiType[] =
+  DETECTION_CATEGORY_GROUPS.flatMap((group) => [...group.types])
+
+/** Unselected by default so local-pii keeps CITY/STATE/ZIP_CODE (library default). */
+export const DEFAULT_UNSELECTED_DETECTION_CATEGORIES: readonly PiiType[] = [
+  "CITY",
+  "STATE",
+  "ZIP_CODE",
+]
+
+export function createDefaultSelectedDetectionCategories(): Set<PiiType> {
+  const unselected = new Set<PiiType>(DEFAULT_UNSELECTED_DETECTION_CATEGORIES)
+  return new Set(
+    ALL_DETECTION_CATEGORIES.filter((type) => !unselected.has(type))
+  )
+}
+
+/**
+ * Unselected model Detection categories become anonymizer `keep` entries so
+ * they are retained; selected categories are redacted by the Detection model.
+ * Deterministic built-in detectors are unaffected by this list.
+ */
+export function detectionKeepFromSelected(
+  selected: ReadonlySet<PiiType>
+): PiiType[] {
+  return ALL_DETECTION_CATEGORIES.filter((type) => !selected.has(type))
+}
+
+export function serializeDetectionKeep(keep: readonly PiiType[]): string {
+  return [...keep].sort().join("\0")
+}
 
 function formatBytes(bytes: number): string {
   if (bytes >= 1_000_000_000) return `~${(bytes / 1_000_000_000).toFixed(1)} GB`
@@ -86,6 +180,134 @@ function RuntimeChoice({
   )
 }
 
+function DetectionCategorySelector({
+  selected,
+  onChange,
+}: {
+  selected: ReadonlySet<PiiType>
+  onChange: (next: Set<PiiType>) => void
+}) {
+  const selectedCount = selected.size
+  const total = ALL_DETECTION_CATEGORIES.length
+  const selectedList = ALL_DETECTION_CATEGORIES.filter((type) =>
+    selected.has(type)
+  )
+
+  const toggle = useCallback(
+    (type: PiiType, nextChecked: boolean) => {
+      const next = new Set(selected)
+      if (nextChecked) next.add(type)
+      else next.delete(type)
+      onChange(next)
+    },
+    [onChange, selected]
+  )
+
+  const remove = useCallback(
+    (type: PiiType) => {
+      const next = new Set(selected)
+      next.delete(type)
+      onChange(next)
+    },
+    [onChange, selected]
+  )
+
+  return (
+    <section
+      aria-labelledby="detection-categories-heading"
+      className="space-y-3 rounded-xl border bg-card p-4 shadow-sm"
+    >
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+        <div className="space-y-1">
+          <h3
+            className="text-sm font-semibold"
+            id="detection-categories-heading"
+          >
+            Protect these Detection categories
+          </h3>
+          <p className="text-xs text-muted-foreground">
+            Shared by Vercel AI SDK and TanStack AI. Selected model categories
+            are redacted; unselected ones stay in the protected request via the
+            anonymizer keep list.
+          </p>
+        </div>
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              aria-label={`Protect these Detection categories, ${selectedCount} of ${total} selected`}
+              className="justify-between sm:min-w-[16rem]"
+              type="button"
+              variant="outline"
+            >
+              <span>
+                {selectedCount === 0
+                  ? "No model categories"
+                  : `${selectedCount} of ${total} categories`}
+              </span>
+              <ChevronsUpDownIcon className="size-4 opacity-60" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="max-h-80 w-72 overflow-y-auto"
+          >
+            {DETECTION_CATEGORY_GROUPS.map((group, index) => (
+              <div key={group.id}>
+                {index > 0 ? <DropdownMenuSeparator /> : null}
+                <DropdownMenuLabel>{group.label}</DropdownMenuLabel>
+                {group.types.map((type) => (
+                  <DropdownMenuCheckboxItem
+                    checked={selected.has(type)}
+                    key={type}
+                    onCheckedChange={(checked) =>
+                      toggle(type, checked === true)
+                    }
+                    onSelect={(event) => event.preventDefault()}
+                  >
+                    {type}
+                  </DropdownMenuCheckboxItem>
+                ))}
+              </div>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      </div>
+
+      {selectedCount === 0 ? (
+        <p className="text-xs text-muted-foreground" role="status">
+          No model Detection categories selected. Deterministic built-in
+          detectors (email, URL, IP, SSN, card, IBAN, and phone) remain active.
+        </p>
+      ) : (
+        <ul className="flex flex-wrap gap-1.5" aria-label="Selected categories">
+          {selectedList.map((type) => (
+            <li key={type}>
+              <Badge className="gap-1 pr-1" variant="secondary">
+                <span>{type}</span>
+                <button
+                  aria-label={`Remove ${type}`}
+                  className="rounded-full p-0.5 hover:bg-muted"
+                  onClick={() => remove(type)}
+                  type="button"
+                >
+                  <XIcon className="size-3" />
+                </button>
+              </Badge>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        Deterministic built-in detectors (email, URL, IP, SSN, card, IBAN, and
+        phone) stay always-on in this playground: the public anonymizer contract
+        cannot disable them individually. Deselecting a model category such as
+        EMAIL does not turn off the deterministic email detector.
+      </p>
+    </section>
+  )
+}
+
 export function RuntimePlayground() {
   const runtime = useLocalRuntime()
   const detection = useMemo(
@@ -98,7 +320,22 @@ export function RuntimePlayground() {
       }),
     []
   )
+  const [selectedCategories, setSelectedCategories] = useState(
+    createDefaultSelectedDetectionCategories
+  )
+  const [policyAnnouncement, setPolicyAnnouncement] = useState("")
+  const keep = useMemo(
+    () => detectionKeepFromSelected(selectedCategories),
+    [selectedCategories]
+  )
   const ready = runtime.status === "ready" && runtime.runtime
+
+  const handleCategoriesChange = useCallback((next: Set<PiiType>) => {
+    setSelectedCategories(next)
+    setPolicyAnnouncement(
+      "Privacy policy changed; private conversations were restarted."
+    )
+  }, [])
 
   return (
     <div className="not-prose my-8 space-y-4">
@@ -243,42 +480,53 @@ export function RuntimePlayground() {
       ) : null}
 
       {ready ? (
-        <Tabs defaultValue="vercel">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <TabsList aria-label="AI framework example">
-              <TabsTrigger value="vercel">Vercel AI SDK</TabsTrigger>
-              <TabsTrigger value="tanstack">TanStack AI</TabsTrigger>
-            </TabsList>
-            <span className="text-xs text-muted-foreground">
-              Active runtime:{" "}
-              <strong className="text-foreground">
-                {runtime.disclosure.label}
-              </strong>
-            </span>
-          </div>
-          <TabsContent
-            className="mt-3 data-[state=inactive]:hidden"
-            forceMount
-            value="vercel"
-          >
-            <VercelChat
-              detection={detection}
-              runtime={ready}
-              runtimeName={runtime.disclosure.label}
-            />
-          </TabsContent>
-          <TabsContent
-            className="mt-3 data-[state=inactive]:hidden"
-            forceMount
-            value="tanstack"
-          >
-            <TanStackChat
-              detection={detection}
-              runtime={ready}
-              runtimeName={runtime.disclosure.label}
-            />
-          </TabsContent>
-        </Tabs>
+        <>
+          <DetectionCategorySelector
+            onChange={handleCategoriesChange}
+            selected={selectedCategories}
+          />
+          <p aria-live="polite" className="sr-only">
+            {policyAnnouncement}
+          </p>
+          <Tabs defaultValue="vercel">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <TabsList aria-label="AI framework example">
+                <TabsTrigger value="vercel">Vercel AI SDK</TabsTrigger>
+                <TabsTrigger value="tanstack">TanStack AI</TabsTrigger>
+              </TabsList>
+              <span className="text-xs text-muted-foreground">
+                Active runtime:{" "}
+                <strong className="text-foreground">
+                  {runtime.disclosure.label}
+                </strong>
+              </span>
+            </div>
+            <TabsContent
+              className="mt-3 data-[state=inactive]:hidden"
+              forceMount
+              value="vercel"
+            >
+              <VercelChat
+                detection={detection}
+                keep={keep}
+                runtime={ready}
+                runtimeName={runtime.disclosure.label}
+              />
+            </TabsContent>
+            <TabsContent
+              className="mt-3 data-[state=inactive]:hidden"
+              forceMount
+              value="tanstack"
+            >
+              <TanStackChat
+                detection={detection}
+                keep={keep}
+                runtime={ready}
+                runtimeName={runtime.disclosure.label}
+              />
+            </TabsContent>
+          </Tabs>
+        </>
       ) : null}
     </div>
   )
