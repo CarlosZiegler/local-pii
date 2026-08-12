@@ -60,7 +60,15 @@ function Panel({ segs, redacted }: { segs: Seg[]; redacted: boolean }) {
   )
 }
 
-function Membrane() {
+function Membrane({
+  local,
+  leaves,
+  model,
+}: {
+  local: string
+  leaves: string
+  model: string
+}) {
   const [i, setI] = useState(0)
   useEffect(() => {
     if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return
@@ -72,11 +80,10 @@ function Membrane() {
   return (
     <div className="rounded-2xl border bg-card p-1 shadow-sm">
       <div className="grid grid-cols-1 gap-px overflow-hidden rounded-xl md:grid-cols-[1fr_auto_1fr]">
-        {/* on device */}
+        {/* trust boundary */}
         <div className="bg-background p-4">
           <div className="mb-2 flex items-center gap-1.5 text-[0.7rem] font-semibold tracking-wider text-muted-foreground uppercase">
-            <span className="size-1.5 rounded-full bg-emerald-500" /> on your
-            device
+            <span className="size-1.5 rounded-full bg-emerald-500" /> {local}
           </div>
           <Panel segs={segs} redacted={false} />
         </div>
@@ -85,15 +92,14 @@ function Membrane() {
         <div className="relative flex items-center justify-center bg-background px-2 py-3 md:flex-col">
           <div className="absolute inset-x-4 top-1/2 h-px bg-gradient-to-r from-transparent via-amber-500/50 to-transparent md:inset-x-auto md:inset-y-4 md:left-1/2 md:h-auto md:w-px md:bg-gradient-to-b" />
           <span className="relative rounded-full border border-amber-500/40 bg-background px-2 py-0.5 font-mono text-[0.62rem] tracking-wider text-amber-600 uppercase dark:text-amber-400">
-            leaves →
+            {leaves}
           </span>
         </div>
 
-        {/* what the LLM sees */}
+        {/* what the generation model sees */}
         <div className="bg-background p-4">
           <div className="mb-2 flex items-center gap-1.5 text-[0.7rem] font-semibold tracking-wider text-muted-foreground uppercase">
-            <span className="size-1.5 rounded-full bg-amber-500" /> what the LLM
-            sees
+            <span className="size-1.5 rounded-full bg-amber-500" /> {model}
           </div>
           <Panel segs={segs} redacted />
         </div>
@@ -155,7 +161,11 @@ export function Hero({ lang = "en" }: { lang?: string }) {
       </div>
 
       <div className="mt-12">
-        <Membrane />
+        <Membrane
+          local={s.membraneLocal}
+          leaves={s.membraneLeaves}
+          model={s.membraneModel}
+        />
       </div>
     </section>
   )

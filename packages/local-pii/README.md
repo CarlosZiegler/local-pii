@@ -76,6 +76,9 @@ const privacy = createAnonymizer({
 This requires a dev client / prebuild, not Expo Go. If the model cannot load,
 the default is deterministic-only degradation; `strict: true` throws instead.
 The browser equivalent is `detection: rampartWeb()` from `local-pii/web`.
+Zero-config browser loading fetches the 14.7 MB Rampart artifacts (and runtime
+support files) on first use; that download has no user content. Self-host or
+pass bundled assets for production.
 
 ## Adapters and ownership
 
