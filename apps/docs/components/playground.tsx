@@ -71,7 +71,7 @@ function RuntimeChoice({ option }: { option: RuntimeOption }) {
   )
 }
 
-function RuntimePlayground() {
+export function RuntimePlayground() {
   const runtime = useLocalRuntime()
   const ready = runtime.status === "ready" && runtime.runtime
 
