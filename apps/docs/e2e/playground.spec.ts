@@ -92,6 +92,7 @@ test.beforeEach(async ({ page }) => {
     const sameOrigin = url.origin === BASE_ORIGIN
     const artifactOrigin =
       url.origin === "https://huggingface.co" ||
+      url.origin === "https://cdn.jsdelivr.net" ||
       (url.protocol === "https:" && url.hostname.endsWith(".cdn.hf.co"))
     const serverAction = "next-action" in headers
     const mutating = !["GET", "HEAD"].includes(request.method())

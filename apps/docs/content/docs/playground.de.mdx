@@ -36,12 +36,16 @@ Runtime ist keine öffentliche `local-pii`-API.
   passende Hardware und Prompt-API. Diese Ressourcen sind kein von dieser Seite
   gesteuerter Artefakt-Download.
 - Gemma ist `onnx-community/gemma-3-270m-it-ONNX`, Revision
-  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0`, q4f16 WebGPU und ungefähr
-  293.284.073 Bytes groß. Gepinnte Ursprünge sind `https://huggingface.co` und
-  `https://*.cdn.hf.co`; lies vor der Aktivierung die [Model Card und Gemma-Lizenzbedingungen](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX).
-- Explizite Artefakt-Downloads enthalten nur statische Modellressourcen, keinen
-  Benutzerinhalt. Prompts, wiederhergestellte Werte, Mapping und Inspector
-  werden nie an einen Anwendungs-Endpunkt gesendet.
+  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0` und q4f16 WebGPU. Die sechs
+  gepinnten Modelldateien sind zusammen 293.284.073 Bytes groß. Bei der ersten
+  Aktivierung können zusätzlich 23.614.439 unkomprimierte Bytes versionierter
+  ONNX-Runtime-Web-Unterstützungsdateien geladen werden, insgesamt also ungefähr
+  316.898.512 statische Artefakt-Bytes (~317 MB vor Übertragungskomprimierung).
+  Die Ursprünge sind `https://huggingface.co`, `https://*.cdn.hf.co` und
+  `https://cdn.jsdelivr.net`; lies vor der Aktivierung die [Model Card und Gemma-Lizenzbedingungen](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX).
+- Explizite Artefakt-Downloads enthalten nur statische Modell- und
+  Runtime-Ressourcen, keinen Benutzerinhalt. Prompts, wiederhergestellte Werte,
+  Mapping und Inspector werden nie an einen Anwendungs-Endpunkt gesendet.
 - Kleine browserlokale Generierungsmodelle eignen sich für diese Demo, aber
   Qualität und Reasoning variieren. Eine Übersetzung garantiert keine gleiche
   Qualität auf Englisch, Portugiesisch und Deutsch.

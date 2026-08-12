@@ -33,13 +33,17 @@ runtime interno da documentação não é uma API pública de `local-pii`.
   Prompt API compatíveis. Seus recursos não são download de artefatos controlado
   por esta página.
 - Gemma é `onnx-community/gemma-3-270m-it-ONNX`, revisão
-  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0`, q4f16 WebGPU e aproximadamente
-  293.284.073 bytes. As origens pinadas são `https://huggingface.co` e
-  `https://*.cdn.hf.co`; leia o [model card e os termos da licença Gemma](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
+  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0` e q4f16 WebGPU. Seus seis arquivos
+  pinados do modelo totalizam 293.284.073 bytes. A primeira ativação também pode
+  baixar 23.614.439 bytes não comprimidos de arquivos versionados de suporte do
+  ONNX Runtime Web, totalizando aproximadamente 316.898.512 bytes de artefatos
+  estáticos (~317 MB antes da compressão de transferência). As origens são
+  `https://huggingface.co`, `https://*.cdn.hf.co` e `https://cdn.jsdelivr.net`;
+  leia o [model card e os termos da licença Gemma](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
   antes de ativar.
-- Downloads explícitos contêm apenas recursos estáticos do modelo, sem conteúdo
-  do usuário. Prompts, valores restaurados, mappings e inspector não vão para
-  endpoint da aplicação.
+- Downloads explícitos contêm apenas recursos estáticos do modelo e do runtime,
+  sem conteúdo do usuário. Prompts, valores restaurados, mappings e inspector
+  não vão para endpoint da aplicação.
 - Modelos de Geração pequenos são úteis nesta demonstração, mas qualidade e
   raciocínio variam. Traduzir a interface não garante qualidade igual em inglês,
   português e alemão.

@@ -34,13 +34,16 @@ public `local-pii` API.
   hardware, and Prompt API availability. Browser-managed resources are not an
   artifact download controlled by this page.
 - Gemma is `onnx-community/gemma-3-270m-it-ONNX`, revision
-  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0`, q4f16 WebGPU, and approximately
-  293,284,073 bytes. Its pinned artifact origins are `https://huggingface.co`
-  and `https://*.cdn.hf.co`; review the [model card and Gemma license terms](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
+  `2dbbfdb1b59bd034eb959428c6a7da9dd7ea27f0`, q4f16 WebGPU. Its six pinned
+  model files total 293,284,073 bytes. The first activation can also fetch
+  23,614,439 uncompressed bytes of versioned ONNX Runtime Web support files,
+  for approximately 316,898,512 static artifact bytes (~317 MB before transfer
+  compression). Origins are `https://huggingface.co`, `https://*.cdn.hf.co`,
+  and `https://cdn.jsdelivr.net`; review the [model card and Gemma license terms](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX)
   before activation.
-- Explicit artifact downloads contain only static model resources and no user
-  content. Prompts, restored values, private mappings, and inspection state do
-  not go to an application endpoint.
+- Explicit artifact downloads contain only static model and runtime resources,
+  with no user content. Prompts, restored values, private mappings, and
+  inspection state do not go to an application endpoint.
 - Small browser-local Generation models are useful for this demonstration, but
   quality and reasoning vary by model and language. Translation does not imply
   equal quality in English, Portuguese, and German.

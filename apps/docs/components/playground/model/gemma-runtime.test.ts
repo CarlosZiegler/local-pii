@@ -458,8 +458,12 @@ describe("Gemma browser-generation runtime", () => {
       source: "Transformers.js browser runtime",
       artifacts: {
         kind: "explicit-download",
-        approximateBytes: 293_284_073,
-        origins: ["https://huggingface.co", "https://*.cdn.hf.co"],
+        approximateBytes: 316_898_512,
+        origins: [
+          "https://huggingface.co",
+          "https://*.cdn.hf.co",
+          "https://cdn.jsdelivr.net",
+        ],
       },
     })
     await runtime.dispose()
