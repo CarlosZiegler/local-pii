@@ -29,3 +29,4 @@ out/
 
 # self-hosted model assets (copy from @local-pii/model-rampart before build)
 public/models/
+public/ort/
