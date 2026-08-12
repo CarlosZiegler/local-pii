@@ -29,9 +29,10 @@ maschinell verarbeitete Ausgabe bleibt `token()` die sicherere Wahl.
 Ein einfacher Hash von E-Mail oder Telefon ist erratbar: Ein Provider kann
 Kandidaten offline neu berechnen. `hashed` und `token({ secret })` verwenden
 den von dir gelieferten Schlüssel. Erzeuge und speichere einen starken
-Zufallsschlüssel; die Strategien prüfen seine Entropie nicht. Expo-Apps können
-`getOrCreateDeviceSecret()` aus `local-pii/expo` verwenden. Ohne den Schlüssel
-ist ein Treffer nicht verifizierbar.
+Zufallsschlüssel; die Strategien prüfen seine Entropie nicht. Expo-Apps mit
+`expo-crypto` und `expo-secure-store` können `getOrCreateDeviceSecret()` aus
+`local-pii/expo` verwenden. Ohne den Schlüssel ist ein Treffer nicht
+verifizierbar.
 
 Tool-Argumente sind eine Offenlegungsgrenze. Rehydrierung gibt deinem Tool den
 Originalwert; eine Weiterleitung ist eine neue Offenlegung unter Verantwortung

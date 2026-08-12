@@ -27,8 +27,8 @@ provider ──final text──▶ app                                  ← rehy
    streaming rehydrator holds back a tail until no placeholder can still be
    growing into it.
 4. **Session drift.** If step N+1 re-anonymizes history and produces _different_
-   placeholders, the provider sees two names for one entity. The **vault
-   dictionary** + **idempotence** keep placeholders byte-stable across every step.
+   placeholders, the provider sees two names for one entity. The **private
+   mapping** + **idempotence** keep placeholders byte-stable across every step.
 
 ## The rule
 

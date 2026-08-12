@@ -3,12 +3,14 @@ title: Erste Schritte
 description: Adapter-first Privacy für Expo, React Native, Browser und Node.
 ---
 
-**local-pii** schützt persönliche Informationen, bevor sie das Gerät verlassen.
+**local-pii** schützt persönliche Informationen, bevor sie die Grenze zum
+gewählten Generierungs-Provider überschreiten.
 Ein Erkennungs-Adapter speist den Anonymizer, eine Privacy-Session gehört zu
 einer privaten Konversation, und ein Generierungs-Adapter oder Inline-Callback
-ruft das gewählte Generierungsmodell auf. Nur geschützter Inhalt überschreitet
-die Provider-Grenze; das private Mapping bleibt innerhalb der Vertrauensgrenze
-des Aufrufers.
+ruft das gewählte Generierungsmodell auf. Geschützter semantischer Inhalt
+überschreitet die Provider-Grenze; opakes Reasoning, Metadaten und Optionen
+bleiben Verantwortung des Aufrufers. Das private Mapping bleibt innerhalb
+seiner Vertrauensgrenze.
 
 ```ts
 import { createAnonymizer, token } from "local-pii"

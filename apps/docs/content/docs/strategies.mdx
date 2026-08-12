@@ -33,8 +33,9 @@ sessions and devices sharing the secret.
 > **Why keyed?** A plain hash of the value (`sha256(email)`) is a privacy leak:
 > placeholders reach the provider, and PII is low-entropy, so anyone can confirm
 > a guessed value offline by recomputing the hash. `hashed()` is HMAC-keyed with
-> a device-local secret that never leaves the device. Unkeyed hashing is not
-> offered. See [Security](/en/docs/security).
+> the secret supplied by the caller. Generate and store a strong random secret;
+> the strategy does not validate its entropy. Unkeyed hashing is not offered.
+> See [Security](/en/docs/security).
 
 Get a persisted device secret (Expo):
 
@@ -59,10 +60,11 @@ lenient decoding recovers `O`/`0` and `I`/`L`/`1` confusions.
 ```ts
 import { token } from "local-pii"
 
-token() // random per value — leaks not even equality
+token() // random per distinct value; equality is visible inside one session
 token({ secret }) // HMAC — stable across sessions/devices
 token({ bits: 100, prefix: "PII" })
 ```
 
-It leaks nothing — not even the entity type. The `entities` array on the result
-still carries types for your UI.
+It hides the value and entity type, but equal canonical values reuse a token
+inside one privacy session. A new session breaks that link. The `entities`
+array on the result still carries types for your UI.

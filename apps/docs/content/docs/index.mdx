@@ -3,11 +3,13 @@ title: Get Started
 description: Adapter-first privacy for Expo, React Native, the browser and Node.
 ---
 
-**local-pii** protects personal information before it leaves the device. A
+**local-pii** protects personal information before it crosses the selected
+Generation provider boundary. A
 Detection adapter feeds the anonymizer, one privacy session owns a private
 conversation, and a native Generation adapter or inline callback calls the
-selected Generation model. Only protected content crosses the provider
-boundary; the private mapping stays inside the caller's trust boundary.
+selected Generation model. Protected semantic content crosses the provider
+boundary; opaque reasoning, metadata, and options remain caller responsibility.
+The private mapping stays inside the caller's trust boundary.
 
 ```ts
 import { createAnonymizer, token } from "local-pii"

@@ -34,9 +34,10 @@ geräteübergreifend (bei gemeinsamem Secret) dasselbe Token erhält.
 > **Warum keyed?** Ein einfacher Hash des Werts (`sha256(email)`) ist ein
 > Privacy-Leak: Platzhalter erreichen den Provider, und PII hat niedrige
 > Entropie, sodass jeder einen erratenen Wert offline bestätigen kann, indem
-> er den Hash neu berechnet. `hashed()` ist HMAC-keyed mit einem
-> geräte-lokalen Secret, das das Gerät nie verlässt. Ungekeytes Hashing wird
-> nicht angeboten. Siehe [Sicherheit](/de/docs/security).
+> er den Hash neu berechnet. `hashed()` ist HMAC-keyed mit dem vom Aufrufer
+> gelieferten Secret. Erzeuge und speichere ein starkes Zufalls-Secret; die
+> Strategie prüft seine Entropie nicht. Ungekeytes Hashing wird nicht angeboten.
+> Siehe [Sicherheit](/de/docs/security).
 
 Ein persistiertes Device-Secret holen (Expo):
 
@@ -64,10 +65,12 @@ deshalb — und ein nachsichtiges Decoding behebt `O`/`0`- und
 ```ts
 import { token } from "local-pii"
 
-token() // zufällig pro Wert — gibt nicht einmal Gleichheit preis
+token() // zufällig pro Wert; Gleichheit ist innerhalb der Session sichtbar
 token({ secret }) // HMAC — stabil über Sessions/Geräte hinweg
 token({ bits: 100, prefix: "PII" })
 ```
 
-Es gibt nichts preis — nicht einmal den Entitätstyp. Das `entities`-Array im
-Ergebnis führt weiterhin Typen für deine UI mit.
+Es verbirgt Wert und Entitätstyp, aber gleiche kanonische Werte verwenden
+innerhalb einer Privacy-Session dasselbe Token. Eine neue Session trennt diese
+Verbindung. Das `entities`-Array im Ergebnis führt weiterhin Typen für deine UI
+mit.

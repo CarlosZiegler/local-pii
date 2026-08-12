@@ -69,12 +69,12 @@ const model = withPii(openai("gpt-5.2"), { session: conversation })
 const result = streamText({ model, prompt })
 ```
 
-| Vertrag                               | Getestetes Verhalten                                                                                                                                    |
-| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Geschützte semantische Werte          | System-/User-/Assistant-Text, Tool-Input/-Output und strukturiertes JSON werden geschützt. Reasoning ist opak und bleibt Verantwortung des Aufrufers.   |
-| Rehydrierte semantische Werte         | Text, Tool-Argumente vor Tool-Ausführung und Ergebnisse im nächsten Schritt werden rehydriert. Reasoning-Teile werden unverändert durchgereicht.        |
-| Erhaltene Steuerung / opake Werte     | Typen, IDs, Rollen, Reasoning, Tool-Namen, Freigaben, Optionen und Stream-Marker bleiben unverändert; Aufrufer-Metadaten werden nicht untersucht.       |
-| Nicht unterstützte Varianten / Fehler | Nicht unterstützte Inhalte und ungültige Streams schlagen fehl. Abort und Provider-Fehler behalten den exakten Fehler und rufen den Provider nicht auf. |
+| Vertrag                               | Getestetes Verhalten                                                                                                                                                                                   |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Geschützte semantische Werte          | System-/User-/Assistant-Text, Tool-Input/-Output und strukturiertes JSON werden geschützt. Reasoning ist opak und bleibt Verantwortung des Aufrufers.                                                  |
+| Rehydrierte semantische Werte         | Text, Tool-Argumente vor Tool-Ausführung und Ergebnisse im nächsten Schritt werden rehydriert. Reasoning-Teile werden unverändert durchgereicht.                                                       |
+| Erhaltene Steuerung / opake Werte     | Typen, IDs, Rollen, Reasoning, Tool-Namen, Freigaben, Optionen und Stream-Marker bleiben unverändert; Aufrufer-Metadaten werden nicht untersucht.                                                      |
+| Nicht unterstützte Varianten / Fehler | Nicht unterstützte Inhalte und ungültige Streams schlagen fehl. Abort- und Provider-Fehler behalten den exakten Fehler; ein vor der Provider-Grenze beobachteter Abort verhindert den Provider-Aufruf. |
 
 `withPii` ist Middleware und braucht keinen Tool-Wrapper. Eine übergebene Session
 ist geliehen; ohne sie besitzt die Middleware eine Session für ihre Instanz und

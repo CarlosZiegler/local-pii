@@ -73,12 +73,12 @@ const model = withPii(openai("gpt-5.2"), { session: conversation })
 const result = streamText({ model, prompt })
 ```
 
-| Contract                          | Proven behavior                                                                                                                                                                  |
-| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Protected semantic values         | System/user/assistant text, tool-call input, tool-result output, and structured JSON are protected before the provider. Reasoning is opaque and remains caller responsibility.   |
-| Restored semantic values          | Text stream parts, tool arguments before tool execution, and tool results at the next model step are restored. Reasoning parts pass through unchanged.                           |
-| Preserved control / opaque values | Part types, IDs, roles, reasoning, tool names, approval state, provider options, and stream control markers remain unchanged; caller-owned metadata is not inspected.            |
-| Unsupported variants / errors     | Unsupported semantic content or malformed streams fail explicitly. Pre-abort/post-protection aborts and provider failures preserve the exact error and do not call the provider. |
+| Contract                          | Proven behavior                                                                                                                                                                                      |
+| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Protected semantic values         | System/user/assistant text, tool-call input, tool-result output, and structured JSON are protected before the provider. Reasoning is opaque and remains caller responsibility.                       |
+| Restored semantic values          | Text stream parts, tool arguments before tool execution, and tool results at the next model step are restored. Reasoning parts pass through unchanged.                                               |
+| Preserved control / opaque values | Part types, IDs, roles, reasoning, tool names, approval state, provider options, and stream control markers remain unchanged; caller-owned metadata is not inspected.                                |
+| Unsupported variants / errors     | Unsupported semantic content or malformed streams fail explicitly. Aborts and provider failures preserve the exact error; an abort observed before the provider boundary prevents the provider call. |
 
 `withPii` is middleware: no tool wrapper is required. Supplied sessions are
 borrowed; without one the middleware owns a session scoped to that middleware

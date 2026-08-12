@@ -57,7 +57,7 @@ bun run build
 ## How it works
 
 ```text
-user content ─▶ Detection adapter ─▶ anonymizer ─▶ private session
+user content ─▶ Detection adapter ─▶ anonymizer ─▶ privacy session
               ─▶ protected content ─▶ Generation model
               ◀─ restored response ◀─ private mapping stays with the caller
 ```

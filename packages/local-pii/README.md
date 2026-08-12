@@ -120,5 +120,5 @@ offline.
 ## Limitations
 
 Detection is defense in depth, not a guarantee. Indirect identifiers can pass
-through, and Rampart has lower recall for non-Latin scripts. Keep raw content
+through, and Rampart has lower recall for non-Latin scripts. Keep user content
 and the private mapping out of logs, analytics, and crash reports.

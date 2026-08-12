@@ -70,12 +70,12 @@ const model = withPii(openai("gpt-5.2"), { session: conversation })
 const result = streamText({ model, prompt })
 ```
 
-| Contrato                         | Comportamento testado                                                                                                                                       |
-| -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Valores semânticos protegidos    | Texto de sistema/usuário/assistente, inputs/outputs de tools e JSON estruturado são protegidos. Reasoning é opaco e permanece responsabilidade do chamador. |
-| Valores semânticos reidratados   | Texto, argumentos antes da tool e resultados no passo seguinte são reidratados. Partes de reasoning passam sem alteração.                                   |
-| Controle / opacos preservados    | Tipos, IDs, papéis, reasoning, nomes, aprovações, opções e marcadores de stream permanecem iguais; metadados do chamador não são inspecionados.             |
-| Variantes não suportadas / erros | Conteúdo sem suporte e streams inválidos falham. Abort prévio/pós-proteção e erros do provedor preservam a falha exata sem chamar o provedor.               |
+| Contrato                         | Comportamento testado                                                                                                                                                    |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Valores semânticos protegidos    | Texto de sistema/usuário/assistente, inputs/outputs de tools e JSON estruturado são protegidos. Reasoning é opaco e permanece responsabilidade do chamador.              |
+| Valores semânticos reidratados   | Texto, argumentos antes da tool e resultados no passo seguinte são reidratados. Partes de reasoning passam sem alteração.                                                |
+| Controle / opacos preservados    | Tipos, IDs, papéis, reasoning, nomes, aprovações, opções e marcadores de stream permanecem iguais; metadados do chamador não são inspecionados.                          |
+| Variantes não suportadas / erros | Conteúdo sem suporte e streams inválidos falham. Aborts e erros do provedor preservam a falha exata; um abort observado antes da fronteira impede a chamada ao provedor. |
 
 `withPii` é middleware e não exige wrapper de tool. Sessão fornecida é
 emprestada; sem ela, o middleware possui uma sessão vinculada à instância e a
