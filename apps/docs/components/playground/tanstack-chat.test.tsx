@@ -31,11 +31,19 @@ function tokenFrom(request: ProtectedBrowserRequest): string {
   return placeholder
 }
 
+function freezeRequest(
+  request: ProtectedBrowserRequest
+): ProtectedBrowserRequest {
+  for (const turn of request.protectedHistory) Object.freeze(turn)
+  Object.freeze(request.protectedHistory)
+  return Object.freeze(request)
+}
+
 describe("TanStackChat", () => {
   it("protects the real adapter request once, restores output, and resets its session", async () => {
     const requests: ProtectedBrowserRequest[] = []
     const generate = vi.fn(async function* (request: ProtectedBrowserRequest) {
-      requests.push(request)
+      requests.push(freezeRequest(request))
       const placeholder = request.protectedContent.match(
         /PII[0-9A-HJKMNP-TV-Z]+/
       )?.[0]
@@ -56,6 +64,8 @@ describe("TanStackChat", () => {
 
     await waitFor(() => expect(requests).toHaveLength(1))
     expect(requests[0]?.protectedContent).not.toContain("ana@acme.com")
+    expect(Object.isFrozen(requests[0])).toBe(true)
+    expect(Object.isFrozen(requests[0]?.protectedHistory)).toBe(true)
     expect(requests[0]?.protectedContent).toMatch(/PII[0-9A-HJKMNP-TV-Z]+/)
     expect(
       screen.getByLabelText("Current protected content")

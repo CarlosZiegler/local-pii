@@ -88,9 +88,16 @@ export function recordGenerationRunFailures(
     disclosure: runtime.disclosure,
     generate(input) {
       const run = getRun()
+      const signal = run
+        ? input.signal && input.signal !== run.signal
+          ? AbortSignal.any([input.signal, run.signal])
+          : run.signal
+        : input.signal
       let source: AsyncIterable<string>
       try {
-        source = runtime.generate(input)
+        source = runtime.generate(
+          signal === input.signal ? input : { ...input, signal }
+        )
       } catch (cause) {
         run?.recordFailure(cause)
         throw cause

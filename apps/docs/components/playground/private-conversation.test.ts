@@ -215,4 +215,44 @@ describe("private conversation lifecycle", () => {
     await expect(settlement).rejects.toBe(failure)
     expect(registry.isCurrent(run.id)).toBe(false)
   })
+
+  it("combines generation-run and framework cancellation without mutating the request", () => {
+    const registry = createGenerationRunRegistry()
+    const run = registry.begin()
+    const framework = new AbortController()
+    const runReason = new DOMException("reset", "AbortError")
+    const request = Object.freeze({
+      protectedContent: "hello",
+      protectedHistory: Object.freeze([]),
+      signal: framework.signal,
+    })
+    let receivedSignal: AbortSignal | undefined
+    const runtime: BrowserGenerationRuntime = {
+      id: "cancellable-runtime",
+      disclosure: {
+        label: "Cancellable runtime",
+        model: "test",
+        source: "test",
+        artifacts: { kind: "browser-managed" },
+      },
+      generate(input) {
+        receivedSignal = input.signal
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield "done"
+          },
+        }
+      },
+      dispose: vi.fn(async () => undefined),
+    }
+    const tracked = recordGenerationRunFailures(runtime, () => run)
+
+    tracked.generate(request)
+    run.abort(runReason)
+
+    expect(request.signal).toBe(framework.signal)
+    expect(receivedSignal).not.toBe(framework.signal)
+    expect(receivedSignal?.aborted).toBe(true)
+    expect(receivedSignal?.reason).toBe(runReason)
+  })
 })
