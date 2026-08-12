@@ -5,7 +5,7 @@ export function runtimeChoiceAriaLabel(option: RuntimeOption): string {
     option.availability === "unavailable"
       ? "Unavailable"
       : option.availability === "ready"
-        ? "Use"
-        : "Activate"
-  return `${action} ${option.disclosure.label}`
+        ? "Use cached runtime"
+        : "Activate runtime"
+  return `${action} — ${option.disclosure.label}`
 }
