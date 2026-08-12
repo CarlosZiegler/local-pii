@@ -4,7 +4,11 @@ import { createAnonymizer, token, type PiiSession } from "local-pii"
 import { piiConnection } from "local-pii/tanstack"
 import type { ChatStatus } from "ai"
 import { useCallback, useMemo, useRef, useState } from "react"
-import { ChatShell, type ChatShellMessage } from "./chat-shell"
+import {
+  ChatShell,
+  OTHER_CONVERSATION_BUSY_REASON,
+  type ChatShellMessage,
+} from "./chat-shell"
 import {
   createGenerationRunRegistry,
   recordGenerationRunFailures,
@@ -109,8 +113,8 @@ function TanStackPrivateConversation({
 
   const handleStop = useCallback(async () => {
     setStopping(true)
-    stop()
     try {
+      stop()
       await runs.current.waitForActive()
     } catch (cause) {
       if (!isExpectedChatCancellation(cause)) {
@@ -205,13 +209,16 @@ function TanStackPrivateConversation({
     [messages]
   )
   const status: ChatStatus = error ? "error" : isLoading ? "streaming" : "ready"
+  const otherChatBusy =
+    gateSnapshot?.owner !== undefined &&
+    gateSnapshot?.owner !== null &&
+    gateSnapshot.owner !== "tanstack"
 
   return (
     <ChatShell
-      disabled={
-        gateSnapshot?.owner !== undefined &&
-        gateSnapshot?.owner !== null &&
-        gateSnapshot.owner !== "tanstack"
+      disabled={otherChatBusy}
+      disabledReason={
+        otherChatBusy ? OTHER_CONVERSATION_BUSY_REASON : undefined
       }
       error={controlError ?? error}
       framework="TanStack AI"

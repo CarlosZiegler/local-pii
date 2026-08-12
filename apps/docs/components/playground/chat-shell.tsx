@@ -21,8 +21,12 @@ import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { RotateCcwIcon, ShieldCheckIcon } from "lucide-react"
 import type { ChatStatus } from "ai"
+import { useId } from "react"
 import type { PrivacyInspection } from "./privacy-inspector"
 import { PrivacyInspector } from "./privacy-inspector"
+
+export const OTHER_CONVERSATION_BUSY_REASON =
+  "Another private conversation is running browser-local inference."
 
 export interface ChatShellMessage {
   id: string
@@ -32,6 +36,7 @@ export interface ChatShellMessage {
 
 export interface ChatShellProps {
   disabled?: boolean
+  disabledReason?: string
   error?: Error
   framework: string
   inspection?: PrivacyInspection
@@ -47,6 +52,7 @@ export interface ChatShellProps {
 
 export function ChatShell({
   disabled,
+  disabledReason,
   error,
   framework,
   inspection,
@@ -59,6 +65,7 @@ export function ChatShell({
   status,
   stopping = false,
 }: ChatShellProps) {
+  const disabledReasonId = useId()
   const busy = status === "submitted" || status === "streaming"
   const controlsDisabled = disabled || busy || resetting || stopping
 
@@ -122,20 +129,29 @@ export function ChatShell({
           >
             <PromptInputBody>
               <PromptInputTextarea
+                aria-describedby={
+                  disabled && disabledReason ? disabledReasonId : undefined
+                }
                 aria-label="Message"
                 disabled={controlsDisabled}
                 placeholder="Write a message containing test PII…"
               />
             </PromptInputBody>
             <PromptInputFooter>
-              <span className="text-xs text-muted-foreground">
-                {resetting
-                  ? "Resetting private conversation…"
-                  : stopping
-                    ? "Stopping generation run…"
-                    : busy
-                      ? "Running browser-local inference…"
-                      : "Enter to send · Shift+Enter for newline"}
+              <span
+                aria-live="polite"
+                className="text-xs text-muted-foreground"
+                id={disabledReasonId}
+              >
+                {disabled && disabledReason
+                  ? disabledReason
+                  : resetting
+                    ? "Resetting private conversation…"
+                    : stopping
+                      ? "Stopping generation run…"
+                      : busy
+                        ? "Running browser-local inference…"
+                        : "Enter to send · Shift+Enter for newline"}
               </span>
               <PromptInputSubmit
                 disabled={disabled || resetting || stopping}

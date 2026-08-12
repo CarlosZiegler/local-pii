@@ -3,7 +3,11 @@ import { createAnonymizer, token, type PiiSession } from "local-pii"
 import { withPii } from "local-pii/ai-sdk"
 import { DirectChatTransport, ToolLoopAgent, type ChatStatus } from "ai"
 import { useCallback, useMemo, useRef, useState } from "react"
-import { ChatShell, type ChatShellMessage } from "./chat-shell"
+import {
+  ChatShell,
+  OTHER_CONVERSATION_BUSY_REASON,
+  type ChatShellMessage,
+} from "./chat-shell"
 import {
   createGenerationRunRegistry,
   recordGenerationRunFailures,
@@ -193,6 +197,9 @@ export function VercelChat({ runtime, runtimeName }: VercelChatProps) {
   return (
     <ChatShell
       disabled={otherChatBusy}
+      disabledReason={
+        otherChatBusy ? OTHER_CONVERSATION_BUSY_REASON : undefined
+      }
       error={controlError ?? error}
       framework="Vercel AI SDK"
       inspection={inspection}

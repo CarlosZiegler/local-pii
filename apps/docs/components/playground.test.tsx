@@ -125,7 +125,16 @@ describe("runtime choice accessibility", () => {
       within(vercelPanel).getByRole("button", { name: "Submit" })
     )
     await waitFor(() => expect(gate.getSnapshot().owner).toBe("vercel"))
-    expect(within(tanstackPanel).getByLabelText("Message")).toBeDisabled()
+    const tanstackInput = within(tanstackPanel).getByLabelText("Message")
+    expect(tanstackInput).toBeDisabled()
+    expect(tanstackInput).toHaveAccessibleDescription(
+      "Another private conversation is running browser-local inference."
+    )
+    expect(
+      within(tanstackPanel).getByText(
+        "Another private conversation is running browser-local inference."
+      )
+    ).toBeVisible()
     expect(() => gate.tryAcquire("tanstack")).toThrow(PlaygroundBusyError)
     expect(within(tanstackPanel).queryByText("vercel@example.com")).toBeNull()
 
