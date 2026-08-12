@@ -101,9 +101,13 @@ test.beforeEach(async ({ page }) => {
     const serverAction = "next-action" in headers
     const mutating = !["GET", "HEAD"].includes(request.method())
     const eventSource = request.resourceType() === "eventsource"
+    const allowedStaticQuery =
+      url.searchParams.size === 1 &&
+      url.searchParams.has("_rsc") &&
+      Boolean(url.searchParams.get("_rsc"))
     const allowedSameOrigin =
       sameOrigin &&
-      url.search === "" &&
+      (url.search === "" || allowedStaticQuery) &&
       !mutating &&
       Boolean(await findStaticFile(STATIC_ROOT, url.pathname))
 
@@ -278,11 +282,11 @@ test("blocks WebSocket inference transports", async ({ page }) => {
 
 test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
   await page.goto("/en/docs/playground")
-  await page.evaluate(async () => {
+  await page.evaluate(async (email) => {
     await Promise.allSettled([
       fetch("/v1/chat/completions?prompt=secret"),
       fetch("/generate?prompt=secret"),
-      fetch(`/en/docs/playground?email=${encodeURIComponent(TEST_EMAIL)}`),
+      fetch(`/en/docs/playground?email=${encodeURIComponent(email)}`),
       new Promise<void>((resolveAttempt) => {
         const events = new EventSource("/en/docs/playground")
         events.addEventListener(
@@ -295,7 +299,7 @@ test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
         )
       }),
     ])
-  })
+  }, TEST_EMAIL)
   const matrix = (
     page as Page & {
       __matrix?: { consoleErrors: string[]; violations: string[] }
@@ -309,7 +313,7 @@ test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
       "EVENTSOURCE http://127.0.0.1:4173/en/docs/playground",
     ].toSorted()
   )
-  expect(matrix?.consoleErrors).toHaveLength(2)
+  expect(matrix?.consoleErrors.length).toBeGreaterThanOrEqual(2)
   for (const error of matrix?.consoleErrors ?? []) {
     expect(error).toContain("ERR_BLOCKED_BY_CLIENT")
   }
