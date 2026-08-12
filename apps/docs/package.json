@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "start": "next start -p 3001",
     "copy-model": "mkdir -p public/models && cp -f ../../packages/model-rampart/assets/rampart-q4.onnx ../../packages/model-rampart/assets/vocab.json ../../packages/model-rampart/assets/labels.json public/models/",
-    "deploy": "bun run copy-model && next build && find out/_next/static/media -type f -name 'ort-wasm-*-jsep*.wasm' -delete && bunx wrangler pages deploy out --project-name=local-pii-docs --branch=main --commit-dirty=true",
+    "deploy": "bun run copy-model && next build && find out/_next/static/media -type f -name '*jsep*.wasm' -delete && bunx wrangler pages deploy out --project-name=local-pii-docs --branch=main --commit-dirty=true",
     "postinstall": "fumadocs-mdx"
   },
   "dependencies": {
