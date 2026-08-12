@@ -82,6 +82,7 @@ async function tabTo(page: Page, accessibleName: string) {
 test.beforeEach(async ({ page }) => {
   const violations: string[] = []
   const externalRequests: string[] = []
+  const allowedRequestUrls: string[] = []
   const consoleErrors: string[] = []
   const pageErrors: string[] = []
 
@@ -104,7 +105,8 @@ test.beforeEach(async ({ page }) => {
     const allowedStaticQuery =
       url.searchParams.size === 1 &&
       url.searchParams.has("_rsc") &&
-      Boolean(url.searchParams.get("_rsc"))
+      Boolean(url.searchParams.get("_rsc")) &&
+      !url.searchParams.get("_rsc")?.includes(TEST_EMAIL)
     const allowedSameOrigin =
       sameOrigin &&
       (url.search === "" || allowedStaticQuery) &&
@@ -126,6 +128,7 @@ test.beforeEach(async ({ page }) => {
       await route.abort("blockedbyclient")
       return
     }
+    allowedRequestUrls.push(request.url())
     await route.continue()
   })
   await page.routeWebSocket("**/*", async (socket) => {
@@ -137,6 +140,7 @@ test.beforeEach(async ({ page }) => {
   ;(page as Page & { __matrix?: unknown }).__matrix = {
     consoleErrors,
     externalRequests,
+    allowedRequestUrls,
     pageErrors,
     violations,
   }
@@ -148,6 +152,7 @@ test.afterEach(async ({ page }) => {
       __matrix?: {
         consoleErrors: string[]
         externalRequests: string[]
+        allowedRequestUrls: string[]
         pageErrors: string[]
         violations: string[]
       }
@@ -155,6 +160,11 @@ test.afterEach(async ({ page }) => {
   ).__matrix
   expect(matrix?.violations).toEqual([])
   expect(matrix?.externalRequests).toEqual([])
+  expect(
+    matrix?.allowedRequestUrls.some((url) =>
+      decodeURIComponent(url).includes(TEST_EMAIL)
+    )
+  ).toBe(false)
   expect(matrix?.consoleErrors).toEqual([])
   expect(matrix?.pageErrors).toEqual([])
 })
@@ -287,6 +297,7 @@ test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
       fetch("/v1/chat/completions?prompt=secret"),
       fetch("/generate?prompt=secret"),
       fetch(`/en/docs/playground?email=${encodeURIComponent(email)}`),
+      fetch(`/en/docs/playground?_rsc=${encodeURIComponent(email)}`),
       new Promise<void>((resolveAttempt) => {
         const events = new EventSource("/en/docs/playground")
         events.addEventListener(
@@ -310,6 +321,7 @@ test("blocks undisclosed same-origin inference endpoints", async ({ page }) => {
       "GET http://127.0.0.1:4173/v1/chat/completions?prompt=secret",
       "GET http://127.0.0.1:4173/generate?prompt=secret",
       "GET http://127.0.0.1:4173/en/docs/playground?email=ana%40acme.com",
+      "GET http://127.0.0.1:4173/en/docs/playground?_rsc=ana%40acme.com",
       "EVENTSOURCE http://127.0.0.1:4173/en/docs/playground",
     ].toSorted()
   )
