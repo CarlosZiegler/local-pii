@@ -78,12 +78,13 @@ async function tabTo(page: Page, accessibleName: string) {
 test.beforeEach(async ({ page }) => {
   const violations: string[] = []
   const externalRequests: string[] = []
-  const browserErrors: string[] = []
+  const consoleErrors: string[] = []
+  const pageErrors: string[] = []
 
   page.on("console", (message) => {
-    if (message.type() === "error") browserErrors.push(message.text())
+    if (message.type() === "error") consoleErrors.push(message.text())
   })
-  page.on("pageerror", (error) => browserErrors.push(error.message))
+  page.on("pageerror", (error) => pageErrors.push(error.message))
   await page.route("**/*", async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -95,12 +96,17 @@ test.beforeEach(async ({ page }) => {
     const serverAction = "next-action" in headers
     const mutating = !["GET", "HEAD"].includes(request.method())
     const apiPath = url.pathname === "/api" || url.pathname.startsWith("/api/")
+    const backendLikePath =
+      /(^|\/)(api|graphql|inference|rpc|server-action|telemetry)(\/|$)/i.test(
+        url.pathname
+      )
 
     if (!sameOrigin) externalRequests.push(request.url())
     if (
       serverAction ||
       mutating ||
       apiPath ||
+      (sameOrigin && backendLikePath) ||
       (!sameOrigin && !artifactOrigin)
     ) {
       violations.push(`${request.method()} ${request.url()}`)
@@ -112,8 +118,9 @@ test.beforeEach(async ({ page }) => {
   await installFakeChromePromptApi(page)
 
   ;(page as Page & { __matrix?: unknown }).__matrix = {
-    browserErrors,
+    consoleErrors,
     externalRequests,
+    pageErrors,
     violations,
   }
 })
@@ -122,25 +129,23 @@ test.afterEach(async ({ page }) => {
   const matrix = (
     page as Page & {
       __matrix?: {
-        browserErrors: string[]
+        consoleErrors: string[]
         externalRequests: string[]
+        pageErrors: string[]
         violations: string[]
       }
     }
   ).__matrix
   expect(matrix?.violations).toEqual([])
   expect(matrix?.externalRequests).toEqual([])
-  expect(
-    matrix?.browserErrors.filter((message) =>
-      /hydration|aria-|accessibility|uncaught|unhandled/i.test(message)
-    )
-  ).toEqual([])
+  expect(matrix?.consoleErrors).toEqual([])
+  expect(matrix?.pageErrors).toEqual([])
 })
 
 test("runs both protected chats in a static backend-free build", async ({
   page,
 }) => {
-  await page.goto("/en/docs/playground.html")
+  await page.goto("/en/docs/playground")
   await expect(page.getByRole("heading", { name: "Playground" })).toBeVisible()
   await expect(page.getByText("Active runtime:")).toBeVisible()
 
@@ -148,7 +153,8 @@ test("runs both protected chats in a static backend-free build", async ({
   await expect(vercelTab).toHaveAttribute("aria-selected", "true")
   const vercelPanel = page.getByRole("tabpanel", { name: "Vercel AI SDK" })
   const vercelComposer = vercelPanel.getByRole("textbox", { name: "Message" })
-  await vercelComposer.focus()
+  await tabTo(page, "Message")
+  await expect(vercelComposer).toBeFocused()
   await page.keyboard.type(`Email ${TEST_EMAIL} and repeat it.`)
   await page.keyboard.press("Enter")
   await expect(
@@ -159,7 +165,7 @@ test("runs both protected chats in a static backend-free build", async ({
   await expect(vercelProtected).not.toContainText(TEST_EMAIL)
   await expect(vercelProtected).not.toHaveText("")
 
-  await vercelTab.focus()
+  await tabTo(page, "Vercel AI SDK")
   await page.keyboard.press("ArrowRight")
   const tanstackTab = page.getByRole("tab", { name: "TanStack AI" })
   await expect(tanstackTab).toHaveAttribute("aria-selected", "true")
@@ -167,7 +173,8 @@ test("runs both protected chats in a static backend-free build", async ({
   const tanstackComposer = tanstackPanel.getByRole("textbox", {
     name: "Message",
   })
-  await tanstackComposer.focus()
+  await tabTo(page, "Message")
+  await expect(tanstackComposer).toBeFocused()
   await page.keyboard.type(`Email ${TEST_EMAIL} and repeat it.`)
   await page.keyboard.press("Enter")
   await expect(
@@ -180,7 +187,8 @@ test("runs both protected chats in a static backend-free build", async ({
   await expect(tanstackProtected).not.toContainText(TEST_EMAIL)
   await expect(tanstackProtected).not.toHaveText("")
 
-  await tanstackComposer.focus()
+  await tabTo(page, "Message")
+  await expect(tanstackComposer).toBeFocused()
   await page.keyboard.type("Cancel this generation")
   await page.keyboard.press("Enter")
   await tabTo(page, "Stop")
@@ -207,11 +215,11 @@ test("runs both protected chats in a static backend-free build", async ({
 })
 
 test("renders localized static playground pages", async ({ page }) => {
-  await page.goto("/pt/docs/playground.html")
+  await page.goto("/pt/docs/playground")
   await expect(
     page.getByText("Tudo abaixo usa Geração local no navegador")
   ).toBeVisible()
-  await page.goto("/de/docs/playground.html")
+  await page.goto("/de/docs/playground")
   await expect(
     page.getByText("Alles unten nutzt browserlokale Generierung")
   ).toBeVisible()

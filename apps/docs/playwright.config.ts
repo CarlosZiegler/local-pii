@@ -12,9 +12,9 @@ export default defineConfig({
     ...devices["Desktop Chrome"],
   },
   webServer: {
-    command: "bun run build && bunx http-server out -p 4173 -c-1",
-    url: "http://127.0.0.1:4173/en/docs/playground.html",
-    reuseExistingServer: true,
+    command: "bun run build && node e2e/static-server.mjs",
+    url: "http://127.0.0.1:4173/en/docs/playground",
+    reuseExistingServer: false,
     timeout: 180_000,
   },
 })

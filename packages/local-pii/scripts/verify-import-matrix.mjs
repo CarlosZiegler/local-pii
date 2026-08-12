@@ -135,6 +135,13 @@ for (const [subpath, targets] of publicExports) {
   }
 }
 
+assert(
+  typeof manifest["react-native"] === "string",
+  "package.json must advertise a react-native target"
+)
+await readFile(resolve(packageRoot, manifest["react-native"]))
+await loadDirectTarget(".", manifest["react-native"], "import")
+
 const fixtureRoot = resolve(packageRoot, "test/import-matrix")
 const permittedExternal = {
   "ai-sdk": ["ai"],
@@ -159,7 +166,18 @@ function dependencyInput(input, dependency) {
   )
 }
 
-async function verifyBundle(name, platform, forbidden) {
+function nativeOnlyInput(input) {
+  const normalized = input.replaceAll("\\", "/")
+  return /\/node_modules\/(?:\.bun\/[^/]+\/node_modules\/)?(?:@expo\/|@react-native\/|expo(?:-|\/|@)|react-native(?:\/|@)|onnxruntime-react-native(?:\/|@))/.test(
+    normalized
+  )
+}
+
+async function verifyBundle(
+  name,
+  platform,
+  { allowNativeRuntime = false, allowWebRuntime = false } = {}
+) {
   const extension = name === "metro" ? "cts" : "ts"
   const result = await build({
     entryPoints: [resolve(fixtureRoot, `${name}.${extension}`)],
@@ -173,31 +191,33 @@ async function verifyBundle(name, platform, forbidden) {
     logLevel: "silent",
   })
   const inputs = Object.keys(result.metafile.inputs)
-  for (const dependency of forbidden) {
-    const found = inputs.find((input) => dependencyInput(input, dependency))
+  if (!allowNativeRuntime) {
+    const found = inputs.find(nativeOnlyInput)
     assert(
       !found,
-      `${name} (${platform}) included forbidden dependency ${dependency}: ${found}`
+      `${name} (${platform}) included a forbidden Expo or React Native dependency: ${found}`
+    )
+  }
+  if (!allowWebRuntime) {
+    const found = inputs.find((input) =>
+      dependencyInput(input, "onnxruntime-web")
+    )
+    assert(
+      !found,
+      `${name} (${platform}) included forbidden dependency onnxruntime-web: ${found}`
     )
   }
 }
 
-const browserForbidden = [
-  "expo-asset",
-  "expo-crypto",
-  "expo-file-system",
-  "expo-secure-store",
-  "onnxruntime-react-native",
-  "react-native",
-]
-for (const name of ["core", "inline", "openai", "ai-sdk", "tanstack", "web"])
-  await verifyBundle(name, "browser", browserForbidden)
+for (const name of ["core", "inline", "openai", "ai-sdk", "tanstack"])
+  await verifyBundle(name, "browser")
+await verifyBundle("web", "browser", { allowWebRuntime: true })
 
 for (const name of ["core", "inline", "openai", "ai-sdk", "tanstack", "metro"])
-  await verifyBundle(name, "node", ["onnxruntime-web"])
+  await verifyBundle(name, "node")
 
-await verifyBundle("expo", "node", ["onnxruntime-web"])
+await verifyBundle("expo", "node", { allowNativeRuntime: true })
 
 console.log(
-  `verified ${publicExports.length} public subpaths and 13 isolated bundles`
+  `verified ${publicExports.length} public subpaths, the react-native target, and 13 isolated bundles`
 )
