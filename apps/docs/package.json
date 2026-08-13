@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit",
     "start": "next start -p 3001",
     "copy-model": "node scripts/ensure-rampart-assets.mjs && mkdir -p public/models public/ort && find public/ort -type f -delete && cp -f ../../packages/model-rampart/assets/rampart-q4.onnx ../../packages/model-rampart/assets/vocab.json ../../packages/model-rampart/assets/labels.json public/models/ && cp -f node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.{mjs,wasm} public/ort/",
-    "deploy": "bun run copy-model && next build && find out/_next/static/media -type f -name '*jsep*.wasm' -delete && bunx wrangler pages deploy out --project-name=local-pii-docs --branch=main --commit-dirty=true",
+    "deploy": "bun run copy-model && next build && find out/_next/static/media -type f -name '*jsep*.wasm' -delete && npx -y wrangler@4.122.0 pages deploy out --project-name=local-pii-docs --branch=main --commit-dirty=true",
     "postinstall": "fumadocs-mdx"
   },
   "dependencies": {
