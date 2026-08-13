@@ -73,8 +73,9 @@ const privacy = createAnonymizer({
 })
 ```
 
-This requires a dev client / prebuild, not Expo Go. If the model cannot load,
-the default is deterministic-only degradation; `strict: true` throws instead.
+This requires a dev client / prebuild, not Expo Go. A configured Detection
+model fails closed by default when load or inference fails. Set `strict: false`
+only when deterministic-only degradation is an intentional product policy.
 The browser equivalent is `detection: rampartWeb()` from `local-pii/web`.
 Zero-config browser loading fetches the 14.7 MB Rampart artifacts (and runtime
 support files) on first use; that download has no user content. Self-host or

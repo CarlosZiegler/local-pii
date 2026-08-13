@@ -56,6 +56,10 @@ function createSession(
     detection,
     placeholders: token(),
     keep: [...keep],
+    // The playground is a privacy proof. If its model-backed Detection cannot
+    // run, stop the generation instead of silently sending selected categories
+    // as unprotected content to the browser generation runtime.
+    strict: true,
   }).createSession()
 }
 

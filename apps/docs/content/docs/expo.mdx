@@ -40,7 +40,8 @@ Loading is lazy: the first anonymization resolves the packaged asset and starts
 the Rampart runtime. Applications consuming the published model package do not
 run the monorepo's `fetch-model` development script.
 
-If the model cannot load, the default degrades to deterministic Detection;
-`strict: true` throws instead. `ner:` remains supported as a compatibility
+If the model cannot load or inference fails, configured Detection fails closed
+by default. Set `strict: false` only when deterministic Detection fallback is
+an intentional product policy. `ner:` remains supported as a compatibility
 alias. `CITY`, `STATE`, and `ZIP_CODE` are kept by default; use `keep` or
 `redact` to change that policy.

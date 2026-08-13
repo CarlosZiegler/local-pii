@@ -13,8 +13,12 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import type { PiiType } from "local-pii"
-import { rampartAssets, rampartWeb } from "local-pii/web"
+import type { NerBackend, PiiType } from "local-pii"
+import {
+  rampartAssets,
+  rampartWeb,
+  type RampartWebOptions,
+} from "local-pii/web"
 import {
   ChevronsUpDownIcon,
   CpuIcon,
@@ -22,7 +26,7 @@ import {
   ShieldCheckIcon,
   XIcon,
 } from "lucide-react"
-import { useCallback, useMemo, useState } from "react"
+import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import type { RuntimeOption } from "./playground/model/types"
 import { RuntimeProvider, useLocalRuntime } from "./playground/runtime-provider"
 import { runtimeChoiceAriaLabel } from "./playground/runtime-choice"
@@ -105,6 +109,65 @@ export function detectionKeepFromSelected(
 
 export function serializeDetectionKeep(keep: readonly PiiType[]): string {
   return [...keep].sort().join("\0")
+}
+
+function createPlaygroundDetection(): NerBackend {
+  let inner: NerBackend | undefined
+  let loadPromise: Promise<void> | undefined
+  let disposed = false
+
+  return {
+    name: "rampart-web-wasm",
+    async load() {
+      if (disposed) {
+        throw new DOMException("Detection runtime disposed", "AbortError")
+      }
+      loadPromise ??= (async () => {
+        // The default ONNX Runtime browser bundle selects its JSEP artifact
+        // even for a WASM-only session. Cloudflare Pages cannot publish that
+        // artifact because it exceeds the per-file limit, so load the actual
+        // WASM-only entry point at the browser boundary.
+        const ortWasm = await import("onnxruntime-web/wasm")
+        const detection = rampartWeb({
+          ort: ortWasm as unknown as NonNullable<RampartWebOptions["ort"]>,
+          model: "/models/rampart-q4.onnx",
+          vocab: rampartAssets.vocab,
+          labels: rampartAssets.labels,
+          executionProviders: ["wasm"],
+          wasmPaths:
+            process.env.NODE_ENV === "production" ? "/ort/" : undefined,
+        })
+        await detection.load()
+        if (disposed) {
+          await detection.dispose()
+          throw new DOMException("Detection runtime disposed", "AbortError")
+        }
+        inner = detection
+      })().catch((error) => {
+        loadPromise = undefined
+        throw error
+      })
+      await loadPromise
+    },
+    async detect(text) {
+      return inner?.detect(text) ?? []
+    },
+    async dispose() {
+      disposed = true
+      const pendingLoad = loadPromise
+      if (pendingLoad) {
+        try {
+          await pendingLoad
+        } catch {
+          // Loading already reports its own primary failure to the generation.
+        }
+      }
+      const detection = inner
+      inner = undefined
+      loadPromise = undefined
+      await detection?.dispose()
+    },
+  }
 }
 
 function formatBytes(bytes: number): string {
@@ -310,20 +373,23 @@ function DetectionCategorySelector({
 
 export function RuntimePlayground() {
   const runtime = useLocalRuntime()
-  const detection = useMemo(
-    () =>
-      rampartWeb({
-        model: "/models/rampart-q4.onnx",
-        vocab: rampartAssets.vocab,
-        labels: rampartAssets.labels,
-        executionProviders: ["wasm"],
-        // Next fingerprints ORT's WASM asset during production builds. The
-        // deploy script also copies a stable browser path; keep unit tests on
-        // ORT's default resolver so they do not depend on public assets.
-        wasmPaths: process.env.NODE_ENV === "production" ? "/ort/" : undefined,
-      }),
-    []
-  )
+  const detection = useMemo(createPlaygroundDetection, [])
+  // React Strict Mode remounts effects once in development (mount → cleanup →
+  // remount). Dispose must wait a microtask so a replayed effect can claim the
+  // same Detection backend; a genuine final teardown still disposes it.
+  const detectionEffectGeneration = useRef(0)
+  useEffect(() => {
+    const generation = ++detectionEffectGeneration.current
+    return () => {
+      queueMicrotask(() => {
+        if (detectionEffectGeneration.current !== generation) {
+          return
+        }
+        // Component teardown has no UI channel for a cleanup failure.
+        void detection.dispose().catch(() => undefined)
+      })
+    }
+  }, [detection])
   const [selectedCategories, setSelectedCategories] = useState(
     createDefaultSelectedDetectionCategories
   )

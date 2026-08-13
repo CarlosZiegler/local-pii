@@ -35,6 +35,45 @@ function tokenFrom(request: ProtectedBrowserRequest): string {
 }
 
 describe("VercelChat", () => {
+  it("fails closed before browser generation when model-backed Detection cannot load", async () => {
+    const detectionFailure = new Error("Detection model unavailable")
+    const detection: NerBackend = {
+      name: "failed-rampart",
+      async load() {
+        throw detectionFailure
+      },
+      async detect() {
+        return []
+      },
+      async dispose() {},
+    }
+    const generate = vi.fn(() => ({
+      async *[Symbol.asyncIterator]() {
+        yield "must not run"
+      },
+    }))
+    const runtime: BrowserGenerationRuntime = {
+      id: "failed-detection-runtime",
+      disclosure: DISCLOSURE,
+      generate,
+      dispose: vi.fn(async () => undefined),
+    }
+    const user = userEvent.setup()
+    render(
+      <VercelChat
+        detection={detection}
+        runtime={runtime}
+        runtimeName="Fake local model"
+      />
+    )
+
+    await user.type(screen.getByLabelText("Message"), "Carlos Rivera")
+    await user.click(screen.getByRole("button", { name: "Submit" }))
+
+    expect(await screen.findByText("Generation failed")).toBeVisible()
+    expect(generate).not.toHaveBeenCalled()
+  })
+
   it("uses the supplied local Detection adapter before browser generation", async () => {
     const requests: ProtectedBrowserRequest[] = []
     const detection: NerBackend = {

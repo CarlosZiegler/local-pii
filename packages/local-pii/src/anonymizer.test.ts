@@ -178,6 +178,7 @@ describe("createAnonymizer (NER integration)", () => {
         detect: async () => [],
         dispose: async () => {},
       },
+      strict: false,
       onDegraded,
     })
     const { redactedText } = await pii.anonymize("call +49 151 12345678")
@@ -199,6 +200,39 @@ describe("createAnonymizer (NER integration)", () => {
       },
     })
     await expect(pii.anonymize("x")).rejects.toThrow("no model")
+  })
+
+  it("fails closed by default when configured Detection cannot load", async () => {
+    const failure = new Error("no model")
+    const pii = createAnonymizer({
+      detection: {
+        name: "boom",
+        load: async () => {
+          throw failure
+        },
+        detect: async () => [],
+        dispose: async () => {},
+      },
+    })
+
+    await expect(pii.anonymize("Carlos Rivera")).rejects.toBe(failure)
+    expect(pii.status).toBe("idle")
+  })
+
+  it("fails closed by default when configured Detection inference fails", async () => {
+    const failure = new Error("inference failed")
+    const pii = createAnonymizer({
+      detection: {
+        name: "boom",
+        load: async () => {},
+        detect: async () => {
+          throw failure
+        },
+        dispose: async () => {},
+      },
+    })
+
+    await expect(pii.anonymize("Carlos Rivera")).rejects.toBe(failure)
   })
 })
 

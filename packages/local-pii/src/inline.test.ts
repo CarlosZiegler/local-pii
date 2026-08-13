@@ -138,6 +138,35 @@ describe("runInlineText", () => {
     expect(output).toBe("Confirmed Email ana@acme.com")
   })
 
+  it("with configured Detection load failure never reaches the provider callback by default", async () => {
+    const failure = new Error("detection model unavailable")
+    let providerCalls = 0
+    const anonymizer = createAnonymizer({
+      detectors: "none",
+      detection: {
+        name: "boom",
+        load: async () => {
+          throw failure
+        },
+        detect: async () => [],
+        dispose: async () => {},
+      },
+      placeholders: token(),
+    })
+
+    await expect(
+      runInlineText({
+        anonymizer,
+        input: "Olá João",
+        call: async () => {
+          providerCalls += 1
+          return "should not run"
+        },
+      })
+    ).rejects.toBe(failure)
+    expect(providerCalls).toBe(0)
+  })
+
   it("borrows a supplied session without clearing its conversation mapping", async () => {
     const session = createAnonymizer({ placeholders: token() }).createSession()
     const clear = vi.spyOn(session, "clear")

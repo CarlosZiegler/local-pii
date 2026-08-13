@@ -51,37 +51,63 @@ async function fetchText(url: string): Promise<string> {
 export function rampartWeb(options: RampartWebOptions = {}): NerBackend {
   const ort = options.ort ?? (ortWeb as unknown as OrtModule)
   let inner: NerBackend | null = null
+  let loadPromise: Promise<void> | null = null
+  let disposePromise: Promise<void> | null = null
 
   return {
     name: "rampart-web",
 
     async load() {
+      if (disposePromise) await disposePromise
       if (inner) return
-      const env = (ort as unknown as OrtEnv).env
-      if (env?.wasm) {
-        if (options.wasmPaths) env.wasm.wasmPaths = options.wasmPaths
-        if (options.numThreads) env.wasm.numThreads = options.numThreads
+      if (loadPromise) return loadPromise
+
+      const operation = (async () => {
+        const env = (ort as unknown as OrtEnv).env
+        if (env?.wasm) {
+          if (options.wasmPaths) env.wasm.wasmPaths = options.wasmPaths
+          if (options.numThreads) env.wasm.numThreads = options.numThreads
+        }
+
+        const model = options.model ?? `${HF}/onnx/model_q4.onnx`
+        const vocab =
+          options.vocab ??
+          parseVocab(await fetchText(options.vocabUrl ?? `${HF}/vocab.txt`))
+        const labels =
+          options.labels ??
+          parseLabels(await fetchText(options.labelsUrl ?? `${HF}/config.json`))
+
+        const candidate = createRampartNer({
+          ort,
+          model,
+          vocab,
+          labels,
+          maxTokens: options.maxTokens,
+          sessionOptions: {
+            executionProviders: options.executionProviders ?? [
+              "webgpu",
+              "wasm",
+            ],
+          },
+        })
+        try {
+          await candidate.load()
+        } catch (error) {
+          try {
+            await candidate.dispose()
+          } catch {
+            // Cleanup failure must not replace the primary load error.
+          }
+          throw error
+        }
+        inner = candidate
+      })()
+      loadPromise = operation
+      try {
+        await operation
+      } finally {
+        if (loadPromise === operation) loadPromise = null
       }
-
-      const model = options.model ?? `${HF}/onnx/model_q4.onnx`
-      const vocab =
-        options.vocab ??
-        parseVocab(await fetchText(options.vocabUrl ?? `${HF}/vocab.txt`))
-      const labels =
-        options.labels ??
-        parseLabels(await fetchText(options.labelsUrl ?? `${HF}/config.json`))
-
-      inner = createRampartNer({
-        ort,
-        model,
-        vocab,
-        labels,
-        maxTokens: options.maxTokens,
-        sessionOptions: {
-          executionProviders: options.executionProviders ?? ["webgpu", "wasm"],
-        },
-      })
-      await inner.load()
     },
 
     async detect(text: string) {
@@ -89,8 +115,24 @@ export function rampartWeb(options: RampartWebOptions = {}): NerBackend {
     },
 
     async dispose() {
-      await inner?.dispose()
-      inner = null
+      if (disposePromise) return disposePromise
+      const operation = (async () => {
+        try {
+          await loadPromise
+        } catch {
+          // A failed load already disposes its unpublished candidate.
+        }
+        const candidate = inner
+        if (!candidate) return
+        await candidate.dispose()
+        if (inner === candidate) inner = null
+      })()
+      disposePromise = operation
+      try {
+        await operation
+      } finally {
+        if (disposePromise === operation) disposePromise = null
+      }
     },
   }
 }

@@ -50,6 +50,9 @@ function createSession(
     detection,
     placeholders: token(),
     keep: [...keep],
+    // Fail closed when model-backed Detection is configured but unavailable.
+    // A degraded playground must never forward selected categories unchanged.
+    strict: true,
   }).createSession()
 }
 

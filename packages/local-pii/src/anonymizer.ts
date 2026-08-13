@@ -35,7 +35,10 @@ export interface AnonymizerOptions {
   redact?: PiiType[]
   /** Minimum NER confidence to keep. Default 0 (argmax; recall-first). */
   nerThreshold?: number
-  /** If true, a NER load/inference failure throws instead of degrading. */
+  /**
+   * Detection failure policy. Configured Detection models fail closed by
+   * default; set `false` to opt into deterministic-only degradation.
+   */
   strict?: boolean
   /** Called when NER fails and the anonymizer degrades to deterministic-only. */
   onDegraded?: (error: Error) => void
@@ -95,7 +98,10 @@ export function createAnonymizer(options: AnonymizerOptions = {}): Anonymizer {
     ? createDictionaryDetector(dictionaryEntries)
     : null
 
-  const strict = options.strict ?? false
+  // A configured Detection model must not disappear silently: doing so lets
+  // names/addresses that require model Detection cross a Generation boundary.
+  // Deterministic-only use remains unchanged because there is no model to fail.
+  const strict = options.strict ?? ner !== null
   const threshold = options.nerThreshold ?? 0
   const keep = new Set<PiiType>(options.keep ?? DEFAULT_KEEP)
   for (const type of options.redact ?? []) keep.delete(type)

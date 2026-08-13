@@ -9,7 +9,7 @@
     "test:e2e": "playwright test",
     "typecheck": "tsc --noEmit",
     "start": "next start -p 3001",
-    "copy-model": "mkdir -p public/models public/ort && cp -f ../../packages/model-rampart/assets/rampart-q4.onnx ../../packages/model-rampart/assets/vocab.json ../../packages/model-rampart/assets/labels.json public/models/ && cp -f node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.asyncify.{mjs,wasm} public/ort/",
+    "copy-model": "node scripts/ensure-rampart-assets.mjs && mkdir -p public/models public/ort && find public/ort -type f -delete && cp -f ../../packages/model-rampart/assets/rampart-q4.onnx ../../packages/model-rampart/assets/vocab.json ../../packages/model-rampart/assets/labels.json public/models/ && cp -f node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.{mjs,wasm} public/ort/",
     "deploy": "bun run copy-model && next build && find out/_next/static/media -type f -name '*jsep*.wasm' -delete && bunx wrangler pages deploy out --project-name=local-pii-docs --branch=main --commit-dirty=true",
     "postinstall": "fumadocs-mdx"
   },
@@ -36,6 +36,7 @@
     "lucide-react": "^1.30.0",
     "nanoid": "^6.0.1",
     "next": "16.2.6",
+    "onnxruntime-web": "1.27.0",
     "radix-ui": "^1.6.7",
     "react": "19.2.4",
     "react-dom": "19.2.4",

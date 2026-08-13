@@ -17,9 +17,12 @@ bun run ios                  # or: bun run android
 ```
 
 - The **deterministic** pipeline (emails, phones, cards, IBAN, SSN, IP, URLs)
-  works immediately — even in Expo Go.
-- Toggle **On-device AI (Rampart)** to add names/addresses via the local model.
-  This needs the dev client build above; in Expo Go it degrades to rules only.
+  works immediately — even in Expo Go. Leave **Detection model (Rampart)** off
+  for this deterministic-only mode.
+- Toggle **Detection model (Rampart)** to add names/addresses via the local
+  model. This needs the dev client build above. When Detection is on, the
+  example is **fail-closed**: a load or inference failure is shown and the mock
+  Generation call is not made (nothing is sent with incomplete protection).
 - Toggle **Private mode** to prove nothing is sent: it anonymizes and stops.
 
 The mock "LLM" (`src/llm.ts`) echoes the placeholders back so you can watch

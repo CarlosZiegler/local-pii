@@ -40,7 +40,8 @@ O carregamento é preguiçoso: a primeira anonimização resolve o asset empacot
 e inicia o runtime do Rampart. Aplicações que consomem o pacote publicado do
 modelo não executam o script de desenvolvimento `fetch-model` do monorepo.
 
-Se o modelo não carregar, o padrão degrada para Detecção determinística;
-`strict: true` lança o erro. `ner:` permanece alias de compatibilidade.
-`CITY`, `STATE` e `ZIP_CODE` ficam no texto por padrão; use `keep` ou `redact`
-para alterar essa política.
+Se o modelo não carregar ou a inferência falhar, a Detecção configurada falha
+de forma fechada por padrão. Use `strict: false` apenas quando o fallback para
+Detecção determinística for uma política intencional do produto. `ner:`
+permanece alias de compatibilidade. `CITY`, `STATE` e `ZIP_CODE` ficam no texto
+por padrão; use `keep` ou `redact` para alterar essa política.

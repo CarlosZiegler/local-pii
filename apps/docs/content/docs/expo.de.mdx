@@ -40,7 +40,9 @@ Das Laden erfolgt faul: Die erste Anonymisierung löst das paketierte Asset auf
 und startet die Rampart-Runtime. Anwendungen mit dem veröffentlichten
 Modellpaket führen das `fetch-model`-Entwicklungsskript des Monorepos nicht aus.
 
-Wenn das Modell nicht lädt, fällt der Standard auf deterministische Erkennung
-zurück; `strict: true` wirft stattdessen. `ner:` bleibt ein Kompatibilitätsalias.
-`CITY`, `STATE` und `ZIP_CODE` bleiben standardmäßig im Text; `keep` oder
-`redact` ändern diese Richtlinie.
+Wenn das Modell nicht lädt oder die Inferenz fehlschlägt, schlägt die
+konfigurierte Erkennung standardmäßig geschlossen fehl. Verwende
+`strict: false` nur, wenn der Rückfall auf deterministische Erkennung eine
+bewusste Produktrichtlinie ist. `ner:` bleibt ein Kompatibilitätsalias. `CITY`,
+`STATE` und `ZIP_CODE` bleiben standardmäßig im Text; `keep` oder `redact`
+ändern diese Richtlinie.

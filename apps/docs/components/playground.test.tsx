@@ -1,5 +1,6 @@
 import { render, screen, waitFor, within } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
+import { StrictMode } from "react"
 import { describe, expect, it, vi } from "vitest"
 import { RuntimePlayground } from "./playground"
 import {
@@ -14,6 +15,45 @@ import type {
 import { RuntimeProviderCore } from "./playground/runtime-provider-core"
 import { runtimeChoiceAriaLabel } from "./playground/runtime-choice"
 
+const detectionHarness = vi.hoisted(() => {
+  const load = vi.fn(async () => undefined)
+  const detect = vi.fn(async (text: string) => {
+    const start = text.indexOf("user@example.com")
+    if (start < 0) return []
+    return [
+      {
+        type: "EMAIL" as const,
+        source: "ner" as const,
+        confidence: 1,
+        text: "user@example.com",
+        start,
+        end: start + "user@example.com".length,
+      },
+    ]
+  })
+  const dispose = vi.fn(async () => undefined)
+  return {
+    load,
+    detect,
+    dispose,
+    rampartWeb: vi.fn(() => ({
+      name: "test-rampart",
+      load,
+      detect,
+      dispose,
+    })),
+  }
+})
+
+vi.mock("onnxruntime-web/wasm", () => ({
+  default: {},
+}))
+
+vi.mock("local-pii/web", () => ({
+  rampartAssets: { labels: [], vocab: [] },
+  rampartWeb: detectionHarness.rampartWeb,
+}))
+
 const option = {
   kind: "gemini-nano" as const,
   disclosure: {
@@ -25,6 +65,93 @@ const option = {
 }
 
 describe("runtime choice accessibility", () => {
+  it("keeps Detection usable after StrictMode effect replay", async () => {
+    detectionHarness.load.mockClear()
+    detectionHarness.detect.mockClear()
+    detectionHarness.dispose.mockClear()
+    detectionHarness.rampartWeb.mockClear()
+
+    const requests: ProtectedBrowserRequest[] = []
+    const runtime: BrowserGenerationRuntime = {
+      id: "strict-mode-runtime",
+      disclosure: option.disclosure,
+      generate(request) {
+        requests.push(request)
+        return {
+          async *[Symbol.asyncIterator]() {
+            yield "ok"
+          },
+        }
+      },
+      dispose: vi.fn(async () => undefined),
+    }
+    const readySnapshot = {
+      status: "ready" as const,
+      kind: "gemini-nano" as const,
+      disclosure: option.disclosure,
+    }
+    const controller: RuntimeController = {
+      activate: vi.fn(async () => undefined),
+      check: vi.fn(async () => undefined),
+      clearGemmaCache: vi.fn(async () => undefined),
+      dispose: vi.fn(async () => undefined),
+      getRuntime: () => runtime,
+      getSnapshot: () => readySnapshot,
+      subscribe: () => () => undefined,
+    }
+    const user = userEvent.setup()
+    const { unmount } = render(
+      <StrictMode>
+        <RuntimeProviderCore
+          controller={controller}
+          gate={createGenerationGate()}
+        >
+          <RuntimePlayground />
+        </RuntimeProviderCore>
+      </StrictMode>
+    )
+
+    // Allow StrictMode's mount → cleanup → remount microtask window to settle.
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", {
+          name: /Protect these Detection categories/,
+        })
+      ).toBeVisible()
+    )
+    await Promise.resolve()
+    await Promise.resolve()
+
+    const vercelPanel = screen
+      .getAllByText("Vercel AI SDK")
+      .find((element) => element.closest("[data-slot=tabs-content]"))
+      ?.closest("[data-slot=tabs-content]")
+    if (!(vercelPanel instanceof HTMLElement)) {
+      throw new Error("Expected the Vercel AI SDK panel")
+    }
+
+    await user.type(
+      within(vercelPanel).getByLabelText("Message"),
+      "Email user@example.com"
+    )
+    await user.click(
+      within(vercelPanel).getByRole("button", { name: "Submit" })
+    )
+
+    await waitFor(() => expect(requests).toHaveLength(1))
+    expect(detectionHarness.load).toHaveBeenCalled()
+    expect(detectionHarness.detect).toHaveBeenCalled()
+    expect(JSON.stringify(requests[0])).not.toContain("user@example.com")
+    // StrictMode effect replay must not dispose the live Detection backend.
+    expect(detectionHarness.dispose).not.toHaveBeenCalled()
+
+    unmount()
+    await Promise.resolve()
+    await Promise.resolve()
+    // Final component teardown still disposes Detection (after load created it).
+    await waitFor(() => expect(detectionHarness.dispose).toHaveBeenCalledOnce())
+  })
+
   it("exposes shared Detection category controls with the documented defaults", async () => {
     const runtime: BrowserGenerationRuntime = {
       id: "selector-runtime",

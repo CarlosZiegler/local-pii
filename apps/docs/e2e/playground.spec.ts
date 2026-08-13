@@ -242,6 +242,47 @@ test("runs both protected chats in a static backend-free build", async ({
   expect(promptState.destroyCalls).toBe(promptState.createCalls)
 })
 
+test("protects selected model-backed names and street addresses before browser generation", async ({
+  page,
+}) => {
+  await page.goto("/en/docs/playground")
+
+  const vercelPanel = page.getByRole("tabpanel", { name: "Vercel AI SDK" })
+  const composer = vercelPanel.getByRole("textbox", { name: "Message" })
+  await composer.fill(
+    "Carlos Rivera (carlos@example.com, +49 151 12345678) lives at 12 Oak Ave."
+  )
+  await composer.press("Enter")
+
+  const protectedContent = vercelPanel.getByLabel("Current protected content")
+  await expect(protectedContent).not.toContainText("Carlos Rivera")
+  await expect(protectedContent).not.toContainText("12 Oak Ave")
+  await expect(vercelPanel.getByText("GIVEN_NAME: 1")).toBeVisible()
+  await expect(vercelPanel.getByText("SURNAME: 1")).toBeVisible()
+  await expect(vercelPanel.getByText("BUILDING_NUMBER: 1")).toBeVisible()
+  await expect(vercelPanel.getByText("STREET_NAME: 1")).toBeVisible()
+
+  await page.getByRole("tab", { name: "TanStack AI" }).click()
+  const tanstackPanel = page.getByRole("tabpanel", { name: "TanStack AI" })
+  const tanstackComposer = tanstackPanel.getByRole("textbox", {
+    name: "Message",
+  })
+  await tanstackComposer.fill(
+    "Carlos Rivera (carlos@example.com, +49 151 12345678) lives at 12 Oak Ave."
+  )
+  await tanstackComposer.press("Enter")
+
+  const tanstackProtected = tanstackPanel.getByLabel(
+    "Current protected content"
+  )
+  await expect(tanstackProtected).not.toContainText("Carlos Rivera")
+  await expect(tanstackProtected).not.toContainText("12 Oak Ave")
+  await expect(tanstackPanel.getByText("GIVEN_NAME: 1")).toBeVisible()
+  await expect(tanstackPanel.getByText("SURNAME: 1")).toBeVisible()
+  await expect(tanstackPanel.getByText("BUILDING_NUMBER: 1")).toBeVisible()
+  await expect(tanstackPanel.getByText("STREET_NAME: 1")).toBeVisible()
+})
+
 test("renders localized static playground pages", async ({ page }) => {
   await page.goto("/pt/docs/playground")
   await expect(page.getByRole("heading", { name: "Experimente" })).toBeVisible()

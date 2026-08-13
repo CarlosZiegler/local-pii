@@ -64,24 +64,49 @@ async function resolveModelPath(model: number | string): Promise<string> {
 export function rampart(options: RampartOptions): NerBackend {
   const ort = options.ort ?? (ortRuntime as unknown as OrtModule)
   let inner: NerBackend | null = null
+  let loadPromise: Promise<void> | null = null
+  let disposePromise: Promise<void> | null = null
 
   return {
     name: "rampart",
 
     async load() {
+      if (disposePromise) await disposePromise
       if (inner) return
-      const modelPath = await resolveModelPath(options.model)
-      inner = createRampartNer({
-        ort,
-        model: modelPath,
-        vocab: options.vocab ?? modelRampart.vocab,
-        labels: options.labels ?? modelRampart.labels,
-        maxTokens: options.maxTokens,
-        sessionOptions: options.executionProviders
-          ? { executionProviders: options.executionProviders }
-          : undefined,
-      })
-      await inner.load()
+      if (loadPromise) return loadPromise
+
+      const operation = (async () => {
+        const modelPath = await resolveModelPath(options.model)
+        // Keep `inner` unset until load succeeds so a failed candidate is never
+        // retained and a later retry creates a fresh model session.
+        const candidate = createRampartNer({
+          ort,
+          model: modelPath,
+          vocab: options.vocab ?? modelRampart.vocab,
+          labels: options.labels ?? modelRampart.labels,
+          maxTokens: options.maxTokens,
+          sessionOptions: options.executionProviders
+            ? { executionProviders: options.executionProviders }
+            : undefined,
+        })
+        try {
+          await candidate.load()
+        } catch (error) {
+          try {
+            await candidate.dispose()
+          } catch {
+            // Cleanup failure must not replace the primary load error.
+          }
+          throw error
+        }
+        inner = candidate
+      })()
+      loadPromise = operation
+      try {
+        await operation
+      } finally {
+        if (loadPromise === operation) loadPromise = null
+      }
     },
 
     async detect(text: string) {
@@ -89,8 +114,24 @@ export function rampart(options: RampartOptions): NerBackend {
     },
 
     async dispose() {
-      await inner?.dispose()
-      inner = null
+      if (disposePromise) return disposePromise
+      const operation = (async () => {
+        try {
+          await loadPromise
+        } catch {
+          // A failed load already disposes its unpublished candidate.
+        }
+        const candidate = inner
+        if (!candidate) return
+        await candidate.dispose()
+        if (inner === candidate) inner = null
+      })()
+      disposePromise = operation
+      try {
+        await operation
+      } finally {
+        if (disposePromise === operation) disposePromise = null
+      }
     },
   }
 }

@@ -44,26 +44,32 @@ export default function App() {
   const [note, setNote] = useState<string | null>(null)
 
   // Recreate the anonymizer when the Detection model toggle changes.
-  // Deterministic detectors always run; Rampart Detection is added on demand.
-  const anonymizer = useMemo(() => {
-    if (!useDetection) return createAnonymizer()
+  // Detection-off is deterministic-only. Detection-on is fail-closed (strict):
+  // load/inference errors surface to the UI and skip the Generation call.
+  // Do not set React state inside this memo.
+  const detectionSetup = useMemo(() => {
+    if (!useDetection) {
+      return { mode: "deterministic" as const, anonymizer: createAnonymizer() }
+    }
     try {
-      // Lazily require the native ONNX runtime so deterministic detection keeps
-      // working in Expo Go.
+      // Lazily require the native ONNX runtime so deterministic-only mode keeps
+      // working in Expo Go when Detection is off.
       const { rampart } =
         require("local-pii/expo") as typeof import("local-pii/expo")
-      return createAnonymizer({
-        detection: rampart({
-          model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
+      return {
+        mode: "detection" as const,
+        anonymizer: createAnonymizer({
+          strict: true,
+          detection: rampart({
+            model: require("@local-pii/model-rampart/assets/rampart-q4.onnx"),
+          }),
         }),
-        onDegraded: (e) =>
-          setNote(
-            `Detection model unavailable, using rules only: ${e.message}`
-          ),
-      })
+      }
     } catch (e) {
-      setNote(`Could not load the model: ${(e as Error).message}`)
-      return createAnonymizer()
+      return {
+        mode: "setup-error" as const,
+        message: (e as Error).message,
+      }
     }
   }, [useDetection])
 
@@ -72,16 +78,34 @@ export default function App() {
     setNote(null)
     setReply(null)
     setRestored(null)
+    setResult(null)
+    let res: AnonymizeResult
     try {
-      const res = await anonymizer.anonymize(text)
-      setResult(res)
-      if (privateMode) {
-        setNote("Private mode: nothing was sent to any API.")
+      if (detectionSetup.mode === "setup-error") {
+        setNote(`Could not load the Detection model: ${detectionSetup.message}`)
+        setBusy(false)
         return
       }
+      res = await detectionSetup.anonymizer.anonymize(text)
+      setResult(res)
+    } catch (e) {
+      setNote(`Detection failed: ${(e as Error).message}`)
+      setBusy(false)
+      return
+    }
+
+    if (privateMode) {
+      setNote("Private mode: nothing was sent to any API.")
+      setBusy(false)
+      return
+    }
+
+    try {
       const answer = await callMockLlm(res.redactedText)
       setReply(answer)
       setRestored(rehydrate(answer, res.mapping, { lenient: true }))
+    } catch (e) {
+      setNote(`Generation failed: ${(e as Error).message}`)
     } finally {
       setBusy(false)
     }
