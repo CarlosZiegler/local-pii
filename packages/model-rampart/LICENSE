@@ -1,0 +1,23 @@
+Creative Commons Attribution 4.0 International (CC BY 4.0)
+
+This package redistributes the "Rampart" PII NER model and its tokenizer
+assets (assets/rampart-q4.onnx, assets/vocab.json, assets/labels.json,
+assets/tokenizer-config.json).
+
+  Model:   Rampart (nationaldesignstudio/rampart)
+  Author:  National Design Studio
+  Source:  https://huggingface.co/nationaldesignstudio/rampart
+
+These assets are licensed under the Creative Commons Attribution 4.0
+International License (CC BY 4.0). You are free to share and adapt them for any
+purpose, including commercially, provided you give appropriate credit as noted
+above and in NOTICE.md.
+
+The full legal text of the license is available at:
+https://creativecommons.org/licenses/by/4.0/legalcode
+
+A human-readable summary is available at:
+https://creativecommons.org/licenses/by/4.0/
+
+The local-pii SDK source code that consumes these assets is licensed
+separately under the MIT License.

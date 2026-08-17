@@ -6,7 +6,7 @@
  * ```js
  * // metro.config.js
  * const { getDefaultConfig } = require("expo/metro-config")
- * const { withLocalPiiMetro } = require("local-pii/metro")
+ * const { withLocalPiiMetro } = require("@local-pii/core/metro")
  * module.exports = withLocalPiiMetro(getDefaultConfig(__dirname))
  * ```
  */

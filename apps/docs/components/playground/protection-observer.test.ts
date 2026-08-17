@@ -1,7 +1,7 @@
-import { createAnonymizer, type AnonymizeResult } from "local-pii"
+import { createAnonymizer, type AnonymizeResult } from "@local-pii/core"
 import { describe, expect, it, vi } from "vitest"
 import { createProtectedBrowserRequest } from "./model/protected-request"
-import type { PiiSession } from "local-pii"
+import type { PiiSession } from "@local-pii/core"
 import {
   createGenerationGate,
   PlaygroundBusyError,

@@ -5,8 +5,8 @@ import {
   type NerBackend,
   type PiiSession,
   type PiiType,
-} from "local-pii"
-import { withPii } from "local-pii/ai-sdk"
+} from "@local-pii/core"
+import { withPii } from "@local-pii/core/ai-sdk"
 import { DirectChatTransport, ToolLoopAgent, type ChatStatus } from "ai"
 import { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import {

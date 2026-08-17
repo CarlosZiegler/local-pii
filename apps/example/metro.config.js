@@ -1,6 +1,6 @@
 // Learn more: https://docs.expo.dev/guides/monorepos/
 const { getDefaultConfig } = require("expo/metro-config")
-const { withLocalPiiMetro } = require("local-pii/metro")
+const { withLocalPiiMetro } = require("@local-pii/core/metro")
 const path = require("path")
 
 const projectRoot = __dirname

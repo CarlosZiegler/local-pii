@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
 import type { ModelMessage } from "@tanstack/ai/client"
-import { createAnonymizer } from "local-pii"
+import { createAnonymizer } from "@local-pii/core"
 import { describe, expect, it, vi } from "vitest"
 import { TanStackChat } from "./tanstack-chat"
 import { createTanStackPlaygroundConnection } from "./tanstack-playground-connection"

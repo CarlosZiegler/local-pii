@@ -1,9 +1,9 @@
 import type { ConnectConnectionAdapter } from "@tanstack/ai-client"
-import { createAnonymizer } from "local-pii"
+import { createAnonymizer } from "@local-pii/core"
 import {
   piiConnection,
   UnsupportedTanStackSemanticContentError,
-} from "local-pii/tanstack"
+} from "@local-pii/core/tanstack"
 
 const session = createAnonymizer().createSession()
 declare const connection: ConnectConnectionAdapter

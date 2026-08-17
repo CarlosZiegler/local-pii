@@ -1,5 +1,5 @@
 import type { ConnectConnectionAdapter } from "@tanstack/ai-client"
-import { piiConnection } from "local-pii/tanstack"
+import { piiConnection } from "@local-pii/core/tanstack"
 import { withPlaygroundGate, type GenerationGate } from "./generation-gate"
 import { createBrowserConnection } from "./model/tanstack-connection"
 import type { BrowserGenerationRuntime } from "./model/types"

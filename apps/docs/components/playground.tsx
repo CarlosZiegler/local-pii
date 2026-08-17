@@ -13,12 +13,12 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Progress } from "@/components/ui/progress"
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs"
-import type { NerBackend, PiiType } from "local-pii"
+import type { NerBackend, PiiType } from "@local-pii/core"
 import {
   rampartAssets,
   rampartWeb,
   type RampartWebOptions,
-} from "local-pii/web"
+} from "@local-pii/core/web"
 import {
   ChevronsUpDownIcon,
   CpuIcon,

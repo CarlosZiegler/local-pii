@@ -3,7 +3,7 @@
  *
  * This entry point is pure TypeScript and imports NO native modules, so it
  * works in React Native, Node and the browser. To add the Rampart NER model
- * on device, import `rampart()` from the `local-pii/expo` subpath.
+ * on device, import `rampart()` from the `@local-pii/core/expo` subpath.
  */
 
 export { createAnonymizer } from "./anonymizer"
@@ -34,7 +34,7 @@ export { urlDetector } from "./detectors/url"
 export { hashed, sequential, token } from "./placeholder/strategies"
 
 // NER — the noop default plus the runtime-agnostic Rampart core (inject an
-// `onnxruntime-common`-compatible module; `local-pii/expo` wires RN for you).
+// `onnxruntime-common`-compatible module; `@local-pii/core/expo` wires RN for you).
 export { noopNer } from "./ner/backend"
 export { createRampartNer } from "./ner/rampart"
 export type {

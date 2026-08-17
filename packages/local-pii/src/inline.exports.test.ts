@@ -13,7 +13,7 @@ interface PackageManifest {
   >
 }
 
-describe("local-pii/inline public subpath", () => {
+describe("@local-pii/core/inline public subpath", () => {
   it("maps the public subpath to ESM, CommonJS, and declarations", async () => {
     const path = fileURLToPath(new URL("../package.json", import.meta.url))
     const manifest = JSON.parse(await readFile(path, "utf8")) as PackageManifest

@@ -53,8 +53,8 @@ async function resolveModelPath(model: number | string): Promise<string> {
  * work in Expo Go — and Metro configured via `withLocalPiiMetro`.
  *
  * ```ts
- * import { createAnonymizer } from "local-pii"
- * import { rampart } from "local-pii/expo"
+ * import { createAnonymizer } from "@local-pii/core"
+ * import { rampart } from "@local-pii/core/expo"
  *
  * const pii = createAnonymizer({
  *   ner: rampart({ model: require("@local-pii/model-rampart/assets/rampart-q4.onnx") }),

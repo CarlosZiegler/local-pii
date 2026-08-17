@@ -1,5 +1,5 @@
 {
-  "name": "local-pii",
+  "name": "@local-pii/core",
   "version": "0.1.0",
   "description": "Adapter-first PII protection for Expo, React Native, browsers, and Node. Protect personal information before a model boundary, then restore it inside the caller's trust boundary.",
   "keywords": [
@@ -15,11 +15,26 @@
     "gdpr"
   ],
   "license": "MIT",
+  "author": "Carlos Ricardo Ziegler <carlos.ziegler@zietec.io>",
+  "homepage": "https://github.com/CarlosZiegler/local-pii#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CarlosZiegler/local-pii.git",
+    "directory": "packages/local-pii"
+  },
+  "bugs": {
+    "url": "https://github.com/CarlosZiegler/local-pii/issues"
+  },
   "engines": {
     "node": "^20.19.0 || >=22.12.0"
   },
   "type": "module",
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org"
+  },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -69,10 +84,12 @@
   },
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "LICENSE"
   ],
   "scripts": {
     "build": "rslib build",
+    "prepublishOnly": "rslib build",
     "dev": "rslib build --watch",
     "test": "vitest run",
     "test:matrix": "bun run build && node scripts/verify-import-matrix.mjs && tsc -p test/import-matrix/tsconfig.node.json && tsc -p test/import-matrix/tsconfig.bundler.json",

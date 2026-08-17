@@ -1,4 +1,4 @@
-import type { AnonymizeResult, PiiSession, RehydrateOptions } from "local-pii"
+import type { AnonymizeResult, PiiSession, RehydrateOptions } from "@local-pii/core"
 import { managedGeneration } from "./model/browser-generation-runtime"
 import { assertProtectedBrowserRequest } from "./model/protected-request"
 import type {

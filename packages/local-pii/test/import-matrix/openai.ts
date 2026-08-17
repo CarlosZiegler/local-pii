@@ -1,9 +1,9 @@
-import { createAnonymizer } from "local-pii"
+import { createAnonymizer } from "@local-pii/core"
 import {
   createPiiChat,
   PiiOpenAIHelperError,
   withPiiOpenAI,
-} from "local-pii/openai"
+} from "@local-pii/core/openai"
 
 const session = createAnonymizer().createSession()
 const client = {

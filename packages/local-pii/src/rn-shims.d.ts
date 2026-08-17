@@ -1,5 +1,5 @@
 // Minimal ambient declarations for the optional React Native / Expo peer
-// modules the `local-pii/expo` and `local-pii/metro` subpaths use. They let
+// modules the `@local-pii/core/expo` and `@local-pii/core/metro` subpaths use. They let
 // the glue typecheck without installing native packages (which need an Expo
 // app). The real packages provide richer types when present in a consumer app.
 

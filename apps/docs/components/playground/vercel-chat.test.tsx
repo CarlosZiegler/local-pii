@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from "@testing-library/react"
 import userEvent from "@testing-library/user-event"
-import type { NerBackend } from "local-pii"
+import type { NerBackend } from "@local-pii/core"
 import { describe, expect, it, vi } from "vitest"
 import type {
   BrowserGenerationRuntime,

@@ -1,5 +1,5 @@
-import { createAnonymizer } from "local-pii"
-import { withPii } from "local-pii/ai-sdk"
+import { createAnonymizer } from "@local-pii/core"
+import { withPii } from "@local-pii/core/ai-sdk"
 import type { LanguageModel } from "ai"
 import { describe, expect, it, vi } from "vitest"
 import { createFakeBrowserRuntime } from "./fake-runtime"

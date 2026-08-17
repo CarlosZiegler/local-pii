@@ -1,0 +1,102 @@
+name: Release (npm)
+
+# Publishes @local-pii/model-rampart and local-pii to npm with:
+#   - Trusted Publishing (OIDC): NO long-lived npm token stored anywhere
+#   - Provenance attestations (--provenance): verifiable link to this repo + commit
+#   - Integrity-pinned model download (fetch-model.mjs verifies SHA-256)
+#
+# SECURITY NOTE: for maximum hardening, replace the `@vN` action refs below with
+# full commit SHAs (pin-to-SHA), e.g. `actions/checkout@<40-char-sha> # v4`.
+# Tags are mutable and can be hijacked; SHAs cannot.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build + pack only, do NOT publish"
+        type: boolean
+        default: true
+
+# Least privilege. id-token:write is REQUIRED for OIDC trusted publishing
+# and for signing provenance attestations. Nothing else is granted.
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Optional: gate behind a protected GitHub Environment (manual approval,
+    # branch restrictions). Create it in repo Settings > Environments.
+    environment: npm-publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: "1.3.14"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          registry-url: "https://registry.npmjs.org"
+
+      # Trusted Publishing + provenance need npm >= 11.5. The runner ships an
+      # older npm, so upgrade to the latest (npm 12) before publishing.
+      - name: Upgrade to npm 12
+        run: |
+          npm install -g npm@latest
+          npm --version
+
+      # --frozen-lockfile: install EXACTLY what bun.lock pins. No drift, no
+      # surprise transitive upgrades (the supply-chain guardrail at install time).
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # Model assets are gitignored; fetch them (SHA-256 verified) so they are
+      # included in the @local-pii/model-rampart tarball.
+      - name: Fetch model assets (SHA-256 pinned)
+        run: bun run fetch-model
+
+      - name: Typecheck, lint, test, build (local-pii)
+        run: |
+          bun run --cwd packages/local-pii typecheck
+          bun run --cwd packages/local-pii lint
+          bun run --cwd packages/local-pii test
+          bun run --cwd packages/local-pii build
+
+      # Verify signatures/attestations of installed deps before we publish.
+      - name: Audit dependency signatures
+        run: npm audit signatures
+        continue-on-error: true
+
+      - name: Pack (dry-run preview)
+        run: |
+          npm pack --dry-run -w packages/model-rampart
+          npm pack --dry-run -w packages/local-pii
+
+      # ---- Publish (skipped on a dry_run dispatch) ----
+      # No NODE_AUTH_TOKEN: OIDC trusted publishing mints a short-lived token.
+      # Requires a Trusted Publisher configured for each package on npmjs.com
+      # (Package settings > Trusted Publishing): repo CarlosZiegler/local-pii,
+      # workflow .github/workflows/release.yml, environment npm-publish.
+      - name: Publish @local-pii/model-rampart
+        if: ${{ github.event_name == 'release' || inputs.dry_run == false }}
+        run: npm publish --provenance --access public
+        working-directory: packages/model-rampart
+
+      - name: Publish local-pii
+        if: ${{ github.event_name == 'release' || inputs.dry_run == false }}
+        run: npm publish --provenance --access public
+        working-directory: packages/local-pii

@@ -3,14 +3,30 @@
   "version": "0.0.1",
   "description": "Rampart Q4 ONNX PII model + tokenizer assets for local-pii. Model by National Design Studio, licensed CC BY 4.0.",
   "license": "CC-BY-4.0",
+  "author": "Carlos Ricardo Ziegler <carlos.ziegler@zietec.io>",
+  "homepage": "https://github.com/CarlosZiegler/local-pii#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/CarlosZiegler/local-pii.git",
+    "directory": "packages/model-rampart"
+  },
+  "bugs": {
+    "url": "https://github.com/CarlosZiegler/local-pii/issues"
+  },
   "main": "index.js",
   "types": "index.d.ts",
   "sideEffects": false,
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org"
+  },
   "files": [
     "assets",
     "index.js",
     "index.d.ts",
-    "NOTICE.md"
+    "NOTICE.md",
+    "LICENSE"
   ],
   "scripts": {
     "fetch": "node ../../scripts/fetch-model.mjs"

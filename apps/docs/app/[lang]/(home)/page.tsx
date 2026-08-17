@@ -15,7 +15,7 @@ export async function generateMetadata({
 }): Promise<Metadata> {
   const { lang } = await params
   const s = getLanding(lang)
-  return { title: "local-pii", description: s.sub }
+  return { title: "@local-pii/core", description: s.sub }
 }
 
 export default async function HomePage({

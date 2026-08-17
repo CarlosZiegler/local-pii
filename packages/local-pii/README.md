@@ -10,9 +10,9 @@ mapping stays inside the caller's trust boundary.
 ## Quickstart: the canonical flow
 
 ```ts
-import { createAnonymizer, token } from "local-pii"
-import { rampartWeb } from "local-pii/web"
-import { runInlineText } from "local-pii/inline"
+import { createAnonymizer, token } from "@local-pii/core"
+import { rampartWeb } from "@local-pii/core/web"
+import { runInlineText } from "@local-pii/core/inline"
 
 const privacy = createAnonymizer({
   detection: rampartWeb(),
@@ -41,7 +41,7 @@ bun add local-pii onnxruntime-web @local-pii/model-rampart
 
 The quickstart uses browser Rampart, whose optional peers are
 `onnxruntime-web` and `@local-pii/model-rampart`. The deterministic pipeline
-works with only `local-pii` in React Native, Node, and the browser.
+works with only `@local-pii/core` in React Native, Node, and the browser.
 
 ## Detection on Expo and the browser (Rampart)
 
@@ -56,15 +56,15 @@ Configure Metro with the actual helper name:
 
 ```js
 const { getDefaultConfig } = require("expo/metro-config")
-const { withLocalPiiMetro } = require("local-pii/metro")
+const { withLocalPiiMetro } = require("@local-pii/core/metro")
 module.exports = withLocalPiiMetro(getDefaultConfig(__dirname))
 ```
 
 Then configure the Detection adapter:
 
 ```ts
-import { createAnonymizer } from "local-pii"
-import { rampart } from "local-pii/expo"
+import { createAnonymizer } from "@local-pii/core"
+import { rampart } from "@local-pii/core/expo"
 
 const privacy = createAnonymizer({
   detection: rampart({
@@ -76,7 +76,7 @@ const privacy = createAnonymizer({
 This requires a dev client / prebuild, not Expo Go. A configured Detection
 model fails closed by default when load or inference fails. Set `strict: false`
 only when deterministic-only degradation is an intentional product policy.
-The browser equivalent is `detection: rampartWeb()` from `local-pii/web`.
+The browser equivalent is `detection: rampartWeb()` from `@local-pii/core/web`.
 Zero-config browser loading fetches the 14.7 MB Rampart artifacts (and runtime
 support files) on first use; that download has no user content. Self-host or
 pass bundled assets for production.
@@ -110,7 +110,7 @@ migrate those messages to text or a supported structured value.
 ## Placeholder strategies
 
 ```ts
-import { hashed, sequential, token } from "local-pii"
+import { hashed, sequential, token } from "@local-pii/core"
 
 sequential() // [EMAIL_1], readable and stable within one session
 hashed({ secret }) // keyed equality without exposing the value

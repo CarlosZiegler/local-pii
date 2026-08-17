@@ -31,7 +31,7 @@ interface OrtEnv {
 
 async function fetchText(url: string): Promise<string> {
   const res = await fetch(url)
-  if (!res.ok) throw new Error(`local-pii/web: GET ${url} -> ${res.status}`)
+  if (!res.ok) throw new Error(`@local-pii/core/web: GET ${url} -> ${res.status}`)
   return res.text()
 }
 
@@ -43,8 +43,8 @@ async function fetchText(url: string): Promise<string> {
  * `vocab`, `labels`, and `wasmPaths`).
  *
  * ```ts
- * import { createAnonymizer } from "local-pii"
- * import { rampartWeb } from "local-pii/web"
+ * import { createAnonymizer } from "@local-pii/core"
+ * import { rampartWeb } from "@local-pii/core/web"
  * const pii = createAnonymizer({ ner: rampartWeb() })
  * ```
  */

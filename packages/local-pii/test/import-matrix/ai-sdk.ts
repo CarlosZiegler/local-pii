@@ -1,5 +1,5 @@
-import { createAnonymizer } from "local-pii"
-import { piiMiddleware, withPii } from "local-pii/ai-sdk"
+import { createAnonymizer } from "@local-pii/core"
+import { piiMiddleware, withPii } from "@local-pii/core/ai-sdk"
 
 const session = createAnonymizer().createSession()
 declare const model: Parameters<typeof withPii>[0]

@@ -2,7 +2,7 @@ import {
   createAnonymizer,
   type DetectionModel,
   type NerBackend,
-} from "local-pii"
+} from "@local-pii/core"
 
 declare const detection: DetectionModel
 const legacy: NerBackend = detection

@@ -4,8 +4,8 @@ import {
   type StreamChunk,
 } from "@tanstack/ai/client"
 import type { RunAgentInputContext } from "@tanstack/ai-client"
-import { createAnonymizer } from "local-pii"
-import { piiConnection } from "local-pii/tanstack"
+import { createAnonymizer } from "@local-pii/core"
+import { piiConnection } from "@local-pii/core/tanstack"
 import { describe, expect, it, vi } from "vitest"
 import { createFakeBrowserRuntime } from "./fake-runtime"
 import { managedGeneration } from "./browser-generation-runtime"

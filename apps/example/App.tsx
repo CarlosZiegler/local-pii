@@ -17,7 +17,7 @@ import {
   type AnonymizeResult,
   type Entity,
   type EntitySource,
-} from "local-pii"
+} from "@local-pii/core"
 import { callMockLlm } from "./src/llm"
 
 const SAMPLE =
@@ -55,7 +55,7 @@ export default function App() {
       // Lazily require the native ONNX runtime so deterministic-only mode keeps
       // working in Expo Go when Detection is off.
       const { rampart } =
-        require("local-pii/expo") as typeof import("local-pii/expo")
+        require("@local-pii/core/expo") as typeof import("@local-pii/core/expo")
       return {
         mode: "detection" as const,
         anonymizer: createAnonymizer({

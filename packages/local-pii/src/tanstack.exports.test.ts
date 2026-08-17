@@ -13,7 +13,7 @@ interface PackageManifest {
   >
 }
 
-describe("local-pii/tanstack public subpath", () => {
+describe("@local-pii/core/tanstack public subpath", () => {
   it("maps the public subpath to ESM, CommonJS, and declarations", async () => {
     const path = fileURLToPath(new URL("../package.json", import.meta.url))
     const manifest = JSON.parse(await readFile(path, "utf8")) as PackageManifest

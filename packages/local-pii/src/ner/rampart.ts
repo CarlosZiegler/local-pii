@@ -57,7 +57,7 @@ function idTensor(ort: OrtModule, ids: readonly number[]): OrtTensor {
  * The Rampart ONNX NER backend. Tokenizes with the bundled WordPiece tokenizer,
  * runs the model over 512-token windows, and decodes BIO logits into entities
  * with original-text offsets. Runtime-agnostic via the injected `ort` module;
- * `local-pii/expo` wires the React Native runtime and model asset for you.
+ * `@local-pii/core/expo` wires the React Native runtime and model asset for you.
  */
 export function createRampartNer(config: RampartNerConfig): NerBackend {
   const { ort, labels } = config

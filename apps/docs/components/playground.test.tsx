@@ -49,7 +49,7 @@ vi.mock("onnxruntime-web/wasm", () => ({
   default: {},
 }))
 
-vi.mock("local-pii/web", () => ({
+vi.mock("@local-pii/core/web", () => ({
   rampartAssets: { labels: [], vocab: [] },
   rampartWeb: detectionHarness.rampartWeb,
 }))

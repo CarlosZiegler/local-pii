@@ -1,10 +1,10 @@
-import { createAnonymizer, token } from "local-pii"
+import { createAnonymizer, token } from "@local-pii/core"
 import {
   runInline,
   runInlineJson,
   runInlineText,
   runInlineTextStream,
-} from "local-pii/inline"
+} from "@local-pii/core/inline"
 
 const anonymizer = createAnonymizer({ placeholders: token() })
 const session = anonymizer.createSession()
