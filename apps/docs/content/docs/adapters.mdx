@@ -7,13 +7,13 @@ Adapters implement the same protection flow: Detection → anonymizer → privac
 session → Generation adapter or inline callback → restored result. They protect
 semantic user content while preserving protocol control fields.
 
-## Inline calls — `local-pii/inline`
+## Inline calls — `@local-pii/core/inline`
 
 Use inline for any in-process Generation model. It protects, forwards the same
 `AbortSignal`, and restores in a `finally`-safe lifecycle:
 
 ```ts
-import { runInlineText } from "local-pii/inline"
+import { runInlineText } from "@local-pii/core/inline"
 
 const answer = await runInlineText({
   session: conversation,
@@ -31,14 +31,14 @@ borrowed and never cleared. Cleanup failures do not replace a primary model or
 abort failure.
 
 Generic inline callbacks and caller-supplied Detection models execute as
-trusted caller code. `local-pii` protects their Generation boundary; it does
+trusted caller code. `@local-pii/core` protects their Generation boundary; it does
 not sandbox them.
 
-## OpenAI / Grok — `local-pii/openai`
+## OpenAI / Grok — `@local-pii/core/openai`
 
 ```ts
 import OpenAI from "openai"
-import { withPiiOpenAI } from "local-pii/openai"
+import { withPiiOpenAI } from "@local-pii/core/openai"
 
 const client = withPiiOpenAI(new OpenAI({ apiKey }))
 const result = await client.chat.completions.create({
@@ -62,12 +62,12 @@ one wrapper per private conversation, or pass `{ session }` to make ownership
 explicit. `createPiiChat`, `rehydrateToolArgs`, and
 `createStreamingRehydrator` are available for a manual loop.
 
-## Vercel AI SDK — `local-pii/ai-sdk`
+## Vercel AI SDK — `@local-pii/core/ai-sdk`
 
 ```ts
 import { openai } from "@ai-sdk/openai"
 import { streamText } from "ai"
-import { withPii } from "local-pii/ai-sdk"
+import { withPii } from "@local-pii/core/ai-sdk"
 
 const model = withPii(openai("gpt-5.2"), { session: conversation })
 const result = streamText({ model, prompt })
@@ -86,11 +86,11 @@ instance and reuses it across calls. Create a new wrapper for a new private
 conversation. The browser playground pins `ai@7.0.57`,
 `@ai-sdk/react@4.0.61`, and `@browser-ai/core@3.0.0`.
 
-## TanStack AI — `local-pii/tanstack`
+## TanStack AI — `@local-pii/core/tanstack`
 
 ```ts
-import { createAnonymizer, token } from "local-pii"
-import { piiConnection } from "local-pii/tanstack"
+import { createAnonymizer, token } from "@local-pii/core"
+import { piiConnection } from "@local-pii/core/tanstack"
 
 const session = createAnonymizer({ placeholders: token() }).createSession()
 const connection = piiConnection(browserConnection, { session })

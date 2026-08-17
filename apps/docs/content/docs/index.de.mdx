@@ -13,9 +13,9 @@ bleiben Verantwortung des Aufrufers. Das private Mapping bleibt innerhalb
 seiner Vertrauensgrenze.
 
 ```ts
-import { createAnonymizer, token } from "local-pii"
-import { rampartWeb } from "local-pii/web"
-import { runInlineText } from "local-pii/inline"
+import { createAnonymizer, token } from "@local-pii/core"
+import { rampartWeb } from "@local-pii/core/web"
+import { runInlineText } from "@local-pii/core/inline"
 
 const privacy = createAnonymizer({
   detection: rampartWeb(),
@@ -37,13 +37,13 @@ sind Generierungsmodelle. `ner:` bleibt der Kompatibilitätsalias für
 ## Installation
 
 ```bash
-bun add local-pii onnxruntime-web @local-pii/model-rampart
+bun add @local-pii/core onnxruntime-web @local-pii/model-rampart
 ```
 
 Der Quickstart verwendet Rampart im Browser; dessen optionale Peer-Pakete sind
 `onnxruntime-web` und `@local-pii/model-rampart`. Die deterministische Erkennung
 (E-Mail, Telefon, Karten, IBAN, SSN, IP und URLs) funktioniert mit
-ausschließlich `local-pii` in React Native, Browser und Node.
+ausschließlich `@local-pii/core` in React Native, Browser und Node.
 
 ## Erkennungs-Adapter wählen
 

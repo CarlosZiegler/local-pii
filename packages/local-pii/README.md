@@ -36,7 +36,7 @@ but new code should use `detection:`.
 ## Install
 
 ```sh
-bun add local-pii onnxruntime-web @local-pii/model-rampart
+bun add @local-pii/core onnxruntime-web @local-pii/model-rampart
 ```
 
 The quickstart uses browser Rampart, whose optional peers are

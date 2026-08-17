@@ -12,9 +12,9 @@ do provedor; reasoning, metadados e opções opacos permanecem responsabilidade
 do chamador. O mapping privado fica dentro da fronteira de confiança dele.
 
 ```ts
-import { createAnonymizer, token } from "local-pii"
-import { rampartWeb } from "local-pii/web"
-import { runInlineText } from "local-pii/inline"
+import { createAnonymizer, token } from "@local-pii/core"
+import { rampartWeb } from "@local-pii/core/web"
+import { runInlineText } from "@local-pii/core/inline"
 
 const privacy = createAnonymizer({
   detection: rampartWeb(),
@@ -36,13 +36,13 @@ são modelos de Geração. `ner:` continua como alias de compatibilidade para
 ## Instalação
 
 ```bash
-bun add local-pii onnxruntime-web @local-pii/model-rampart
+bun add @local-pii/core onnxruntime-web @local-pii/model-rampart
 ```
 
 O quickstart usa Rampart no navegador, cujos peers opcionais são
 `onnxruntime-web` e `@local-pii/model-rampart`. A Detecção determinística
 (emails, telefones, cartões, IBAN, SSN, IP e URLs) funciona apenas com
-`local-pii` no React Native, navegador e Node.
+`@local-pii/core` no React Native, navegador e Node.
 
 ## Escolha um adaptador de Detecção
 

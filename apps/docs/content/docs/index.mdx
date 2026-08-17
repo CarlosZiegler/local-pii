@@ -12,9 +12,9 @@ boundary; opaque reasoning, metadata, and options remain caller responsibility.
 The private mapping stays inside the caller's trust boundary.
 
 ```ts
-import { createAnonymizer, token } from "local-pii"
-import { rampartWeb } from "local-pii/web"
-import { runInlineText } from "local-pii/inline"
+import { createAnonymizer, token } from "@local-pii/core"
+import { rampartWeb } from "@local-pii/core/web"
+import { runInlineText } from "@local-pii/core/inline"
 
 const privacy = createAnonymizer({
   detection: rampartWeb(),
@@ -35,12 +35,12 @@ Generation models. `ner:` remains a compatibility alias for `detection:`.
 ## Install
 
 ```bash
-bun add local-pii onnxruntime-web @local-pii/model-rampart
+bun add @local-pii/core onnxruntime-web @local-pii/model-rampart
 ```
 
 The quickstart uses browser Rampart, whose optional peers are
 `onnxruntime-web` and `@local-pii/model-rampart`. Deterministic Detection
-(emails, phones, cards, IBAN, SSN, IP, URLs) works with only `local-pii` in
+(emails, phones, cards, IBAN, SSN, IP, URLs) works with only `@local-pii/core` in
 React Native, the browser, and Node.
 
 ## Choose a Detection adapter

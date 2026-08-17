@@ -3,19 +3,19 @@ title: Browser Detection
 description: Run the Rampart Detection adapter in the browser with onnxruntime-web (WASM + WebGPU).
 ---
 
-The pure TypeScript core runs in the browser. `local-pii/web` supplies the
+The pure TypeScript core runs in the browser. `@local-pii/core/web` supplies the
 Rampart Q4 **Detection adapter**; it finds names, addresses, and IDs before a
 Generation model receives protected content.
 
 ```bash
-bun add local-pii onnxruntime-web @local-pii/model-rampart
+bun add @local-pii/core onnxruntime-web @local-pii/model-rampart
 ```
 
 ## Zero-config Detection
 
 ```ts
-import { createAnonymizer } from "local-pii"
-import { rampartWeb } from "local-pii/web"
+import { createAnonymizer } from "@local-pii/core"
+import { rampartWeb } from "@local-pii/core/web"
 
 const privacy = createAnonymizer({ detection: rampartWeb() })
 const { redactedText } = await privacy.anonymize("Hi, I'm João Silva")
@@ -29,8 +29,8 @@ production, prefer self-hosting with a pinned asset and Content Security Policy.
 ## Self-hosted
 
 ```ts
-import { createAnonymizer } from "local-pii"
-import { rampartAssets, rampartWeb } from "local-pii/web"
+import { createAnonymizer } from "@local-pii/core"
+import { rampartAssets, rampartWeb } from "@local-pii/core/web"
 
 const privacy = createAnonymizer({
   detection: rampartWeb({

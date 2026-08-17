@@ -20,7 +20,7 @@ Always on, precise, checksum/structure validated:
 Choose a subset:
 
 ```ts
-import { createAnonymizer, emailDetector, phoneDetector } from "local-pii"
+import { createAnonymizer, emailDetector, phoneDetector } from "@local-pii/core"
 
 createAnonymizer({ detectors: [emailDetector, phoneDetector] })
 createAnonymizer({ detectors: "none" }) // dictionary + NER only
@@ -48,7 +48,7 @@ per entry with `caseSensitive` / `wholeWord`).
 A detector maps text to entities. Deterministic detectors are pure and sync:
 
 ```ts
-import type { Detector } from "local-pii"
+import type { Detector } from "@local-pii/core"
 
 const zipDetector: Detector = {
   name: "us-zip",

@@ -20,7 +20,7 @@ Immer aktiv, präzise, checksum-/struktur-validiert:
 Eine Teilmenge auswählen:
 
 ```ts
-import { createAnonymizer, emailDetector, phoneDetector } from "local-pii"
+import { createAnonymizer, emailDetector, phoneDetector } from "@local-pii/core"
 
 createAnonymizer({ detectors: [emailDetector, phoneDetector] })
 createAnonymizer({ detectors: "none" }) // nur dictionary + NER
@@ -50,7 +50,7 @@ Ein Detektor bildet Text auf Entitäten ab. Deterministische Detektoren sind
 pur und synchron:
 
 ```ts
-import type { Detector } from "local-pii"
+import type { Detector } from "@local-pii/core"
 
 const zipDetector: Detector = {
   name: "us-zip",

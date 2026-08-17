@@ -7,14 +7,14 @@ Alle Adapter folgen demselben Ablauf: Erkennung → Anonymizer → Privacy-Sessi
 → Generierungs-Adapter oder Inline-Callback → rehydriertes Ergebnis. Semantische
 Inhalte werden geschützt, Protokoll-Steuerfelder bleiben erhalten.
 
-## Inline-Aufrufe — `local-pii/inline`
+## Inline-Aufrufe — `@local-pii/core/inline`
 
 Inline eignet sich für jedes Generierungsmodell im selben Prozess. Der Adapter
 reicht dasselbe `AbortSignal` weiter und rehydriert in einem
 `finally`-sicheren Lifecycle:
 
 ```ts
-import { runInlineText } from "local-pii/inline"
+import { runInlineText } from "@local-pii/core/inline"
 
 const answer = await runInlineText({
   session: conversation,
@@ -32,14 +32,14 @@ nie vom Adapter geleert. Ein Cleanup-Fehler ersetzt den primären Modell- oder
 Abort-Fehler nicht.
 
 Generische Inline-Callbacks und vom Aufrufer bereitgestellte Erkennungsmodelle
-werden als vertrauenswürdiger Aufrufercode ausgeführt. `local-pii` schützt ihre
+werden als vertrauenswürdiger Aufrufercode ausgeführt. `@local-pii/core` schützt ihre
 Generierungsgrenze; es führt sie nicht in einer Sandbox aus.
 
-## OpenAI / Grok — `local-pii/openai`
+## OpenAI / Grok — `@local-pii/core/openai`
 
 ```ts
 import OpenAI from "openai"
-import { withPiiOpenAI } from "local-pii/openai"
+import { withPiiOpenAI } from "@local-pii/core/openai"
 
 const client = withPiiOpenAI(new OpenAI({ apiKey }))
 const result = await client.chat.completions.create({
@@ -62,12 +62,12 @@ Aufrufe wiederverwendet. Pro privater Konversation wird ein Wrapper verwendet;
 alternativ macht `{ session }` den Besitz explizit. Für manuelle Loops gibt es
 `createPiiChat`, `rehydrateToolArgs` und `createStreamingRehydrator`.
 
-## Vercel AI SDK — `local-pii/ai-sdk`
+## Vercel AI SDK — `@local-pii/core/ai-sdk`
 
 ```ts
 import { openai } from "@ai-sdk/openai"
 import { streamText } from "ai"
-import { withPii } from "local-pii/ai-sdk"
+import { withPii } from "@local-pii/core/ai-sdk"
 
 const model = withPii(openai("gpt-5.2"), { session: conversation })
 const result = streamText({ model, prompt })
@@ -86,11 +86,11 @@ verwendet sie über Aufrufe hinweg. Für eine neue private Konversation wird ein
 neuer Wrapper erstellt. Der Browser-Playground pinnt `ai@7.0.57`,
 `@ai-sdk/react@4.0.61` und `@browser-ai/core@3.0.0`.
 
-## TanStack AI — `local-pii/tanstack`
+## TanStack AI — `@local-pii/core/tanstack`
 
 ```ts
-import { createAnonymizer, token } from "local-pii"
-import { piiConnection } from "local-pii/tanstack"
+import { createAnonymizer, token } from "@local-pii/core"
+import { piiConnection } from "@local-pii/core/tanstack"
 
 const session = createAnonymizer({ placeholders: token() }).createSession()
 const connection = piiConnection(browserConnection, { session })

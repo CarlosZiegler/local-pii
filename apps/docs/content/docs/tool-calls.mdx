@@ -47,7 +47,7 @@ values and no tool wrapper is needed.
 ## By hand
 
 ```ts
-import { createPiiChat } from "local-pii/openai"
+import { createPiiChat } from "@local-pii/core/openai"
 
 const chat = createPiiChat() // opaque tokens by default
 let messages = await chat.anonymizeMessages(userMessages)

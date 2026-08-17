@@ -18,7 +18,7 @@ Requires a dev client / prebuild, not Expo Go.
 
 ```js
 const { getDefaultConfig } = require("expo/metro-config")
-const { withLocalPiiMetro } = require("local-pii/metro")
+const { withLocalPiiMetro } = require("@local-pii/core/metro")
 
 module.exports = withLocalPiiMetro(getDefaultConfig(__dirname))
 ```
@@ -26,8 +26,8 @@ module.exports = withLocalPiiMetro(getDefaultConfig(__dirname))
 ## Configure Detection
 
 ```ts
-import { createAnonymizer } from "local-pii"
-import { rampart } from "local-pii/expo"
+import { createAnonymizer } from "@local-pii/core"
+import { rampart } from "@local-pii/core/expo"
 
 const privacy = createAnonymizer({
   detection: rampart({

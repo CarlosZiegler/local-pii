@@ -12,7 +12,7 @@ A **placeholder strategy** decides the token that replaces each value.
 | `token()`            | `PIIQ2X9K7M3TZ8R4EJ0V`  |    with `secret`     | **tool calls, JSON, structured output** |
 
 ```ts
-import { createAnonymizer, sequential, hashed, token } from "local-pii"
+import { createAnonymizer, sequential, hashed, token } from "@local-pii/core"
 
 createAnonymizer({ placeholders: sequential() }) // default
 createAnonymizer({ placeholders: hashed({ secret }) })
@@ -40,8 +40,8 @@ sessions and devices sharing the secret.
 Get a persisted device secret (Expo):
 
 ```ts
-import { getOrCreateDeviceSecret } from "local-pii/expo"
-import { hashed } from "local-pii"
+import { getOrCreateDeviceSecret } from "@local-pii/core/expo"
+import { hashed } from "@local-pii/core"
 
 const secret = await getOrCreateDeviceSecret() // expo-secure-store
 createAnonymizer({ placeholders: hashed({ secret }) })
@@ -58,7 +58,7 @@ An opaque ID looks like data the model must copy verbatim, so it survives — an
 lenient decoding recovers `O`/`0` and `I`/`L`/`1` confusions.
 
 ```ts
-import { token } from "local-pii"
+import { token } from "@local-pii/core"
 
 token() // random per distinct value; equality is visible inside one session
 token({ secret }) // HMAC — stable across sessions/devices

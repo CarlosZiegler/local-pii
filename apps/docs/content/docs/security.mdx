@@ -30,7 +30,7 @@ A plain hash of an email or phone is guessable: a provider holding the hash can
 recompute candidates offline. `hashed` and `token({ secret })` use the key you
 supply, so generate and store a strong random key; the strategies do not check
 its entropy. Expo apps that install `expo-crypto` and `expo-secure-store` can
-use `getOrCreateDeviceSecret()` from `local-pii/expo`. Without the key, a
+use `getOrCreateDeviceSecret()` from `@local-pii/core/expo`. Without the key, a
 correct guess cannot be verified.
 
 Tool arguments are a disclosure boundary. Rehydrating an argument gives your

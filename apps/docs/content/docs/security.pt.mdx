@@ -30,7 +30,7 @@ Um hash simples de email ou telefone pode ser adivinhado: o provedor pode
 recalcular candidatos offline. `hashed` e `token({ secret })` usam a chave
 fornecida por você; gere e armazene uma chave aleatória forte, pois as
 estratégias não validam sua entropia. Apps Expo que instalam `expo-crypto` e
-`expo-secure-store` podem usar `getOrCreateDeviceSecret()` de `local-pii/expo`.
+`expo-secure-store` podem usar `getOrCreateDeviceSecret()` de `@local-pii/core/expo`.
 Sem a chave, um palpite correto não é verificável.
 
 Argumentos de tools são uma fronteira de divulgação. Reidratá-los entrega o

@@ -52,7 +52,7 @@ Werten aus, ohne dass ein Tool-Wrapper nötig ist.
 ## Von Hand
 
 ```ts
-import { createPiiChat } from "local-pii/openai"
+import { createPiiChat } from "@local-pii/core/openai"
 
 const chat = createPiiChat() // standardmäßig opake Tokens
 let messages = await chat.anonymizeMessages(userMessages)

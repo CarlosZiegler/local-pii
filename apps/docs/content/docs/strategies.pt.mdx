@@ -12,7 +12,7 @@ Uma **estratégia de placeholder** decide o token que substitui cada valor.
 | `token()`            | `PIIQ2X9K7M3TZ8R4EJ0V`  |     com `secret`      | **tool calls, JSON, saída estruturada** |
 
 ```ts
-import { createAnonymizer, sequential, hashed, token } from "local-pii"
+import { createAnonymizer, sequential, hashed, token } from "@local-pii/core"
 
 createAnonymizer({ placeholders: sequential() }) // default
 createAnonymizer({ placeholders: hashed({ secret }) })
@@ -41,8 +41,8 @@ entre sessões e dispositivos que compartilhem o segredo.
 Obtenha um segredo de dispositivo persistido (Expo):
 
 ```ts
-import { getOrCreateDeviceSecret } from "local-pii/expo"
-import { hashed } from "local-pii"
+import { getOrCreateDeviceSecret } from "@local-pii/core/expo"
+import { hashed } from "@local-pii/core"
 
 const secret = await getOrCreateDeviceSecret() // expo-secure-store
 createAnonymizer({ placeholders: hashed({ secret }) })
@@ -62,7 +62,7 @@ então ele sobrevive — e a decodificação tolerante recupera confusões entre
 `O`/`0` e `I`/`L`/`1`.
 
 ```ts
-import { token } from "local-pii"
+import { token } from "@local-pii/core"
 
 token() // aleatório por valor distinto; igualdade aparece dentro da sessão
 token({ secret }) // HMAC — estável entre sessões/dispositivos

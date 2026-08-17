@@ -53,7 +53,7 @@ never one module-level session shared by users.
 
 Generic inline callbacks and caller-supplied Detection models are trusted
 caller code. They are part of your boundary and are not sandboxed by
-`local-pii`.
+`@local-pii/core`.
 
 Inline adapters resolve `session`, then `anonymizer`, then their default. Their
 cleanup runs even when a model or abort fails, with the primary failure taking

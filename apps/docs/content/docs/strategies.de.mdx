@@ -12,7 +12,7 @@ Eine **Placeholder-Strategie** entscheidet, welches Token jeden Wert ersetzt.
 | `token()`            | `PIIQ2X9K7M3TZ8R4EJ0V`  |        mit `secret`        | **Tool Calls, JSON, strukturierte Ausgabe** |
 
 ```ts
-import { createAnonymizer, sequential, hashed, token } from "local-pii"
+import { createAnonymizer, sequential, hashed, token } from "@local-pii/core"
 
 createAnonymizer({ placeholders: sequential() }) // Standard
 createAnonymizer({ placeholders: hashed({ secret }) })
@@ -42,8 +42,8 @@ geräteübergreifend (bei gemeinsamem Secret) dasselbe Token erhält.
 Ein persistiertes Device-Secret holen (Expo):
 
 ```ts
-import { getOrCreateDeviceSecret } from "local-pii/expo"
-import { hashed } from "local-pii"
+import { getOrCreateDeviceSecret } from "@local-pii/core/expo"
+import { hashed } from "@local-pii/core"
 
 const secret = await getOrCreateDeviceSecret() // expo-secure-store
 createAnonymizer({ placeholders: hashed({ secret }) })
@@ -63,7 +63,7 @@ deshalb — und ein nachsichtiges Decoding behebt `O`/`0`- und
 `I`/`L`/`1`-Verwechslungen.
 
 ```ts
-import { token } from "local-pii"
+import { token } from "@local-pii/core"
 
 token() // zufällig pro Wert; Gleichheit ist innerhalb der Session sichtbar
 token({ secret }) // HMAC — stabil über Sessions/Geräte hinweg

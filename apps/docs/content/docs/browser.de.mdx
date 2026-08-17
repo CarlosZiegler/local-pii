@@ -3,19 +3,19 @@ title: Browser-Erkennung
 description: Den Rampart-Erkennungsadapter im Browser mit onnxruntime-web (WASM + WebGPU) ausführen.
 ---
 
-Der reine TypeScript-Kern läuft im Browser. `local-pii/web` liefert den
+Der reine TypeScript-Kern läuft im Browser. `@local-pii/core/web` liefert den
 Rampart-Q4-**Erkennungsadapter** für Namen, Adressen und IDs, bevor ein
 Generierungsmodell geschützten Inhalt erhält.
 
 ```bash
-bun add local-pii onnxruntime-web @local-pii/model-rampart
+bun add @local-pii/core onnxruntime-web @local-pii/model-rampart
 ```
 
 ## Erkennung ohne Konfiguration
 
 ```ts
-import { createAnonymizer } from "local-pii"
-import { rampartWeb } from "local-pii/web"
+import { createAnonymizer } from "@local-pii/core"
+import { rampartWeb } from "@local-pii/core/web"
 
 const privacy = createAnonymizer({ detection: rampartWeb() })
 const { redactedText } = await privacy.anonymize("Hi, I'm João Silva")
@@ -30,8 +30,8 @@ und eine Content Security Policy vorzuziehen.
 ## Selbst hosten
 
 ```ts
-import { createAnonymizer } from "local-pii"
-import { rampartAssets, rampartWeb } from "local-pii/web"
+import { createAnonymizer } from "@local-pii/core"
+import { rampartAssets, rampartWeb } from "@local-pii/core/web"
 
 const privacy = createAnonymizer({
   detection: rampartWeb({
